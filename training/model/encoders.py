@@ -91,9 +91,10 @@ class VisionEncoder(nn.Module):
 
 class ProprioEncoder(nn.Module):
     """
-    Encodes robot proprioceptive state (joint positions, velocities, etc.) into a latent vector.
+    Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
+    Default input_dim=6 (3 Pos + 3 Rot).
     """
-    def __init__(self, input_dim, output_dim=256, hidden_dim=128):
+    def __init__(self, input_dim=6, output_dim=256, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),

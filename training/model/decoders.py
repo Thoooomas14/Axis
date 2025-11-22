@@ -3,36 +3,38 @@ import torch.nn as nn
 
 class ActionDecoder(nn.Module):
     """
-    Decodes the transformer output into robot actions (e.g., joint positions).
-    Usually attends to the last token or a specific 'action' token, 
-    or we can just pool the output. 
-    For simplicity, we'll assume we take the output corresponding to the *current* state tokens.
+    Decodes the transformer output into robot actions (End-Effector Pose/Delta).
+    Default output_dim=6 (3 Pos + 3 Rot).
     """
-    def __init__(self, embed_dim, action_dim):
+    def __init__(self, input_dim=256, output_dim=6, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Linear(embed_dim, action_dim)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
         )
 
     def forward(self, x):
         """
         Args:
-            x: Transformer output token(s) (B, EmbedDim) - usually pooled or specific token
+            x: Transformer output token(s) (B, EmbedDim)
         """
         return self.net(x)
 
-class LatentDecoder(nn.Module):
+class RequeryDecoder(nn.Module):
     """
-    Predicts the next latent state from the transformer output.
+    Predicts if the current sub-task is complete and a new goal is needed.
+    Outputs a logit (use sigmoid for probability).
     """
-    def __init__(self, embed_dim, latent_dim):
+    def __init__(self, embed_dim, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(embed_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(embed_dim, latent_dim)
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x):

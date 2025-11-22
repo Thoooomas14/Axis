@@ -4,7 +4,7 @@ from .encoders import VisionEncoder, GoalEncoder
 from .token_learner import TokenLearner
 from .latent import LatentQueue, LatentProjection
 from .transformer import AxisTransformer
-from .decoders import LatentDecoder
+from .decoders import RequeryDecoder
 from .adapters import RobotAdapter
 
 class AxisModel(nn.Module):
@@ -53,27 +53,35 @@ class AxisModel(nn.Module):
             num_layers=config.get('num_layers', 4)
         )
         
-        self.latent_decoder = LatentDecoder(
-            embed_dim=config.get('embed_dim', 256),
-            latent_dim=self.latent_dim
+        # --- Latent Output ---
+        # We use a simple linear projection (or Identity) to avoid "garbage" from a deep MLP
+        # without supervision. This forces the transformer output to be directly useful as memory.
+        embed_dim = config.get('embed_dim', 256)
+        if self.latent_dim == embed_dim:
+            self.latent_proj_out = nn.Identity()
+        else:
+            self.latent_proj_out = nn.Linear(embed_dim, self.latent_dim)
+        
+        self.requery_decoder = RequeryDecoder(
+            embed_dim=embed_dim
         )
 
         # --- Robot Adapters ---
-        # config['robots'] should be a dict: { 'robot_name': { 'proprio_dim': 7, 'action_dim': 7 } }
+        # config['robots'] should be a dict: { 'robot_name': { 'proprio_dim': 6, 'action_dim': 6 } }
         self.adapters = nn.ModuleDict()
         if 'robots' in config:
             for robot_name, robot_cfg in config['robots'].items():
                 self.adapters[robot_name] = RobotAdapter(
-                    proprio_dim=robot_cfg['proprio_dim'],
-                    action_dim=robot_cfg['action_dim'],
+                    proprio_input_dim=robot_cfg['proprio_dim'],
+                    action_output_dim=robot_cfg['action_dim'],
                     embed_dim=config.get('embed_dim', 256)
                 )
         else:
             # Fallback for backward compatibility or single robot mode
             # We create a 'default' adapter
             self.adapters['default'] = RobotAdapter(
-                proprio_dim=config.get('proprio_dim', 7),
-                action_dim=config.get('action_dim', 7),
+                proprio_input_dim=config.get('proprio_dim', 6),
+                action_output_dim=config.get('action_dim', 6),
                 embed_dim=config.get('embed_dim', 256)
             )
 
@@ -88,6 +96,7 @@ class AxisModel(nn.Module):
         Returns:
             pred_action: (B, action_dim)
             next_latent: (B, latent_dim)
+            requery_logit: (B, 1)
         """
         B = images.shape[0]
         
@@ -124,10 +133,14 @@ class AxisModel(nn.Module):
         last_token = output_tokens[:, -1, :]
         
         pred_action = adapter.decode_action(last_token) # Robot Specific
-        next_latent = self.latent_decoder(last_token)
+        
+        # Simple projection for latent state (Identity if dims match)
+        next_latent = self.latent_proj_out(last_token)
+        
+        requery_logit = self.requery_decoder(last_token)
 
         # 8. Update Queue (Inference only usually)
         if update_queue:
             self.latent_queue.enqueue(next_latent.detach())
 
-        return pred_action, next_latent
+        return pred_action, next_latent, requery_logit

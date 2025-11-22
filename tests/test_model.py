@@ -10,9 +10,11 @@ from training.model.axis_v1 import AxisModel
 def test_axis_model_forward():
     print("Testing AxisModel Forward Pass...")
     
+    device = 'cpu'
+    
     # Configuration
     config = {
-        'device': 'cpu',
+        'device': device,
         'goal_dim': 768,
         'cond_dim': 256,
         'vision_feature_dim': 256,
@@ -24,8 +26,8 @@ def test_axis_model_forward():
         'num_layers': 2,
         # Multi-robot config
         'robots': {
-            'ur3e': {'proprio_dim': 7, 'action_dim': 7},
-            'widowx': {'proprio_dim': 8, 'action_dim': 8}
+            'default': {'proprio_dim': 6, 'action_dim': 6},
+            # 'widowx': {'proprio_dim': 6, 'action_dim': 6}
         }
     }
 
@@ -34,34 +36,34 @@ def test_axis_model_forward():
 
     # Dummy Inputs
     B = 2
-    images = torch.randn(B, 3, 128, 128) # (B, C, H, W)
-    goal = torch.randn(B, 768)           # (B, GoalDim)
-
-    # --- Test Robot 1: UR3e ---
-    print("Testing Robot: UR3e")
-    proprio_ur3e = torch.randn(B, 7)
+    # Test 1: Default Robot (UR3e/Generic)
+    print("Testing Robot: Default (6D EE Pose)")
+    robot_name = 'default' 
     
-    # Check Latent Queue Init
+    # Initial State
+    # Input images: (B, C, H, W)
+    images = torch.randn(B, 3, 128, 128)
+    # Proprio: (B, 6) - EE Pose
+    proprio = torch.randn(B, 6)
+    # Goal: (B, 768)
+    goal = torch.randn(B, 768)
+
     print(f"Initial Queue Shape: {model.latent_queue.queue.shape}")
 
-    # Forward Pass 1
-    print("Running Forward Pass 1 (UR3e)...")
-    action, next_latent = model(images, proprio_ur3e, goal, robot_name='ur3e', update_queue=True)
+    # Forward Pass
+    print(f"Running Forward Pass ({robot_name})...")
+    action, next_latent, requery_logit = model(images, proprio, goal, robot_name=robot_name)
     
     print(f"Action Shape: {action.shape}")
-    assert action.shape == (B, 7)
-    assert next_latent.shape == (B, 256)
-
-    # --- Test Robot 2: WidowX ---
-    print("Testing Robot: WidowX")
-    proprio_widowx = torch.randn(B, 8)
+    print(f"Requery Logit Shape: {requery_logit.shape}")
     
-    # Forward Pass 2
-    print("Running Forward Pass 2 (WidowX)...")
-    action2, next_latent2 = model(images, proprio_widowx, goal, robot_name='widowx', update_queue=True)
-    
-    print(f"Action Shape: {action2.shape}")
-    assert action2.shape == (B, 8)
+    # Verify Shapes
+    # Action should be (B, 6)
+    assert action.shape == (B, 6), f"Expected action shape ({B}, 6), got {action.shape}"
+    # Latent should be (B, 256)
+    assert next_latent.shape == (B, 256), f"Expected latent shape ({B}, 256), got {next_latent.shape}"
+    # Requery should be (B, 1)
+    assert requery_logit.shape == (B, 1), f"Expected requery shape ({B}, 1), got {requery_logit.shape}"
     
     print("Test Passed!")
 
