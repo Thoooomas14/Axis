@@ -1,5 +1,6 @@
 import tensorflow_io as tfio # Register GCS filesystem
 import tensorflow as tf
+import torch
 from torch.utils.data import IterableDataset
 import tensorflow_datasets as tfds
 import numpy as np
@@ -18,7 +19,11 @@ class RTXDataset(IterableDataset):
 
         # Load the dataset builder
         try:
-            self.builder = tfds.builder(dataset_name, data_dir=data_dir)
+            # Force loading from local directory to avoid GCS checks
+            if data_dir:
+                self.builder = tfds.builder_from_directory(data_dir)
+            else:
+                self.builder = tfds.builder(dataset_name)
         except Exception as e:
             print(f"Error loading dataset {dataset_name}: {e}")
             raise
@@ -73,10 +78,11 @@ class RTXDataset(IterableDataset):
             
         # Ensure 6D
         proprio = tf.reshape(proprio, [-1])
-        if tf.shape(proprio)[0] != 6:
-             # If we got something else (e.g. 7D with gripper, or 3D), handle it.
-             # For now, just pad/slice to 6 for safety in this generic loader.
-             proprio = tf.pad(proprio, [[0, max(0, 6 - tf.shape(proprio)[0])]])[:6]
+        # Use tf.pad to ensure at least 6 elements, then slice
+        # This works in graph mode without explicit python conditionals on shape
+        pad_amount = tf.maximum(0, 6 - tf.shape(proprio)[0])
+        proprio = tf.pad(proprio, [[0, pad_amount]])
+        proprio = proprio[:6]
 
         # Extract Action (EE Pose Target or Delta)
         # We want 6D output.
@@ -85,22 +91,35 @@ class RTXDataset(IterableDataset):
         if 'action' in step:
             raw_action = step['action']
             if isinstance(raw_action, dict):
-                # Look for world vector / pose delta
-                parts = []
-                if 'world_vector' in raw_action: 
-                    parts.append(raw_action['world_vector']) # Usually 3D
-                if 'rotation_delta' in raw_action:
-                    parts.append(raw_action['rotation_delta']) # Usually 3D
+                # Look for world_vector / rotation_delta
+                # We need to handle this carefully in graph mode.
+                # Assuming structure is consistent across dataset, keys should be present.
+                # If keys are optional, we'd need more complex logic.
+                # For fractal20220817, 'world_vector' and 'rotation_delta' are usually present.
                 
-                if parts:
+                parts = []
+                # Check keys existence is tricky in graph mode if structure varies.
+                # But for a specific dataset, it's usually fixed.
+                # We'll try to access them directly if we know the dataset.
+                # Or use try/except block? No, not in graph.
+                # We'll assume standard RT-X structure.
+                
+                # Note: In graph mode, dict keys are usually fixed.
+                if 'world_vector' in raw_action: 
+                    parts.append(raw_action['world_vector']) 
+                if 'rotation_delta' in raw_action:
+                    parts.append(raw_action['rotation_delta'])
+                
+                if len(parts) > 0:
                     action = tf.concat(parts, axis=-1)
             else:
                 action = raw_action
                 
         # Ensure 6D
         action = tf.reshape(action, [-1])
-        if tf.shape(action)[0] != 6:
-             action = tf.pad(action, [[0, max(0, 6 - tf.shape(action)[0])]])[:6]
+        pad_amount_action = tf.maximum(0, 6 - tf.shape(action)[0])
+        action = tf.pad(action, [[0, pad_amount_action]])
+        action = action[:6]
 
 
         # Extract Language Instruction
@@ -128,6 +147,7 @@ class RTXDataset(IterableDataset):
         ds = ds.flat_map(lambda x: x['steps'])
         
         ds = ds.shuffle(self.shuffle_buffer_size)
+        ds = ds.repeat() # Repeat indefinitely
         ds = ds.map(self._process_step, num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.batch(self.batch_size)
         ds = ds.prefetch(tf.data.AUTOTUNE)
@@ -160,14 +180,23 @@ class RTXDataset(IterableDataset):
                 
                 # Use current proprio as start/target pose proxy
                 current_pose = proprio[i].numpy()
-                # Pad to 7 if needed (proprio is 6D, pose is 7D [x,y,z,qx,qy,qz,qw])
-                # We'll just pad with 0 or 1 for qw
-                pose_7d = np.zeros(7)
-                pose_7d[:6] = current_pose
-                pose_7d[6] = 1.0 # qw
+                current_action = action[i].numpy()
+                
+                # Start Pose (7D)
+                start_pose_7d = np.zeros(7)
+                start_pose_7d[:6] = current_pose
+                start_pose_7d[6] = 1.0 # qw
+
+                # End Pose (7D) - Derive from Action
+                # Action is usually a delta. We'll add it to the start pose position.
+                # This ensures the "Goal" implies movement in the direction of the ground truth action.
+                end_pose_7d = np.zeros(7)
+                end_pose_7d[:3] = current_pose[:3] + current_action[:3] # Add position delta
+                end_pose_7d[3:6] = current_pose[3:6] # Keep rotation same for simplicity (or add if simple)
+                end_pose_7d[6] = 1.0
                 
                 # Mock goal
-                goal_vec = mocker.encode_goal(start_pose=pose_7d, end_pose=pose_7d, instruction=instr)
+                goal_vec = mocker.encode_goal(start_pose=start_pose_7d, end_pose=end_pose_7d, instruction=instr)
                 batch_goals.append(goal_vec)
             
             goal_embs = torch.tensor(np.array(batch_goals), dtype=torch.float32)

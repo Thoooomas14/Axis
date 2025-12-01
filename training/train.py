@@ -90,13 +90,45 @@ def train(args):
     # Create checkpoint dir
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
+    # --- Resume from Checkpoint ---
+    start_step = 0
+    # Find latest checkpoint
+    checkpoints = [f for f in os.listdir(args.checkpoint_dir) if f.endswith('.pt')]
+    if checkpoints:
+        # Sort by step number (checkpoint_1000.pt)
+        checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+        latest_checkpoint = checkpoints[-1]
+        checkpoint_path = os.path.join(args.checkpoint_dir, latest_checkpoint)
+        
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_step = checkpoint['step']
+        print(f"Resumed at step {start_step}")
+    else:
+        print("No checkpoint found. Starting from scratch.")
+
     print("Starting training...")
     # We iterate by steps since RLDS datasets can be infinite or huge
-    pbar = tqdm(total=args.steps)
+    pbar = tqdm(total=args.steps, initial=start_step)
+    
+    import time
+    start_time = time.time()
+
+    step = start_step # Initialize step counter
     
     for batch in dataset:
         if step >= args.steps:
             break
+        
+        # Check time limit
+        if args.time_limit_min > 0:
+            elapsed_min = (time.time() - start_time) / 60.0
+            if elapsed_min >= args.time_limit_min:
+                print(f"\nTime limit of {args.time_limit_min} minutes reached. Stopping.")
+                break
             
         images, proprio, action, goal_embs = batch
         
@@ -154,6 +186,7 @@ if __name__ == "__main__":
     parser.add_argument('--embeddings_path', type=str, default='instruction_embeddings.pkl')
     parser.add_argument('--mock', action='store_true', help='Use mock dataset')
     parser.add_argument('--data_dir', type=str, default=None, help='Directory to store/load dataset')
+    parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
     
     args = parser.parse_args()
     train(args)

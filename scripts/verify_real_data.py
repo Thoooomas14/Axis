@@ -13,7 +13,7 @@ def verify_real_data():
     
     # Arguments for a minimal run
     args = argparse.Namespace(
-        dataset='bridge', # Try bridge dataset
+        dataset='fractal20220817_data', # Use downloaded dataset
         batch_size=2,
         lr=1e-4,
         steps=5, # Run only 5 steps
@@ -25,7 +25,9 @@ def verify_real_data():
     )
     
     # Ensure data directory exists
-    data_dir = os.path.abspath('data')
+    # The zip file extracted to data/content/axis_data
+    # tfds.builder_from_directory requires the path to the specific version folder
+    data_dir = os.path.abspath('data/content/axis_data/fractal20220817_data/0.1.0')
     os.makedirs(data_dir, exist_ok=True)
     print(f"Downloading/Loading data to: {data_dir}")
     
