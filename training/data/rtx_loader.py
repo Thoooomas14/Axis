@@ -1,23 +1,24 @@
-import torch
+import tensorflow_io as tfio # Register GCS filesystem
+import tensorflow as tf
 from torch.utils.data import IterableDataset
 import tensorflow_datasets as tfds
-import tensorflow as tf
 import numpy as np
 
 class RTXDataset(IterableDataset):
     """
     PyTorch IterableDataset for loading RT-X / RLDS datasets via TensorFlow Datasets.
     """
-    def __init__(self, dataset_name, split='train', batch_size=1, image_size=(128, 128), shuffle_buffer_size=1000):
+    def __init__(self, dataset_name, split='train', batch_size=1, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
         self.image_size = image_size
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.data_dir = data_dir
 
         # Load the dataset builder
         try:
-            self.builder = tfds.builder(dataset_name)
+            self.builder = tfds.builder(dataset_name, data_dir=data_dir)
         except Exception as e:
             print(f"Error loading dataset {dataset_name}: {e}")
             raise
@@ -141,6 +142,34 @@ class RTXDataset(IterableDataset):
             images = torch.from_numpy(images)
             proprio = torch.from_numpy(proprio)
             action = torch.from_numpy(action)
-            # lang is numpy array of bytes/strings
             
-            yield images, proprio, action, lang
+            # Generate Mock Gemini Goal (77-dim)
+            # Since we are iterating batches of steps, we don't have easy access to the full episode start/end here
+            # without significant pipeline changes.
+            # For now, we will generate the goal on-the-fly using the current step's info as a proxy,
+            # or just random/default values to satisfy the interface.
+            # In a real training setup, we'd likely pre-compute this or use a dataset that has episode boundaries.
+            
+            from training.utils.gemini_mock import MockGeminiPlanner
+            mocker = MockGeminiPlanner()
+            
+            batch_goals = []
+            for i in range(len(lang)):
+                # Decode instruction bytes to string
+                instr = lang[i].decode('utf-8') if isinstance(lang[i], bytes) else str(lang[i])
+                
+                # Use current proprio as start/target pose proxy
+                current_pose = proprio[i].numpy()
+                # Pad to 7 if needed (proprio is 6D, pose is 7D [x,y,z,qx,qy,qz,qw])
+                # We'll just pad with 0 or 1 for qw
+                pose_7d = np.zeros(7)
+                pose_7d[:6] = current_pose
+                pose_7d[6] = 1.0 # qw
+                
+                # Mock goal
+                goal_vec = mocker.encode_goal(start_pose=pose_7d, end_pose=pose_7d, instruction=instr)
+                batch_goals.append(goal_vec)
+            
+            goal_embs = torch.tensor(np.array(batch_goals), dtype=torch.float32)
+            
+            yield images, proprio, action, goal_embs

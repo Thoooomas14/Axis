@@ -12,14 +12,14 @@ from training.train import train
 from training.data.rtx_loader import RTXDataset
 
 def mock_dataset_iter():
-    # Yield dummy batches: (images, proprio, action, instructions)
+    # Yield dummy batches: (images, proprio, action, goal_embs)
     # B=2
     while True:
         images = torch.randn(2, 3, 128, 128)
         proprio = torch.randn(2, 6) # 6D EE Pose
         action = torch.randn(2, 6) # 6D EE Pose Target
-        instructions = ["open drawer", "pick apple"]
-        yield images, proprio, action, instructions
+        goal_embs = torch.randn(2, 77) # Structured Goal
+        yield images, proprio, action, goal_embs
 
 def test_train_loop():
     print("Testing Training Loop...")
@@ -42,7 +42,8 @@ def test_train_loop():
             warmup_steps=1,
             save_interval=5,
             checkpoint_dir='tests/checkpoints',
-            embeddings_path='tests/dummy_embeddings.pkl'
+            embeddings_path='tests/dummy_embeddings.pkl',
+            mock=True
         )
         
         # Run training

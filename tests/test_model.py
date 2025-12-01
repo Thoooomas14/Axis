@@ -15,7 +15,7 @@ def test_axis_model_forward():
     # Configuration
     config = {
         'device': device,
-        'goal_dim': 768,
+        'goal_dim': 77,
         'cond_dim': 256,
         'vision_feature_dim': 256,
         'num_vision_tokens': 8,
@@ -45,8 +45,8 @@ def test_axis_model_forward():
     images = torch.randn(B, 3, 128, 128)
     # Proprio: (B, 6) - EE Pose
     proprio = torch.randn(B, 6)
-    # Goal: (B, 768)
-    goal = torch.randn(B, 768)
+    # Goal: (B, 77) - Structured Gemini Goal
+    goal = torch.randn(B, 77)
 
     print(f"Initial Queue Shape: {model.latent_queue.queue.shape}")
 

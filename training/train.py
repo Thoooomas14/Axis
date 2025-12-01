@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from training.model.axis_v1 import AxisModel
 from training.data.rtx_loader import RTXDataset
+from training.data.mock_loader import MockDataset
 from training.utils.scheduler import CosineAnnealingWarmupRestarts
 
 def train(args):
@@ -22,7 +23,7 @@ def train(args):
     # In a real project, load this from a yaml file
     config = {
         'device': device,
-        'goal_dim': 768,
+        'goal_dim': 77, # Structured Gemini Goal
         'cond_dim': 256,
         'vision_feature_dim': 256,
         'num_vision_tokens': 8,
@@ -49,22 +50,26 @@ def train(args):
             instruction_embeddings = pickle.load(f)
         print(f"Loaded {len(instruction_embeddings)} instruction embeddings.")
     else:
-        print(f"Warning: Embeddings file not found at {args.embeddings_path}. Using random embeddings.")
+        # print(f"Warning: Embeddings file not found at {args.embeddings_path}. Using random embeddings.")
         instruction_embeddings = {}
 
     # Dataset
-    # Note: We assume the dataset yields (image, proprio, instruction_text)
-    dataset = RTXDataset(
-        dataset_name=args.dataset, 
-        split='train', 
-        batch_size=args.batch_size,
-        image_size=(128, 128)
-    )
-    # Create a simple iterator since it's an IterableDataset
-    # In PyTorch DataLoader, we'd wrap this, but RTXDataset is already iterable.
-    # We can wrap it in a DataLoader if we want multi-process loading, 
-    # but TFDS usually handles prefetching well.
-    # Let's keep it simple for now.
+    if args.mock:
+        print("Using MOCK Dataset.")
+        dataset = MockDataset(
+            batch_size=args.batch_size,
+            image_size=(128, 128),
+            length=args.steps * args.batch_size # Ensure enough data
+        )
+    else:
+        # Note: We assume the dataset yields (image, proprio, instruction_text)
+        dataset = RTXDataset(
+            dataset_name=args.dataset, 
+            split='train', 
+            batch_size=args.batch_size,
+            image_size=(128, 128),
+            data_dir=args.data_dir
+        )
     
     # --- Optimizer & Scheduler ---
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -93,29 +98,13 @@ def train(args):
         if step >= args.steps:
             break
             
-        images, proprio, action, instructions = batch
+        images, proprio, action, goal_embs = batch
         
         # Move to device
         images = images.to(device)
         proprio = proprio.to(device)
         target_action = action.to(device)
-        
-        # Get Goal Embeddings
-        # instructions is a list/array of strings
-        goal_embs = []
-        for instr in instructions:
-            if isinstance(instr, bytes):
-                instr = instr.decode('utf-8')
-            
-            if instr in instruction_embeddings:
-                emb = instruction_embeddings[instr]
-            else:
-                # Fallback: Random or Zero
-                emb = torch.zeros(config['goal_dim']).numpy() # Should be consistent
-            
-            goal_embs.append(torch.tensor(emb))
-            
-        goal_embs = torch.stack(goal_embs).to(device)
+        goal_embs = goal_embs.to(device)
 
         optimizer.zero_grad()
         
@@ -163,6 +152,8 @@ if __name__ == "__main__":
     parser.add_argument('--save_interval', type=int, default=1000)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--embeddings_path', type=str, default='instruction_embeddings.pkl')
+    parser.add_argument('--mock', action='store_true', help='Use mock dataset')
+    parser.add_argument('--data_dir', type=str, default=None, help='Directory to store/load dataset')
     
     args = parser.parse_args()
     train(args)
