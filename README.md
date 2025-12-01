@@ -18,15 +18,14 @@ Axis is a PyTorch-based robot learning framework designed for real-time, adaptiv
    cd Axis
    ```
 
-2. **Create the environment:**
-   ```bash
-   # Using Conda (recommended)
-   conda env create -f environment.yml
-   conda activate axis
-   
-   # OR using pip
-   pip install -r requirements.txt
-   ```
+For detailed instructions, see the [Installation Guide](docs/installation.md).
+
+### Quick Setup (Conda)
+
+```bash
+conda env create -f environment.yml
+conda activate axis_env
+```
 
 ## Quick Start
 

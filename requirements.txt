@@ -3,3 +3,4 @@ torch==2.2.1
 tqdm
 tensorflow
 tensorflow_datasets
+tensorflow-io
