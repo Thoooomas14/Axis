@@ -85,62 +85,87 @@ class AxisModel(nn.Module):
                 embed_dim=config.get('embed_dim', 256)
             )
 
-    def forward(self, images, proprio, goal_embedding, robot_name='default', update_queue=True):
+    def forward(self, images, proprio, goal_embedding, robot_name='default', update_queue=True, use_memory=True):
         """
         Args:
-            images: (B, C, H, W)
-            proprio: (B, proprio_dim)
+            images: (B, Window, C, H, W)
+            proprio: (B, Window, proprio_dim)
             goal_embedding: (B, goal_dim)
-            robot_name: str, name of the robot to use (must be in self.adapters)
-            update_queue: Whether to update the latent queue (inference mode)
-        Returns:
-            pred_action: (B, action_dim)
-            next_latent: (B, latent_dim)
-            requery_logit: (B, 1)
+            robot_name: str
+            update_queue: bool
+            use_memory: bool
         """
-        B = images.shape[0]
+        B, W, C, H, _ = images.shape
         
         if robot_name not in self.adapters:
             raise ValueError(f"Robot '{robot_name}' not found in adapters: {list(self.adapters.keys())}")
         
         adapter = self.adapters[robot_name]
 
-        # 1. Encode Goal
+        # 1. Encode Goal (Shared across window)
         goal_cond = self.goal_encoder(goal_embedding) # (B, cond_dim)
+        # Expand goal for the window batch processing
+        goal_cond_expanded = goal_cond.unsqueeze(1).expand(-1, W, -1).reshape(B*W, -1)
 
-        # 2. Encode Vision (Conditioned on Goal)
-        vision_features = self.vision_encoder(images, goal_cond) # (B, C_feat, H', W')
-        vision_tokens = self.token_learner(vision_features) # (B, K, embed_dim)
+        # 2. Encode Vision
+        # Flatten B and W -> (B*W, C, H, W)
+        images_flat = images.reshape(B*W, C, H, -1)
+        vision_features = self.vision_encoder(images_flat, goal_cond_expanded) # (B*W, C_feat, H', W')
+        vision_tokens = self.token_learner(vision_features) # (B*W, 1, embed_dim)
+        vision_tokens = vision_tokens.reshape(B, W, 1, -1).squeeze(2) # (B, W, embed_dim)
 
-        # 3. Encode Proprio (Robot Specific)
-        proprio_emb = adapter.encode_proprio(proprio) # (B, embed_dim)
-        proprio_tokens = proprio_emb.unsqueeze(1) # (B, 1, embed_dim)
+        # 3. Encode Proprio
+        proprio_flat = proprio.reshape(B*W, -1)
+        proprio_emb = adapter.encode_proprio(proprio_flat) # (B*W, embed_dim)
+        proprio_tokens = proprio_emb.reshape(B, W, -1) # (B, W, embed_dim)
 
-        # 4. Get Latent History
-        latent_history = self.latent_queue.forward()
-        if latent_history.shape[0] != B:
-            latent_history = latent_history.expand(B, -1, -1)
-            
-        latent_tokens = self.latent_proj(latent_history) # (B, T, embed_dim)
+        # 4. Construct Sequence: Interleaved [Proprio_t, Vision_t]
+        # We want: P0, V0, P1, V1, ...
+        # Stack along new dim then flatten
+        # (B, W, 2, D)
+        context_tokens = torch.stack([proprio_tokens, vision_tokens], dim=2)
+        context_tokens = context_tokens.reshape(B, W*2, -1) # (B, 2*W, D)
 
-        # 5. Concatenate Tokens
-        input_tokens = torch.cat([latent_tokens, vision_tokens, proprio_tokens], dim=1)
+        # 5. Add Latent History (Optional)
+        # Latent is appended at the end
+        input_tokens_list = [context_tokens]
+        
+        if use_memory:
+            latent_history = self.latent_queue.forward()
+            if latent_history.shape[0] != B:
+                latent_history = latent_history.expand(B, -1, -1)
+            latent_tokens = self.latent_proj(latent_history) # (B, T_latent, embed_dim)
+            input_tokens_list.append(latent_tokens)
+
+        input_tokens = torch.cat(input_tokens_list, dim=1)
 
         # 6. Transformer Pass
         output_tokens = self.transformer(input_tokens)
 
         # 7. Decode
-        last_token = output_tokens[:, -1, :]
+        # Readout from the LAST Proprio token in the window.
+        # Window indices: 0..2W-1.
+        # Proprio indices: 0, 2, 4...
+        # Last Proprio index: (W-1)*2
+        # Example W=8: Indices 0..15. Last Proprio is 14. Last Vision is 15.
+        # We want to predict action for step t (current), which corresponds to the last frame in window.
+        # So we read from the Proprio token of the LAST step.
+        readout_idx = (W - 1) * 2
+        last_token = output_tokens[:, readout_idx, :]
         
         pred_action = adapter.decode_action(last_token) # Robot Specific
         
-        # Simple projection for latent state (Identity if dims match)
+        # Simple projection for latent state
         next_latent = self.latent_proj_out(last_token)
         
         requery_logit = self.requery_decoder(last_token)
 
-        # 8. Update Queue (Inference only usually)
+        # 8. Update Queue
         if update_queue:
             self.latent_queue.enqueue(next_latent.detach())
 
         return pred_action, next_latent, requery_logit
+
+    def reset_memory(self, batch_size):
+        """Resets the latent memory for a new batch."""
+        self.latent_queue.reset(batch_size)

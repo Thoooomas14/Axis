@@ -11,11 +11,14 @@ The model follows a modular architecture composed of:
 4.  **Transformer Backbone**: Fuses all modalities and attends to relevant features.
 5.  **Decoders/Adapters**: Translates transformer outputs into robot-specific actions.
 
+**Window-Based Processing**:
+Unlike typical frame-by-frame policies, Axis processes a sliding window of observations (size $W$) at each step. This allows the model to attend to immediate temporal gradients and short-term history directly in the transformer, while long-term history is handled by the Latent Memory.
+
 ```mermaid
 graph TD
     subgraph Inputs
-        Img[Image]
-        Prop[Proprioception]
+        Img[Image Window (B, W, C, H, W)]
+        Prop[Proprio Window (B, W, D)]
         Goal[Goal Embedding]
     end
 
@@ -78,7 +81,9 @@ graph TD
 
 ### 4. Axis Transformer
 - **Type**: Transformer Encoder (standard attention mechanism).
-- **Input**: A concatenated sequence of [Latent Tokens, Vision Tokens, Proprioception Tokens].
+- **Input**: A concatenated sequence of:
+    - **Latent Tokens**: Projected history from the queue.
+    - **Context Tokens**: Interleaved sequence of `[Proprio_t, Vision_t]` for each step $t$ in the window $W$.
 - **Role**: Performs sensor fusion and reasoning. It allows the proprioceptive state to attend to visual features and historical context to determine the best action.
 
 ### 5. Robot Adapters
@@ -94,15 +99,15 @@ graph TD
 
 ## Data Flow
 
-1.  **Observation**: The robot observes an image and its current proprioceptive state. A high-level goal is provided.
+1.  **Observation**: The robot observes a window of $W$ images and proprioceptive states. A high-level goal is provided.
 2.  **Encoding**:
     - Goal is encoded.
-    - Image is processed and tokenized (conditioned on goal).
+    - Images are processed and tokenized (conditioned on goal).
     - Proprioception is projected to embedding space.
 3.  **Context Retrieval**: The current state of the Latent Queue is retrieved and projected.
-4.  **Fusion**: All tokens are fed into the Transformer.
+4.  **Fusion**: All tokens (Latent + Windowed Context) are fed into the Transformer.
 5.  **Prediction**:
-    - The last output token is decoded into the next **Action**.
+    - The output corresponding to the **last proprioception token** in the window is decoded into the next **Action**.
     - A **Next Latent** state is generated to update the memory.
     - A **Requery** signal is predicted.
 6.  **Update**: The Latent Queue is updated with the new latent state for the next timestep.

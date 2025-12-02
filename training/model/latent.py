@@ -34,10 +34,11 @@ class LatentQueue(nn.Module):
             else:
                 raise ValueError(f"Batch size mismatch: Queue {self.queue.shape[0]} vs Input {B}")
 
-        # Shift everything to the left
+        # Shift everything to the right (discard oldest at end)
         # queue: (B, T, D)
-        # We want to discard index 0, and append new_latent at index T-1
-        self.queue = torch.cat([self.queue[:, 1:, :], new_latent.unsqueeze(1)], dim=1)
+        # We want to discard index T-1, and prepend new_latent at index 0
+        # Order becomes: [Newest (t), t-1, t-2, ..., Oldest]
+        self.queue = torch.cat([new_latent.unsqueeze(1), self.queue[:, :-1, :]], dim=1)
 
     def forward(self):
         """

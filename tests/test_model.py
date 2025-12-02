@@ -18,16 +18,15 @@ def test_axis_model_forward():
         'goal_dim': 77,
         'cond_dim': 256,
         'vision_feature_dim': 256,
-        'num_vision_tokens': 8,
+        'num_vision_tokens': 1, # Updated
+        'window_size': 8,       # Updated
         'latent_dim': 256,
         'queue_size': 5,
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 2,
-        # Multi-robot config
         'robots': {
             'default': {'proprio_dim': 6, 'action_dim': 6},
-            # 'widowx': {'proprio_dim': 6, 'action_dim': 6}
         }
     }
 
@@ -36,23 +35,32 @@ def test_axis_model_forward():
 
     # Dummy Inputs
     B = 2
-    # Test 1: Default Robot (UR3e/Generic)
+    W = 8 # Window size
+    
     print("Testing Robot: Default (6D EE Pose)")
     robot_name = 'default' 
     
     # Initial State
-    # Input images: (B, C, H, W)
-    images = torch.randn(B, 3, 128, 128)
-    # Proprio: (B, 6) - EE Pose
-    proprio = torch.randn(B, 6)
-    # Goal: (B, 77) - Structured Gemini Goal
+    # Input images: (B, W, C, H, W)
+    images = torch.randn(B, W, 3, 128, 128)
+    # Proprio: (B, W, 6)
+    proprio = torch.randn(B, W, 6)
+    # Goal: (B, 77)
     goal = torch.randn(B, 77)
 
     print(f"Initial Queue Shape: {model.latent_queue.queue.shape}")
 
     # Forward Pass
     print(f"Running Forward Pass ({robot_name})...")
-    action, next_latent, requery_logit = model(images, proprio, goal, robot_name=robot_name)
+    # Enable memory usage
+    action, next_latent, requery_logit = model(
+        images, 
+        proprio, 
+        goal, 
+        robot_name=robot_name,
+        update_queue=True,
+        use_memory=True
+    )
     
     print(f"Action Shape: {action.shape}")
     print(f"Requery Logit Shape: {requery_logit.shape}")

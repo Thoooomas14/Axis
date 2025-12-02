@@ -29,10 +29,36 @@ conda activate axis_env
 
 ## Quick Start
 
-To start training the model with default settings:
+### 1. Data Preprocessing (Optional but Recommended)
+
+To speed up training, you can preprocess the TFDS dataset into `.pt` files:
 
 ```bash
+python scripts/preprocess_dataset.py \
+    --dataset fractal20220817_data \
+    --num_workers 4
+```
+
+### 2. Training
+
+To start training (using raw TFDS):
+```bash
 python training/train.py --dataset fractal20220817_data --batch_size 32
+```
+
+To train using preprocessed data (faster):
+```bash
+python training/train.py --use_processed_data --data_dir data/processed/fractal_v1
+```
+
+### 3. Evaluation
+
+To visualize model predictions on a test episode:
+
+```bash
+python scripts/evaluate_sequence.py \
+    --checkpoint_dir checkpoints \
+    --use_processed_data
 ```
 
 For more configuration options, run:

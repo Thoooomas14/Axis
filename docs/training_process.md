@@ -35,6 +35,29 @@ Axis uses `RTXDataset` (in `training/data/rtx_loader.py`) to load data. This is 
     - Argument: `--embeddings_path`
     - If not found, it falls back to random embeddings (useful for debugging, but not for convergence).
 
+### Data Preprocessing (Recommended)
+
+To improve training speed, Axis provides a script to preprocess TFDS datasets into `.pt` files. This avoids the overhead of TFDS and on-the-fly resizing during training.
+
+**Script**: `scripts/preprocess_dataset.py`
+
+**Usage**:
+```bash
+python scripts/preprocess_dataset.py --dataset fractal20220817_data --num_workers 4
+```
+
+**Output**:
+- Creates a directory (default: `data/processed/fractal_v1`) containing `.pt` files.
+- Each file corresponds to one episode and contains:
+    - `images`: (T, 3, H, W)
+    - `proprio`: (T, 7)
+    - `action`: (T, 7)
+    - `goal_embs`: (T, 77)
+    - `requery_labels`: (T)
+
+**Training with Processed Data**:
+Use the `--use_processed_data` flag in `train.py`.
+
 ## Optimization
 
 - **Optimizer**: AdamW
@@ -56,6 +79,7 @@ python training/train.py \
 ### Arguments
 
 - `--dataset`: Name of the TFDS dataset to load.
+- `--data_dir`: Directory to store/load dataset (default: None).
 - `--batch_size`: Batch size.
 - `--lr`: Learning rate.
 - `--steps`: Total training steps.
@@ -63,3 +87,9 @@ python training/train.py \
 - `--save_interval`: How often to save checkpoints.
 - `--checkpoint_dir`: Directory to save `.pt` files.
 - `--embeddings_path`: Path to instruction embeddings pickle.
+- `--mock`: Use mock dataset for debugging.
+- `--time_limit_min`: Stop training after N minutes (0 to disable).
+- `--use_latent_memory`: Enable recurrent latent memory updates during training.
+- `--queue_size`: Size of the latent memory queue (default: 10).
+- `--use_processed_data`: Use preprocessed `.pt` files instead of raw TFDS.
+- `--num_workers`: Number of dataloader workers (default: 4).
