@@ -278,7 +278,7 @@ def train(args):
             pbar.update(1)
             pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
             
-            # Checkpointing & Visualization
+            # Checkpointing
             if step % args.save_interval == 0:
                 # Save Latest Checkpoint
                 torch.save({
@@ -291,11 +291,11 @@ def train(args):
                 # Update Plot
                 logger.plot_progress()
                 
-                # Visualization (if enabled and interval met)
-                if args.viz and step % args.viz_interval == 0:
-                    visualizer.visualize_batch(step, batch, pred_action)
-                    # Also generate GIF
-                    generate_episode_gif(model, args, step, visualizer)
+            # Visualization (if enabled and interval met)
+            if args.viz and step % args.viz_interval == 0:
+                visualizer.visualize_batch(step, batch, pred_action)
+                # Also generate GIF
+                generate_episode_gif(model, args, step, visualizer)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
