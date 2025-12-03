@@ -1,1 +1,7 @@
 /data/
+checkpoints/
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+test_viz_output/
