@@ -102,7 +102,8 @@ def generate_episode_gif(model, args, step, visualizer):
 
         # Prepare Inputs
         print(f"DEBUG: images_np shape: {images_np.shape}, dtype: {images_np.dtype}", flush=True)
-        device = args.device
+        # args.device does not exist! Get device from model.
+        device = next(model.parameters()).device
         print(f"DEBUG: Moving to device: {device}", flush=True)
         
         try:
