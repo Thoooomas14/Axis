@@ -12,8 +12,11 @@ dependencies:
   - torchaudio
   - pytorch-cuda=12.1
   - tensorflow
-  - tqdm-nightly
+  - tqdm
+  - protobuf>=4.25.3 # Force newer protobuf for TF compatibility
   - pip:
       - tensorflow-datasets
       - tensorflow-io
-      - mlagents
+      - matplotlib
+      - pandas
+      - apache_beam

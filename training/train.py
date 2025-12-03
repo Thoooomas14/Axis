@@ -59,7 +59,8 @@ def train(args):
         split='train', 
         batch_size=1, # Loader yields 1 window at a time
         window_size=config['window_size'],
-        image_size=(128, 128)
+        image_size=(128, 128),
+        data_dir=args.data_dir
     )
     
     # Wrap in DataLoader for batching

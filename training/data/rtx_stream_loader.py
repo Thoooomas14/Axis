@@ -10,13 +10,14 @@ class RTXStreamLoader(IterableDataset):
     """
     Streams RT-X datasets from GCS, splits them into subtasks, and yields sliding windows.
     """
-    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000):
+    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
         self.window_size = window_size
         self.image_size = image_size
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.data_dir = data_dir
         
         self.oracle = GoalOracle(output_dim=64)
 
@@ -156,7 +157,13 @@ class RTXStreamLoader(IterableDataset):
 
     def __iter__(self):
         # Load dataset in streaming mode
-        ds = tfds.load(self.dataset_name, split=self.split, shuffle_files=True, try_gcs=True)
+        ds = tfds.load(
+            self.dataset_name, 
+            split=self.split, 
+            shuffle_files=True, 
+            try_gcs=True,
+            data_dir=self.data_dir
+        )
         ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
