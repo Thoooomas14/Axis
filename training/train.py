@@ -101,11 +101,22 @@ def generate_episode_gif(model, args, step, visualizer):
         print(f"DEBUG: Loaded episode with {images_np.shape[0]} frames.", flush=True)
 
         # Prepare Inputs
+        print(f"DEBUG: images_np shape: {images_np.shape}, dtype: {images_np.dtype}", flush=True)
         device = args.device
-        T = images_np.shape[0]
-        images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0)
-        proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
-        print("DEBUG: Tensors created.", flush=True)
+        print(f"DEBUG: Moving to device: {device}", flush=True)
+        
+        try:
+            print("DEBUG: Creating images tensor (CPU)...", flush=True)
+            images_cpu = torch.tensor(images_np, dtype=torch.float32)
+            print("DEBUG: Moving images to GPU...", flush=True)
+            images = images_cpu.to(device).unsqueeze(0)
+            
+            print("DEBUG: Creating proprio tensor...", flush=True)
+            proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
+            print("DEBUG: Tensors created successfully.", flush=True)
+        except Exception as e:
+            print(f"DEBUG: CRASH during tensor creation: {e}", flush=True)
+            raise e
         
         # Mock Goal (using start/end)
         print("DEBUG: Importing GoalOracle...", flush=True)
