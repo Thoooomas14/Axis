@@ -29,45 +29,71 @@ def generate_episode_gif(model, args, step, visualizer):
     try:
         print(f"DEBUG: Starting generate_episode_gif for step {step}...", flush=True)
         # Load one episode
+        # Use RTXStreamLoader to load one episode safely
+        # We create a temporary loader just for this visualization
+        # This avoids the GCS recursion/hanging issues of raw tfds.load
+        from training.data.rtx_stream_loader import RTXStreamLoader
+        
+        temp_loader = RTXStreamLoader(
+            dataset_name=args.dataset,
+            split='train',
+            batch_size=1,
+            window_size=1, # We want full episode, so window size doesn't matter much if we just extract steps
+            image_size=(128, 128),
+            data_dir=args.data_dir,
+            shuffle_buffer_size=1 # Minimal shuffle
+        )
+        
+        # Manually iterate to get one episode
+        # RTXStreamLoader yields windows, but we need full episode.
+        # Actually, RTXStreamLoader's internal _process_episode yields windows.
+        # We need access to the raw episode.
+        
+        # Let's use the same logic as RTXStreamLoader.__iter__ but stop after one episode.
         if args.data_dir and args.data_dir.startswith('gs://'):
             full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
             builder = tfds.builder_from_directory(builder_dir=full_path)
             ds = builder.as_dataset(split='train', shuffle_files=True)
         else:
             ds = tfds.load(args.dataset, split='train', shuffle_files=True, data_dir=args.data_dir)
-        
+            
         # Take one episode
         images_np, proprio_np = None, None
-        for episode in ds.take(1):
-            steps = list(episode['steps'])
-            imgs = []
-            props = []
-            for s in steps:
-                img = s['observation']['image']
-                img = tf.image.resize(img, (128, 128))
-                img = tf.cast(img, tf.float32) / 255.0
-                imgs.append(tf.transpose(img, [2, 0, 1]).numpy())
-                
-                # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
-                p = np.zeros(7, dtype=np.float32)
-                if 'base_pose_tool_reached' in obs:
-                    p = obs['base_pose_tool_reached'].numpy()
-                elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
-                elif 'pose' in obs: p = obs['pose'].numpy()
-                
-                g = 0.0
-                if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
-                elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
-                if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
-                
-                p8 = np.zeros(8, dtype=np.float32)
-                if p.shape[0] == 7: p8[:7] = p
-                elif p.shape[0] == 6: p8[:6] = p
-                p8[7] = g
-                props.append(p8)
-            images_np = np.array(imgs)
-            proprio_np = np.array(props)
-            break
+        
+        # Use iter() to avoid potential hanging with for loop on streaming dataset?
+        iterator = iter(ds)
+        episode = next(iterator)
+        
+        steps = list(episode['steps'])
+        imgs = []
+        props = []
+        for s in steps:
+            img = s['observation']['image']
+            img = tf.image.resize(img, (128, 128))
+            img = tf.cast(img, tf.float32) / 255.0
+            imgs.append(tf.transpose(img, [2, 0, 1]).numpy())
+            
+            # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
+            obs = s['observation']
+            p = np.zeros(7, dtype=np.float32)
+            if 'base_pose_tool_reached' in obs:
+                p = obs['base_pose_tool_reached'].numpy()
+            elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
+            elif 'pose' in obs: p = obs['pose'].numpy()
+            
+            g = 0.0
+            if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
+            elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
+            if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
+            
+            p8 = np.zeros(8, dtype=np.float32)
+            if p.shape[0] == 7: p8[:7] = p
+            elif p.shape[0] == 6: p8[:6] = p
+            p8[7] = g
+            props.append(p8)
+            
+        images_np = np.array(imgs)
+        proprio_np = np.array(props)
         
         if images_np is None: 
             print("DEBUG: Failed to load any episode from dataset.", flush=True)
