@@ -3,8 +3,8 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
-  - numpy
+  - python=3.10  # Downgrade to 3.10 for better stability with mlagents/TF
+  - numpy>=1.24  # Ensure modern numpy
   - pip
   - pip:
       - torch~=2.2.1 --index-url https://download.pytorch.org/whl/cu121
