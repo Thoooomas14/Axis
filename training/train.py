@@ -60,7 +60,8 @@ def train(args):
         batch_size=1, # Loader yields 1 window at a time
         window_size=config['window_size'],
         image_size=(128, 128),
-        data_dir=args.data_dir
+        data_dir=args.data_dir,
+        shuffle_buffer_size=args.shuffle_buffer_size
     )
     
     # Wrap in DataLoader for batching
@@ -232,6 +233,7 @@ if __name__ == "__main__":
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
+    parser.add_argument('--shuffle_buffer_size', type=int, default=100, help="Shuffle buffer size for TFDS")
 
     args = parser.parse_args()
     train(args)
