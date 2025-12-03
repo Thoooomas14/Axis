@@ -187,7 +187,7 @@ class Visualizer:
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.gif")
             ani.save(save_path, writer='pillow')
             plt.close()
-            print(f"Saved GIF to {save_path}")
+            print(f"Saved GIF to {save_path}", flush=True)
             
         except Exception as e:
-            print(f"Error creating GIF: {e}")
+            print(f"Error creating GIF: {e}", flush=True)
