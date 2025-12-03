@@ -5,6 +5,7 @@ import tensorflow_datasets as tfds
 import tensorflow_io as tfio # Required for GCS
 import numpy as np
 from .goal_oracle import GoalOracle
+from scipy.spatial.transform import Rotation as R
 
 class RTXStreamLoader(IterableDataset):
     """
@@ -22,10 +23,29 @@ class RTXStreamLoader(IterableDataset):
         self.oracle = GoalOracle(output_dim=64)
 
     def _get_pose(self, obs):
-        """Extracts 7D pose from observation."""
+        """Extracts 7D pose (6D Euler + 1 Gripper) from observation."""
         p = np.zeros(6, dtype=np.float32)
-        if 'ee_pose' in obs: p = obs['ee_pose'].numpy()
-        elif 'pose' in obs: p = obs['pose'].numpy()
+        
+        # Try different keys
+        if 'base_pose_tool_reached' in obs:
+            # 7D: [x, y, z, qx, qy, qz, qw]
+            pose_7d = obs['base_pose_tool_reached'].numpy()
+            pos = pose_7d[:3]
+            quat = pose_7d[3:] # [qx, qy, qz, qw]
+            
+            # Convert Quat to Euler (XYZ)
+            try:
+                rot = R.from_quat(quat)
+                euler = rot.as_euler('xyz', degrees=False)
+                p = np.concatenate([pos, euler])
+            except Exception as e:
+                print(f"Error converting quat: {e}")
+                p[:3] = pos
+                
+        elif 'ee_pose' in obs: 
+            p = obs['ee_pose'].numpy()
+        elif 'pose' in obs: 
+            p = obs['pose'].numpy()
         
         # Gripper
         g = 0.0
