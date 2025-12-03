@@ -20,6 +20,103 @@ from training.data.rtx_stream_loader import RTXStreamLoader
 from training.utils.scheduler import CosineAnnealingWarmupRestarts
 from training.utils.logger import TrainingLogger
 from training.utils.visualizer import Visualizer
+import tensorflow_datasets as tfds
+import tensorflow as tf
+import numpy as np
+
+def generate_episode_gif(model, args, step, visualizer):
+    """Loads one episode and generates a GIF."""
+    try:
+        # Load one episode
+        if args.data_dir and args.data_dir.startswith('gs://'):
+            full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
+            builder = tfds.builder_from_directory(builder_dir=full_path)
+            ds = builder.as_dataset(split='train', shuffle_files=True)
+        else:
+            ds = tfds.load(args.dataset, split='train', shuffle_files=True, data_dir=args.data_dir)
+        
+        # Take one episode
+        images_np, proprio_np = None, None
+        for episode in ds.take(1):
+            steps = list(episode['steps'])
+            imgs = []
+            props = []
+            for s in steps:
+                img = s['observation']['image']
+                img = tf.image.resize(img, (128, 128))
+                img = tf.cast(img, tf.float32) / 255.0
+                imgs.append(tf.transpose(img, [2, 0, 1]).numpy())
+                
+                obs = s['observation']
+                p = np.zeros(6, dtype=np.float32)
+                if 'ee_pose' in obs: p = obs['ee_pose'].numpy()
+                elif 'pose' in obs: p = obs['pose'].numpy()
+                g = 0.0
+                if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
+                elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
+                if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
+                p7 = np.zeros(7, dtype=np.float32)
+                p7[:6] = p[:6] if p.shape[0] >= 6 else np.pad(p, (0, 6-p.shape[0]))
+                p7[6] = g
+                props.append(p7)
+            images_np = np.array(imgs)
+            proprio_np = np.array(props)
+            break
+        
+        if images_np is None: return
+
+        # Prepare Inputs
+        device = args.device
+        T = images_np.shape[0]
+        images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0)
+        proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
+        
+        # Mock Goal (using start/end)
+        from training.data.goal_oracle import GoalOracle
+        oracle = GoalOracle(output_dim=64)
+        start_grip = proprio_np[0][6]
+        end_grip = proprio_np[-1][6]
+        task_type = 0
+        if start_grip < 0.5 and end_grip > 0.5: task_type = 1
+        elif start_grip > 0.5 and end_grip < 0.5: task_type = 2
+        goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1]).to(device).unsqueeze(0)
+
+        # Inference
+        pred_actions = []
+        requery_preds = []
+        model.reset_memory(1)
+        W = 8 # window size
+        
+        with torch.no_grad():
+            for t in range(T):
+                if t < W:
+                    pad_len = W - 1 - t
+                    curr_imgs = images[:, :t+1]
+                    curr_props = proprio[:, :t+1]
+                    pad_imgs = curr_imgs[:, 0:1].repeat(1, pad_len, 1, 1, 1)
+                    pad_props = curr_props[:, 0:1].repeat(1, pad_len, 1)
+                    win_imgs = torch.cat([pad_imgs, curr_imgs], dim=1)
+                    win_props = torch.cat([pad_props, curr_props], dim=1)
+                else:
+                    win_imgs = images[:, t-W+1 : t+1]
+                    win_props = proprio[:, t-W+1 : t+1]
+                
+                pred_act, _, req_logit = model(win_imgs, win_props, goal_emb, update_queue=True, use_memory=True)
+                pred_actions.append(pred_act.cpu())
+                requery_preds.append(torch.sigmoid(req_logit).cpu())
+
+        pred_actions = torch.stack(pred_actions, dim=1).squeeze(0)
+        requery_preds = torch.stack(requery_preds, dim=1).squeeze(0)
+        
+        targets = np.zeros_like(proprio_np)
+        targets[:-1] = proprio_np[1:]
+        targets[-1] = proprio_np[-1]
+        targets = torch.tensor(targets, dtype=torch.float32)
+
+        visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
+        print(f"Generated episode GIF for step {step}")
+    except Exception as e:
+        print(f"Error generating episode GIF: {e}")
 
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -197,6 +294,8 @@ def train(args):
                 # Visualization (if enabled and interval met)
                 if args.viz and step % args.viz_interval == 0:
                     visualizer.visualize_batch(step, batch, pred_action)
+                    # Also generate GIF
+                    generate_episode_gif(model, args, step, visualizer)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")

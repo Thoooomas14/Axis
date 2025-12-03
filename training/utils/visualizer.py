@@ -80,10 +80,6 @@ class Visualizer:
                 if movement_norm > max_norm:
                     max_norm = movement_norm
                     best_idx = b
-                    
-                # If we find a good one, stop early
-                if movement_norm > 0.01:
-                    break
             
             # Take the best sample found
             imgs = images[best_idx].cpu().permute(0, 2, 3, 1).numpy() # (8, 128, 128, 3)
@@ -127,3 +123,70 @@ class Visualizer:
             
         except Exception as e:
             print(f"Error visualizing batch: {e}")
+
+    def create_gif(self, step, images, target_actions, pred_actions, requery_preds, save_prefix='episode'):
+        """
+        Creates a GIF visualizing an entire episode.
+        Args:
+            step: Training step
+            images: (T, 3, 128, 128) numpy array or tensor
+            target_actions: (T, 7) numpy array or tensor
+            pred_actions: (T, 7) numpy array or tensor
+            requery_preds: (T, 1) numpy array or tensor
+        """
+        try:
+            import matplotlib.animation as animation
+            
+            # Convert to numpy if needed
+            if isinstance(images, torch.Tensor): images = images.cpu().permute(0, 2, 3, 1).numpy()
+            if isinstance(target_actions, torch.Tensor): target_actions = target_actions.cpu().numpy()
+            if isinstance(pred_actions, torch.Tensor): pred_actions = pred_actions.cpu().numpy()
+            if isinstance(requery_preds, torch.Tensor): requery_preds = requery_preds.cpu().numpy()
+            
+            T = images.shape[0]
+            fig = plt.figure(figsize=(12, 6))
+            
+            # Layout: Image on Left, Action Bar Chart on Right
+            ax_img = fig.add_subplot(1, 2, 1)
+            ax_act = fig.add_subplot(1, 2, 2)
+            
+            def update(t):
+                ax_img.clear()
+                ax_act.clear()
+                
+                # 1. Image
+                ax_img.imshow(images[t])
+                ax_img.set_title(f"Step {t}/{T}")
+                ax_img.axis('off')
+                
+                # 2. Action Bar Chart
+                x = np.arange(7)
+                width = 0.35
+                
+                tgt = target_actions[t]
+                pred = pred_actions[t]
+                req = requery_preds[t].item()
+                
+                ax_act.bar(x - width/2, tgt, width, label='Ground Truth', color='green', alpha=0.7)
+                ax_act.bar(x + width/2, pred, width, label='Prediction', color='red', alpha=0.7)
+                
+                ax_act.set_ylim(-1.0, 1.0) # Assume normalized actions
+                ax_act.set_xticks(x)
+                ax_act.set_xticklabels(self.action_labels)
+                ax_act.legend(loc='upper right')
+                ax_act.grid(True, alpha=0.3)
+                
+                # Requery Indicator
+                req_color = 'red' if req > 0.5 else 'gray'
+                ax_act.text(0.5, 1.05, f"Requery: {req:.2f}", transform=ax_act.transAxes, 
+                            ha='center', fontsize=12, color=req_color, weight='bold')
+                
+            ani = animation.FuncAnimation(fig, update, frames=T, interval=200)
+            
+            save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.gif")
+            ani.save(save_path, writer='pillow')
+            plt.close()
+            print(f"Saved GIF to {save_path}")
+            
+        except Exception as e:
+            print(f"Error creating GIF: {e}")
