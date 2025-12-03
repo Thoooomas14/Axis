@@ -109,8 +109,12 @@ def train(args):
     else:
         print("No checkpoint found. Starting from scratch.")
 
+    # Calculate target step (relative to start)
+    target_step = start_step + args.steps
+    print(f"Training for {args.steps} additional steps. Target step: {target_step}")
+
     print("Starting training...")
-    pbar = tqdm(total=args.steps, initial=start_step)
+    pbar = tqdm(total=target_step, initial=start_step)
     
     import time
     start_time = time.time()
@@ -119,7 +123,7 @@ def train(args):
     try:
         # Iterate over batches
         for batch in dataloader:
-            if step >= args.steps:
+            if step >= target_step:
                 break
             
             # Check time limit
