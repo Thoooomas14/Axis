@@ -5,7 +5,6 @@ import tensorflow_datasets as tfds
 import tensorflow_io as tfio # Required for GCS
 import numpy as np
 from .goal_oracle import GoalOracle
-from scipy.spatial.transform import Rotation as R
 
 class RTXStreamLoader(IterableDataset):
     """
