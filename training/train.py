@@ -27,6 +27,7 @@ import numpy as np
 def generate_episode_gif(model, args, step, visualizer):
     """Loads one episode and generates a GIF."""
     try:
+        print(f"DEBUG: Starting generate_episode_gif for step {step}...")
         # Load one episode
         if args.data_dir and args.data_dir.startswith('gs://'):
             full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
@@ -68,7 +69,10 @@ def generate_episode_gif(model, args, step, visualizer):
             proprio_np = np.array(props)
             break
         
-        if images_np is None: return
+        if images_np is None: 
+            print("DEBUG: Failed to load any episode from dataset.")
+            return
+        print(f"DEBUG: Loaded episode with {images_np.shape[0]} frames.")
 
         # Prepare Inputs
         device = args.device
@@ -118,6 +122,7 @@ def generate_episode_gif(model, args, step, visualizer):
         targets[-1] = proprio_np[-1]
         targets = torch.tensor(targets, dtype=torch.float32)
 
+        print("DEBUG: Calling visualizer.create_gif...")
         visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
         print(f"Generated episode GIF for step {step}")
     except Exception as e:
