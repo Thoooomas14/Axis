@@ -18,19 +18,18 @@ def evaluate_sequence(args):
     # --- Configuration ---
     config = {
         'device': device,
-        'goal_dim': 77,
+        'goal_dim': 64,
         'cond_dim': 256,
         'vision_feature_dim': 256,
-        'num_vision_tokens': 1,
+        'num_vision_tokens': 8,
         'window_size': 8,
         'latent_dim': 256,
         'queue_size': 10,
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'robots': {
-            'default': {'proprio_dim': 7, 'action_dim': 7},
-        }
+        'proprio_dim': 8,
+        'action_dim': 8
     }
 
     # --- Load Model ---
@@ -157,8 +156,9 @@ def evaluate_sequence(args):
     viz_steps = min(T, 20)
     
     # Create figure
+    # Create figure
     fig, axes = plt.subplots(viz_steps, 2, figsize=(12, 4 * viz_steps))
-    action_labels = ['x', 'y', 'z', 'rx', 'ry', 'rz', 'g']
+    action_labels = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'g']
 
     for i in range(viz_steps):
         # 1. Image
@@ -169,7 +169,7 @@ def evaluate_sequence(args):
         
         # 2. Action Comparison
         ax_act = axes[i, 1]
-        x = np.arange(7)
+        x = np.arange(8)
         width = 0.35
         
         ax_act.bar(x - width/2, target_action_np[i], width, label='Ground Truth', color='green', alpha=0.7)

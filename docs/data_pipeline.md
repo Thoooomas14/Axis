@@ -27,10 +27,10 @@ The goal is a 64-dimensional vector constructed from:
     -   `[1, 0, 0]` = Move
     -   `[0, 1, 0]` = Pick
     -   `[0, 0, 1]` = Place
-2.  **Start Pose** (7D): The EE pose at the start of the subtask.
-3.  **End Pose / POI** (7D): The EE pose at the end of the subtask (the target).
+2.  **Start Pose** (8D): The EE pose at the start of the subtask (Pos + Quat + Gripper).
+3.  **End Pose / POI** (8D): The EE pose at the end of the subtask (the target).
 
-These inputs (17D total) are projected into 64D using a fixed, random projection matrix. This ensures the embedding is:
+These inputs (19D total: 3 task type + 8 start + 8 end) are projected into 64D using a fixed, random projection matrix. This ensures the embedding is:
 -   **Deterministic**: Same inputs always yield same embedding.
 -   **Semantic**: Contains all necessary info (what to do, where to start, where to go).
 -   **Dense**: Distributed across the 64 dimensions.

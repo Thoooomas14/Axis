@@ -40,10 +40,11 @@ def load_episode(dataset_name, data_dir, split='train'):
             img = tf.cast(img, tf.float32) / 255.0
             images.append(tf.transpose(img, [2, 0, 1]).numpy())
             
-            # Proprio (7D)
-            obs = s['observation']
-            p = np.zeros(6, dtype=np.float32)
-            if 'ee_pose' in obs: p = obs['ee_pose'].numpy()
+            # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
+            p = np.zeros(7, dtype=np.float32)
+            if 'base_pose_tool_reached' in obs:
+                p = obs['base_pose_tool_reached'].numpy()
+            elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
             elif 'pose' in obs: p = obs['pose'].numpy()
             
             g = 0.0
@@ -51,10 +52,11 @@ def load_episode(dataset_name, data_dir, split='train'):
             elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
             if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
             
-            p7 = np.zeros(7, dtype=np.float32)
-            p7[:6] = p[:6] if p.shape[0] >= 6 else np.pad(p, (0, 6-p.shape[0]))
-            p7[6] = g
-            proprio.append(p7)
+            p8 = np.zeros(8, dtype=np.float32)
+            if p.shape[0] == 7: p8[:7] = p
+            elif p.shape[0] == 6: p8[:6] = p
+            p8[7] = g
+            proprio.append(p8)
             
         return np.array(images), np.array(proprio)
     return None, None
@@ -76,8 +78,8 @@ def make_gif(args):
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'proprio_dim': 7,
-        'action_dim': 7
+        'proprio_dim': 8,
+        'action_dim': 8
     }
 
     # --- Load Model ---

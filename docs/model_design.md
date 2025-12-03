@@ -18,7 +18,7 @@ Axis processes a sliding window of observations (size $W=8$) at each step. This 
 graph TD
     subgraph Inputs
         Img[Image Window (B, W, C, H, W)]
-        Prop[Proprio Window (B, W, 7)]
+        Prop[Proprio Window (B, W, 8)]
         Goal[Goal Embedding (B, 64)]
     end
 
@@ -70,8 +70,8 @@ graph TD
 -   **Input**: A **64-dimensional** semantic vector.
 -   **Composition**: The goal vector is a random projection of:
     -   **Task Type** (One-hot: Pick, Place, Move)
-    -   **Start Pose** (7D)
-    -   **End Pose / POI** (7D)
+    -   **Start Pose** (8D: 3 Pos + 4 Quat + 1 Gripper)
+    -   **End Pose / POI** (8D: 3 Pos + 4 Quat + 1 Gripper)
 -   **Function**: Projects the goal embedding into a conditioning vector used by the Vision Encoder.
 
 ### 2. Vision Encoder & Token Learner
@@ -90,7 +90,7 @@ graph TD
 -   **Role**: Performs sensor fusion and reasoning. It allows the proprioceptive state to attend to visual features and historical context to determine the best action.
 
 ### 5. Decoders
--   **Action Decoder**: Projects the transformer's output token (corresponding to the last step) into the **7D Action Space** (Position + Rotation + Gripper).
+-   **Action Decoder**: Projects the transformer's output token (corresponding to the last step) into the **8D Action Space** (Position + Rotation(Quat) + Gripper).
 -   **Requery Decoder**: Predicts a binary logit indicating if the agent needs a new high-level instruction (e.g., subtask complete).
 
 ## Data Flow
@@ -99,8 +99,8 @@ graph TD
 2.  **Encoding**:
     -   Goal (64D) is encoded.
     -   Images are processed and tokenized (conditioned on goal).
-    -   Proprioception (7D) is projected to embedding space.
+    -   Proprioception (8D) is projected to embedding space.
 3.  **Fusion**: All tokens are fed into the Transformer.
 4.  **Prediction**:
-    -   The output corresponding to the **last proprioception token** in the window is decoded into the next **Action** (7D).
+    -   The output corresponding to the **last proprioception token** in the window is decoded into the next **Action** (8D).
     -   A **Requery** signal is predicted.

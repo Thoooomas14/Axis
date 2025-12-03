@@ -12,10 +12,10 @@ class AxisModel(nn.Module):
     Integrates Vision, Semantic Goals, and Latent Memory into a Transformer-based policy.
     Inputs:
         - Images: (B, Window, C, H, W)
-        - Proprio: (B, Window, 7) [Pos, Rot, Gripper]
+        - Proprio: (B, Window, 8) [Pos, Rot(Quat), Gripper]
         - Goal: (B, 64) [Parsed Gemini Output]
     Outputs:
-        - Action: (B, 7) [Next EE Pose]
+        - Action: (B, 8) [Next EE Pose]
         - Requery: (B, 1)
     """
     def __init__(self, config):
@@ -73,14 +73,14 @@ class AxisModel(nn.Module):
 
         # --- Robot Components (Directly Instantiated) ---
         self.proprio_encoder = ProprioEncoder(
-            input_dim=config.get('proprio_dim', 7),
+            input_dim=config.get('proprio_dim', 8),
             output_dim=embed_dim,
             hidden_dim=config.get('hidden_dim', 128)
         )
 
         self.action_decoder = ActionDecoder(
             input_dim=embed_dim,
-            output_dim=config.get('action_dim', 7),
+            output_dim=config.get('action_dim', 8),
             hidden_dim=config.get('hidden_dim', 128)
         )
 

@@ -7,7 +7,7 @@ class Visualizer:
     def __init__(self, save_dir):
         self.save_dir = os.path.join(save_dir, 'visualizations')
         os.makedirs(self.save_dir, exist_ok=True)
-        self.action_labels = ['x', 'y', 'z', 'rx', 'ry', 'rz', 'g']
+        self.action_labels = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'g']
 
     def visualize_batch(self, step, batch, pred_action, save_prefix='viz'):
         """
@@ -75,7 +75,7 @@ class Visualizer:
             for b in range(B):
                 # Calculate movement norm (excluding gripper)
                 act = target_action[b].cpu().numpy()
-                movement_norm = np.linalg.norm(act[:6]) # x,y,z,rx,ry,rz
+                movement_norm = np.linalg.norm(act[:7]) # x,y,z,qx,qy,qz,qw
                 
                 if movement_norm > max_norm:
                     max_norm = movement_norm
@@ -160,7 +160,7 @@ class Visualizer:
                 ax_img.axis('off')
                 
                 # 2. Action Bar Chart
-                x = np.arange(7)
+                x = np.arange(8)
                 width = 0.35
                 
                 tgt = target_actions[t]

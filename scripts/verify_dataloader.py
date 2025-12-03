@@ -72,9 +72,9 @@ def verify_loader_logic():
         print(f"  Requery: {batch['requery'].shape}")
         
         assert batch['images'].shape == (8, 3, 128, 128)
-        assert batch['proprio'].shape == (8, 7)
+        assert batch['proprio'].shape == (8, 8)
         assert batch['goal'].shape == (64,)
-        assert batch['action'].shape == (7,)
+        assert batch['action'].shape == (8,)
         assert batch['requery'].shape == (1,)
         
         # Check Requery Logic

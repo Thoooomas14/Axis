@@ -25,8 +25,8 @@ Configuration is currently defined in a dictionary within `train.py`. Key parame
 | `embed_dim` | Transformer embedding dimension | 256 |
 | `num_heads` | Number of attention heads | 4 |
 | `num_layers` | Number of transformer layers | 4 |
-| `proprio_dim` | Dimension of EE Pose | 7 |
-| `action_dim` | Dimension of EE Pose | 7 |
+| `proprio_dim` | Dimension of EE Pose (Pos+Quat+Grip) | 8 |
+| `action_dim` | Dimension of EE Pose (Pos+Quat+Grip) | 8 |
 
 ## Data Loading & GCS Authentication
 

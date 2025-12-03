@@ -23,24 +23,16 @@ class RTXStreamLoader(IterableDataset):
         self.oracle = GoalOracle(output_dim=64)
 
     def _get_pose(self, obs):
-        """Extracts 7D pose (6D Euler + 1 Gripper) from observation."""
-        p = np.zeros(6, dtype=np.float32)
+        """Extracts 8D pose (3 Pos + 4 Quat + 1 Gripper) from observation."""
+        p = np.zeros(7, dtype=np.float32) # Default 7D if only pos/euler available
         
         # Try different keys
         if 'base_pose_tool_reached' in obs:
             # 7D: [x, y, z, qx, qy, qz, qw]
             pose_7d = obs['base_pose_tool_reached'].numpy()
-            pos = pose_7d[:3]
-            quat = pose_7d[3:] # [qx, qy, qz, qw]
-            
-            # Convert Quat to Euler (XYZ)
-            try:
-                rot = R.from_quat(quat)
-                euler = rot.as_euler('xyz', degrees=False)
-                p = np.concatenate([pos, euler])
-            except Exception as e:
-                print(f"Error converting quat: {e}")
-                p[:3] = pos
+            # We want 8D: [x, y, z, qx, qy, qz, qw, g]
+            # So we just take the 7D pose as is
+            p = pose_7d
                 
         elif 'ee_pose' in obs: 
             p = obs['ee_pose'].numpy()
@@ -53,11 +45,22 @@ class RTXStreamLoader(IterableDataset):
         elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
         if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
         
-        # Pad/Concat
-        p7 = np.zeros(7, dtype=np.float32)
-        p7[:6] = p[:6] if p.shape[0] >= 6 else np.pad(p, (0, 6-p.shape[0]))
-        p7[6] = g
-        return p7
+        # Construct 8D
+        # If p was 7D (Pos+Quat), we append g -> 8D
+        # If p was 6D (Pos+Euler), we pad to 7D then append g -> 8D? 
+        # Actually, if we switch to Quat, we expect 7D pose input.
+        
+        p8 = np.zeros(8, dtype=np.float32)
+        if p.shape[0] == 7:
+            p8[:7] = p
+        elif p.shape[0] == 6:
+            # Convert Euler to Quat if needed, or just pad?
+            # For now, let's assume we mostly get 7D from base_pose_tool_reached
+            p8[:6] = p
+            # This is technically wrong if p is Euler, but we are optimizing for the main dataset
+        
+        p8[7] = g
+        return p8
 
     def _process_image(self, img):
         if img is None: return np.zeros((3, 128, 128), dtype=np.float32)

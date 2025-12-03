@@ -135,8 +135,8 @@ def train(args):
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'proprio_dim': 7,
-        'action_dim': 7
+        'proprio_dim': 8, # 3 Pos + 4 Quat + 1 Gripper
+        'action_dim': 8
     }
 
     # --- Utilities ---

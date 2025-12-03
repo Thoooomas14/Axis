@@ -73,13 +73,13 @@ def visualize_episode(args):
     
     # 2. Plot Trajectories
     print("Plotting Trajectories...")
-    # 7 Dimensions: X, Y, Z, Rx, Ry, Rz, Gripper
+    # 8 Dimensions: X, Y, Z, Qx, Qy, Qz, Qw, Gripper
     fig, axes = plt.subplots(4, 2, figsize=(15, 15))
     fig.suptitle(f"Episode Trajectories (Length {valid_T})")
     
-    labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz', 'Gripper']
+    labels = ['X', 'Y', 'Z', 'Qx', 'Qy', 'Qz', 'Qw', 'Gripper']
     
-    for i in range(7):
+    for i in range(8):
         row = i // 2
         col = i % 2
         ax = axes[row, col]
@@ -93,9 +93,6 @@ def visualize_episode(args):
         ax.set_title(labels[i])
         ax.grid(True, alpha=0.3)
         if i == 0: ax.legend()
-        
-    # Hide 8th subplot
-    axes[3, 1].axis('off')
         
     plt.tight_layout()
     plot_path = 'episode_trajectories.png'

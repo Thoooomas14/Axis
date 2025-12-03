@@ -13,8 +13,8 @@ def verify_model():
     # Config matching user requirements
     config = {
         'device': 'cpu',
-        'proprio_dim': 7,
-        'action_dim': 7,
+        'proprio_dim': 8,
+        'action_dim': 8,
         'goal_dim': 64,
         'embed_dim': 256,
         'vision_feature_dim': 256,
@@ -34,7 +34,7 @@ def verify_model():
     C, H, W_img = 3, 128, 128
     
     images = torch.randn(B, W, C, H, W_img)
-    proprio = torch.randn(B, W, 7) # 7D EE Pose
+    proprio = torch.randn(B, W, 8) # 8D EE Pose
     goal = torch.randn(B, 64) # 64D Goal
     
     print(f"Input Shapes:")
@@ -53,7 +53,7 @@ def verify_model():
         print(f"  Requery: {requery.shape}")
         
         # Assertions
-        assert action.shape == (B, 7), f"Expected Action (B, 7), got {action.shape}"
+        assert action.shape == (B, 8), f"Expected Action (B, 8), got {action.shape}"
         assert requery.shape == (B, 1), f"Expected Requery (B, 1), got {requery.shape}"
         
         print("\n✅ Verification Successful: Dimensions match requirements.")
