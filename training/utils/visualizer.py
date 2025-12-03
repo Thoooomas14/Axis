@@ -5,8 +5,8 @@ import os
 
 class Visualizer:
     def __init__(self, save_dir):
-        self.save_dir = save_dir
-        os.makedirs(save_dir, exist_ok=True)
+        self.save_dir = os.path.join(save_dir, 'visualizations')
+        os.makedirs(self.save_dir, exist_ok=True)
         self.action_labels = ['x', 'y', 'z', 'rx', 'ry', 'rz', 'g']
 
     def visualize_batch(self, step, batch, pred_action, save_prefix='viz'):
