@@ -1,17 +1,22 @@
 import torch
 import torch.nn as nn
-from .encoders import VisionEncoder, GoalEncoder
+from .encoders import VisionEncoder, GoalEncoder, ProprioEncoder
 from .token_learner import TokenLearner
 from .latent import LatentQueue, LatentProjection
 from .transformer import AxisTransformer
-from .decoders import RequeryDecoder
-from .adapters import RobotAdapter
+from .decoders import RequeryDecoder, ActionDecoder
 
 class AxisModel(nn.Module):
     """
-    The Axis V1 Model (Multi-Robot Support).
+    The Axis V1 Model.
     Integrates Vision, Semantic Goals, and Latent Memory into a Transformer-based policy.
-    Uses RobotAdapters to handle robot-specific proprioception and actions.
+    Inputs:
+        - Images: (B, Window, C, H, W)
+        - Proprio: (B, Window, 7) [Pos, Rot, Gripper]
+        - Goal: (B, 64) [Parsed Gemini Output]
+    Outputs:
+        - Action: (B, 7) [Next EE Pose]
+        - Requery: (B, 1)
     """
     def __init__(self, config):
         super().__init__()
@@ -20,7 +25,7 @@ class AxisModel(nn.Module):
 
         # --- Shared Components ---
         self.goal_encoder = GoalEncoder(
-            input_dim=config.get('goal_dim', 768), 
+            input_dim=config.get('goal_dim', 64), 
             output_dim=config.get('cond_dim', 256)
         )
         
@@ -66,42 +71,30 @@ class AxisModel(nn.Module):
             embed_dim=embed_dim
         )
 
-        # --- Robot Adapters ---
-        # config['robots'] should be a dict: { 'robot_name': { 'proprio_dim': 6, 'action_dim': 6 } }
-        self.adapters = nn.ModuleDict()
-        if 'robots' in config:
-            for robot_name, robot_cfg in config['robots'].items():
-                self.adapters[robot_name] = RobotAdapter(
-                    proprio_input_dim=robot_cfg['proprio_dim'],
-                    action_output_dim=robot_cfg['action_dim'],
-                    embed_dim=config.get('embed_dim', 256)
-                )
-        else:
-            # Fallback for backward compatibility or single robot mode
-            # We create a 'default' adapter
-            self.adapters['default'] = RobotAdapter(
-                proprio_input_dim=config.get('proprio_dim', 6),
-                action_output_dim=config.get('action_dim', 6),
-                embed_dim=config.get('embed_dim', 256)
-            )
+        # --- Robot Components (Directly Instantiated) ---
+        self.proprio_encoder = ProprioEncoder(
+            input_dim=config.get('proprio_dim', 7),
+            output_dim=embed_dim,
+            hidden_dim=config.get('hidden_dim', 128)
+        )
 
-    def forward(self, images, proprio, goal_embedding, robot_name='default', update_queue=True, use_memory=True):
+        self.action_decoder = ActionDecoder(
+            input_dim=embed_dim,
+            output_dim=config.get('action_dim', 7),
+            hidden_dim=config.get('hidden_dim', 128)
+        )
+
+    def forward(self, images, proprio, goal_embedding, update_queue=True, use_memory=False):
         """
         Args:
             images: (B, Window, C, H, W)
             proprio: (B, Window, proprio_dim)
             goal_embedding: (B, goal_dim)
-            robot_name: str
             update_queue: bool
-            use_memory: bool
+            use_memory: bool (Default False for early training)
         """
         B, W, C, H, _ = images.shape
         
-        if robot_name not in self.adapters:
-            raise ValueError(f"Robot '{robot_name}' not found in adapters: {list(self.adapters.keys())}")
-        
-        adapter = self.adapters[robot_name]
-
         # 1. Encode Goal (Shared across window)
         goal_cond = self.goal_encoder(goal_embedding) # (B, cond_dim)
         # Expand goal for the window batch processing
@@ -116,15 +109,20 @@ class AxisModel(nn.Module):
 
         # 3. Encode Proprio
         proprio_flat = proprio.reshape(B*W, -1)
-        proprio_emb = adapter.encode_proprio(proprio_flat) # (B*W, embed_dim)
-        proprio_tokens = proprio_emb.reshape(B, W, -1) # (B, W, embed_dim)
+        proprio_emb = self.proprio_encoder(proprio_flat) # (B*W, embed_dim)
+        proprio_tokens = proprio_emb.reshape(B, W, 1, -1) # (B, W, 1, embed_dim)
 
-        # 4. Construct Sequence: Interleaved [Proprio_t, Vision_t]
-        # We want: P0, V0, P1, V1, ...
-        # Stack along new dim then flatten
-        # (B, W, 2, D)
-        context_tokens = torch.stack([proprio_tokens, vision_tokens], dim=2)
-        context_tokens = context_tokens.reshape(B, W*2, -1) # (B, 2*W, D)
+        # 4. Construct Sequence: Interleaved [Proprio_t, Vision_t_1...Vision_t_k]
+        # We want: P0, V0_1..V0_k, P1, ...
+        # Concatenate along token dim then flatten
+        # (B, W, 1+K, D)
+        
+        # vision_tokens from TokenLearner is (B*W, K, D)
+        K = vision_tokens.shape[1]
+        vision_tokens = vision_tokens.reshape(B, W, K, -1) # (B, W, K, embed_dim)
+        
+        context_tokens = torch.cat([proprio_tokens, vision_tokens], dim=2)
+        context_tokens = context_tokens.reshape(B, W * (1 + K), -1) # (B, T_seq, D)
 
         # 5. Add Latent History (Optional)
         # Latent is appended at the end
@@ -144,16 +142,15 @@ class AxisModel(nn.Module):
 
         # 7. Decode
         # Readout from the LAST Proprio token in the window.
-        # Window indices: 0..2W-1.
-        # Proprio indices: 0, 2, 4...
-        # Last Proprio index: (W-1)*2
-        # Example W=8: Indices 0..15. Last Proprio is 14. Last Vision is 15.
-        # We want to predict action for step t (current), which corresponds to the last frame in window.
-        # So we read from the Proprio token of the LAST step.
-        readout_idx = (W - 1) * 2
+        # Window indices: 0..W-1.
+        # Stride per step: 1 + K
+        # Proprio indices: 0, 1+K, 2(1+K)...
+        # Last Proprio index: (W-1) * (1 + K)
+        stride = 1 + K
+        readout_idx = (W - 1) * stride
         last_token = output_tokens[:, readout_idx, :]
         
-        pred_action = adapter.decode_action(last_token) # Robot Specific
+        pred_action = self.action_decoder(last_token)
         
         # Simple projection for latent state
         next_latent = self.latent_proj_out(last_token)
@@ -169,3 +166,4 @@ class AxisModel(nn.Module):
     def reset_memory(self, batch_size):
         """Resets the latent memory for a new batch."""
         self.latent_queue.reset(batch_size)
+
