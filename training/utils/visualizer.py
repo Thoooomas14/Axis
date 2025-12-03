@@ -65,10 +65,30 @@ class Visualizer:
             # Let's visualize the 8 steps of the window.
             # And for the last step, show the bar chart comparison.
             
-            # Take first sample in batch
-            imgs = images[0].cpu().permute(0, 2, 3, 1).numpy() # (8, 128, 128, 3)
-            tgt_act = target_action[0].cpu().numpy() # (7,)
-            pred_act = pred_action[0].detach().cpu().numpy() # (7,)
+            # Search for a sample with significant movement (action norm > threshold)
+            # to avoid visualizing boring "pause" frames.
+            best_idx = 0
+            max_norm = -1.0
+            
+            # Check up to batch_size samples
+            B = images.shape[0]
+            for b in range(B):
+                # Calculate movement norm (excluding gripper)
+                act = target_action[b].cpu().numpy()
+                movement_norm = np.linalg.norm(act[:6]) # x,y,z,rx,ry,rz
+                
+                if movement_norm > max_norm:
+                    max_norm = movement_norm
+                    best_idx = b
+                    
+                # If we find a good one, stop early
+                if movement_norm > 0.01:
+                    break
+            
+            # Take the best sample found
+            imgs = images[best_idx].cpu().permute(0, 2, 3, 1).numpy() # (8, 128, 128, 3)
+            tgt_act = target_action[best_idx].cpu().numpy() # (7,)
+            pred_act = pred_action[best_idx].detach().cpu().numpy() # (7,)
             
             W = imgs.shape[0]
             
