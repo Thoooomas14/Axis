@@ -67,7 +67,7 @@ def train(args):
     dataloader = torch.utils.data.DataLoader(
         stream_loader, 
         batch_size=args.batch_size, 
-        num_workers=0, 
+        num_workers=args.num_workers, 
         pin_memory=True
     )
     
@@ -230,6 +230,7 @@ if __name__ == "__main__":
     # Visualization Args
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
+    parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
 
     args = parser.parse_args()
     train(args)
