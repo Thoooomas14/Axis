@@ -104,7 +104,7 @@ class Visualizer:
                 
             # Plot Action Comparison (Spanning bottom row)
             ax_act = fig.add_subplot(2, 1, 2)
-            x = np.arange(7)
+            x = np.arange(8)
             width = 0.35
             
             ax_act.bar(x - width/2, tgt_act, width, label='Ground Truth', color='green', alpha=0.7)
