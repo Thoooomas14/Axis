@@ -5,6 +5,7 @@ import os
 
 class Visualizer:
     def __init__(self, save_dir):
+        plt.switch_backend('Agg') # Essential for headless VMs
         self.save_dir = os.path.join(save_dir, 'visualizations')
         os.makedirs(self.save_dir, exist_ok=True)
         self.action_labels = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'g']
