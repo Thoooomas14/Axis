@@ -27,7 +27,7 @@ import numpy as np
 def generate_episode_gif(model, args, step, visualizer):
     """Loads one episode and generates a GIF."""
     try:
-        print(f"DEBUG: Starting generate_episode_gif for step {step}...")
+        print(f"DEBUG: Starting generate_episode_gif for step {step}...", flush=True)
         # Load one episode
         if args.data_dir and args.data_dir.startswith('gs://'):
             full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
@@ -70,9 +70,9 @@ def generate_episode_gif(model, args, step, visualizer):
             break
         
         if images_np is None: 
-            print("DEBUG: Failed to load any episode from dataset.")
+            print("DEBUG: Failed to load any episode from dataset.", flush=True)
             return
-        print(f"DEBUG: Loaded episode with {images_np.shape[0]} frames.")
+        print(f"DEBUG: Loaded episode with {images_np.shape[0]} frames.", flush=True)
 
         # Prepare Inputs
         device = args.device
@@ -122,15 +122,16 @@ def generate_episode_gif(model, args, step, visualizer):
         targets[-1] = proprio_np[-1]
         targets = torch.tensor(targets, dtype=torch.float32)
 
-        print("DEBUG: Calling visualizer.create_gif...")
+        print("DEBUG: Calling visualizer.create_gif...", flush=True)
         visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
-        print(f"Generated episode GIF for step {step}")
+        print(f"Generated episode GIF for step {step}", flush=True)
     except Exception as e:
         print(f"Error generating episode GIF: {e}")
 
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    print(f"Using device: {device}", flush=True)
+    print("DEBUG: Script started. Initializing...", flush=True)
 
     # --- Configuration ---
     config = {
@@ -228,8 +229,10 @@ def train(args):
     step = start_step 
     
     try:
+        print("DEBUG: Entering training loop...", flush=True)
         # Iterate over batches
         for batch in dataloader:
+            print(f"DEBUG: Batch loaded for step {step}", flush=True)
             if step >= target_step:
                 break
             
@@ -349,4 +352,5 @@ if __name__ == "__main__":
     parser.add_argument('--shuffle_buffer_size', type=int, default=100, help="Shuffle buffer size for TFDS")
 
     args = parser.parse_args()
+    print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
     train(args)
