@@ -105,16 +105,20 @@ def generate_episode_gif(model, args, step, visualizer):
         T = images_np.shape[0]
         images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0)
         proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
+        print("DEBUG: Tensors created.", flush=True)
         
         # Mock Goal (using start/end)
+        print("DEBUG: Importing GoalOracle...", flush=True)
         from training.data.goal_oracle import GoalOracle
         oracle = GoalOracle(output_dim=64)
+        print("DEBUG: GoalOracle initialized. Encoding goal...", flush=True)
         start_grip = proprio_np[0][7]
         end_grip = proprio_np[-1][7]
         task_type = 0
         if start_grip < 0.5 and end_grip > 0.5: task_type = 1
         elif start_grip > 0.5 and end_grip < 0.5: task_type = 2
         goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1]).to(device).unsqueeze(0)
+        print("DEBUG: Goal encoded.", flush=True)
 
         # Inference
         pred_actions = []
@@ -155,7 +159,9 @@ def generate_episode_gif(model, args, step, visualizer):
         visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
         print(f"Generated episode GIF for step {step}", flush=True)
     except Exception as e:
-        print(f"Error generating episode GIF: {e}")
+        print(f"Error generating episode GIF: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
