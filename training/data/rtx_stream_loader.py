@@ -157,13 +157,25 @@ class RTXStreamLoader(IterableDataset):
 
     def __iter__(self):
         # Load dataset in streaming mode
-        ds = tfds.load(
-            self.dataset_name, 
-            split=self.split, 
-            shuffle_files=True, 
-            try_gcs=True,
-            data_dir=self.data_dir
-        )
+        if self.data_dir and self.data_dir.startswith('gs://'):
+            # Use builder_from_directory for GCS to avoid recursion error
+            # Construct full path: gs://bucket/dataset_name/version
+            # Note: We assume the data_dir points to the root containing the dataset folder
+            # But builder_from_directory needs the specific dataset folder.
+            # Let's try appending the dataset name.
+            full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
+            builder = tfds.builder_from_directory(builder_dir=full_path)
+            ds = builder.as_dataset(split=self.split, shuffle_files=True)
+        else:
+            # Fallback to standard load
+            ds = tfds.load(
+                self.dataset_name, 
+                split=self.split, 
+                shuffle_files=True, 
+                try_gcs=True,
+                data_dir=self.data_dir
+            )
+            
         ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
