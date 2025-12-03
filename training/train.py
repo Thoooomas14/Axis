@@ -122,8 +122,10 @@ def generate_episode_gif(model, args, step, visualizer):
         model.reset_memory(1)
         W = 8 # window size
         
+        print("DEBUG: Starting inference loop...", flush=True)
         with torch.no_grad():
             for t in range(T):
+                if t % 10 == 0: print(f"DEBUG: Inference step {t}/{T}", flush=True)
                 if t < W:
                     pad_len = W - 1 - t
                     curr_imgs = images[:, :t+1]
@@ -139,6 +141,7 @@ def generate_episode_gif(model, args, step, visualizer):
                 pred_act, _, req_logit = model(win_imgs, win_props, goal_emb, update_queue=True, use_memory=True)
                 pred_actions.append(pred_act.cpu())
                 requery_preds.append(torch.sigmoid(req_logit).cpu())
+        print("DEBUG: Inference loop complete.", flush=True)
 
         pred_actions = torch.stack(pred_actions, dim=1).squeeze(0)
         requery_preds = torch.stack(requery_preds, dim=1).squeeze(0)
