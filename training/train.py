@@ -27,7 +27,7 @@ import numpy as np
 def generate_episode_gif(model, args, step, visualizer):
     """Loads one episode and generates a GIF."""
     try:
-        print(f"DEBUG: Starting generate_episode_gif for step {step}...", flush=True)
+        print(f"DEBUG: Starting generate_episode_gif (v2) for step {step}...", flush=True)
         # Load one episode
         # Use RTXStreamLoader to load one episode safely
         # We create a temporary loader just for this visualization
