@@ -47,18 +47,23 @@ def generate_episode_gif(model, args, step, visualizer):
                 img = tf.cast(img, tf.float32) / 255.0
                 imgs.append(tf.transpose(img, [2, 0, 1]).numpy())
                 
-                obs = s['observation']
-                p = np.zeros(6, dtype=np.float32)
-                if 'ee_pose' in obs: p = obs['ee_pose'].numpy()
+                # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
+                p = np.zeros(7, dtype=np.float32)
+                if 'base_pose_tool_reached' in obs:
+                    p = obs['base_pose_tool_reached'].numpy()
+                elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
                 elif 'pose' in obs: p = obs['pose'].numpy()
+                
                 g = 0.0
                 if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
                 elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
                 if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
-                p7 = np.zeros(7, dtype=np.float32)
-                p7[:6] = p[:6] if p.shape[0] >= 6 else np.pad(p, (0, 6-p.shape[0]))
-                p7[6] = g
-                props.append(p7)
+                
+                p8 = np.zeros(8, dtype=np.float32)
+                if p.shape[0] == 7: p8[:7] = p
+                elif p.shape[0] == 6: p8[:6] = p
+                p8[7] = g
+                props.append(p8)
             images_np = np.array(imgs)
             proprio_np = np.array(props)
             break
@@ -74,8 +79,8 @@ def generate_episode_gif(model, args, step, visualizer):
         # Mock Goal (using start/end)
         from training.data.goal_oracle import GoalOracle
         oracle = GoalOracle(output_dim=64)
-        start_grip = proprio_np[0][6]
-        end_grip = proprio_np[-1][6]
+        start_grip = proprio_np[0][7]
+        end_grip = proprio_np[-1][7]
         task_type = 0
         if start_grip < 0.5 and end_grip > 0.5: task_type = 1
         elif start_grip > 0.5 and end_grip < 0.5: task_type = 2
