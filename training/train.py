@@ -245,7 +245,6 @@ def train(args):
         target_step = float('inf')
     
     print("Starting training...")
-    pbar = tqdm(total=target_step if args.epochs == 0 else None, initial=start_step)
     
     import time
     start_time = time.time()
@@ -257,9 +256,21 @@ def train(args):
         # Loop structure
         num_epochs = args.epochs if args.epochs > 0 else 1
         
+        # Global pbar for step-based training
+        if args.epochs == 0:
+            pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps")
+        
         for epoch in range(start_epoch, num_epochs):
             if args.epochs > 0:
                 print(f"--- Epoch {epoch + 1}/{num_epochs} ---")
+                
+                # Estimate steps per epoch
+                # Heuristic: ~100 steps per episode, divided by batch size
+                num_episodes = len(stream_loader)
+                est_steps = (num_episodes * 100) // args.batch_size
+                if est_steps == 0: est_steps = None
+                
+                pbar = tqdm(total=est_steps, desc=f"Epoch {epoch + 1} (Est)")
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
@@ -326,6 +337,10 @@ def train(args):
                     if args.save_gif:
                         generate_episode_gif(model, args, step, visualizer)
             
+            # Close epoch pbar
+            if args.epochs > 0:
+                pbar.close()
+
             # End of Epoch Actions (Epoch-based)
             if args.epochs > 0:
                 print(f"Saving checkpoint at end of epoch {epoch + 1}")
@@ -344,7 +359,7 @@ def train(args):
                     visualizer.visualize_batch(step, batch, pred_action)
                     if args.save_gif:
                         generate_episode_gif(model, args, step, visualizer)
-            
+
             # End of inner loop
             if args.epochs == 0 and step >= target_step:
                 break
