@@ -4,11 +4,13 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_io as tfio # Required for GCS
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 from .goal_oracle import GoalOracle
 
 class RTXStreamLoader(IterableDataset):
     """
     Streams RT-X datasets from GCS, splits them into subtasks, and yields sliding windows.
+    Supports 'fractal20220817_data' and 'droid' datasets.
     """
     def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None):
         self.dataset_name = dataset_name
@@ -23,40 +25,45 @@ class RTXStreamLoader(IterableDataset):
 
     def _get_pose(self, obs):
         """Extracts 8D pose (3 Pos + 4 Quat + 1 Gripper) from observation."""
-        p = np.zeros(7, dtype=np.float32) # Default 7D if only pos/euler available
+        p = np.zeros(7, dtype=np.float32) # Default 7D [x,y,z,qx,qy,qz,qw]
         
-        # Try different keys
+        # 1. Try to get Pose
         if 'base_pose_tool_reached' in obs:
-            # 7D: [x, y, z, qx, qy, qz, qw]
-            pose_7d = obs['base_pose_tool_reached'].numpy()
-            # We want 8D: [x, y, z, qx, qy, qz, qw, g]
-            # So we just take the 7D pose as is
-            p = pose_7d
-                
+            # Fractal: 7D [x, y, z, qx, qy, qz, qw]
+            p = obs['base_pose_tool_reached'].numpy()
+        elif 'cartesian_position' in obs:
+            # Droid: 6D [x, y, z, rx, ry, rz] (Euler XYZ)
+            p6 = obs['cartesian_position'].numpy()
+            if p6.shape[0] == 6:
+                pos = p6[:3]
+                euler = p6[3:]
+                # Convert Euler to Quat
+                quat = R.from_euler('xyz', euler).as_quat() # [qx, qy, qz, qw]
+                p = np.concatenate([pos, quat])
         elif 'ee_pose' in obs: 
             p = obs['ee_pose'].numpy()
         elif 'pose' in obs: 
             p = obs['pose'].numpy()
         
-        # Gripper
+        # 2. Try to get Gripper
         g = 0.0
-        if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
-        elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
+        if 'gripper_closed' in obs: 
+            g = obs['gripper_closed'].numpy()
+        elif 'gripper_position' in obs:
+            # Droid: 1D float
+            g = obs['gripper_position'].numpy()
+        elif 'gripper_state' in obs: 
+            g = obs['gripper_state'].numpy()
+            
         if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
         
-        # Construct 8D
-        # If p was 7D (Pos+Quat), we append g -> 8D
-        # If p was 6D (Pos+Euler), we pad to 7D then append g -> 8D? 
-        # Actually, if we switch to Quat, we expect 7D pose input.
-        
+        # 3. Construct 8D
         p8 = np.zeros(8, dtype=np.float32)
         if p.shape[0] == 7:
             p8[:7] = p
         elif p.shape[0] == 6:
-            # Convert Euler to Quat if needed, or just pad?
-            # For now, let's assume we mostly get 7D from base_pose_tool_reached
+            # Fallback if conversion failed or wasn't done
             p8[:6] = p
-            # This is technically wrong if p is Euler, but we are optimizing for the main dataset
         
         p8[7] = g
         return p8
@@ -80,21 +87,27 @@ class RTXStreamLoader(IterableDataset):
         
         instr = ""
         if 'language_instruction' in episode:
-            # Handle both tensor and string input for testing
             val = episode['language_instruction']
-            if hasattr(val, 'numpy'):
-                instr = val.numpy().decode('utf-8')
-            else:
-                instr = str(val)
+            if hasattr(val, 'numpy'): instr = val.numpy().decode('utf-8')
+            else: instr = str(val)
 
         # 1. Extract Full Episode Data
         imgs = []
         props = []
         
+        # Image keys to check in order of preference
+        image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+        
         for s in steps:
             obs = s['observation']
-            # Handle image
-            img = obs.get('image')
+            
+            # Handle image (search for first available key)
+            img = None
+            for key in image_keys:
+                if key in obs:
+                    img = obs[key]
+                    break
+            
             if img is not None:
                 imgs.append(self._process_image(img))
             else:
