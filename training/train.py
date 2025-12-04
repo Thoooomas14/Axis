@@ -315,8 +315,9 @@ def train(args):
             # Visualization (if enabled and interval met)
             if args.viz and step % args.viz_interval == 0:
                 visualizer.visualize_batch(step, batch, pred_action)
-                # Also generate GIF
-                generate_episode_gif(model, args, step, visualizer)
+                # Only generate GIF if explicitly requested (memory intensive)
+                if args.save_gif:
+                    generate_episode_gif(model, args, step, visualizer)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
@@ -355,6 +356,7 @@ if __name__ == "__main__":
     
     # Visualization Args
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
+    parser.add_argument('--save_gif', action='store_true', help="Enable GIF generation (memory intensive)")
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
     parser.add_argument('--shuffle_buffer_size', type=int, default=100, help="Shuffle buffer size for TFDS")
