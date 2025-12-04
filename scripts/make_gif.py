@@ -149,7 +149,10 @@ def make_gif(args):
     model.reset_memory(1)
     W = config['window_size']
     
+    import time
+    
     print("Running inference...")
+    inference_times = []
     with torch.no_grad():
         for t in range(T):
             if t % 10 == 0: print(f"Step {t}/{T}")
@@ -166,6 +169,8 @@ def make_gif(args):
                 win_imgs = images[:, t-W+1 : t+1]
                 win_props = proprio[:, t-W+1 : t+1]
             
+            # Measure inference time
+            start_time = time.time()
             pred_act, _, req_logit = model(
                 win_imgs, 
                 win_props, 
@@ -173,6 +178,8 @@ def make_gif(args):
                 update_queue=True, 
                 use_memory=True
             )
+            end_time = time.time()
+            inference_times.append(end_time - start_time)
             
             pred_actions.append(pred_act.cpu())
             requery_preds.append(torch.sigmoid(req_logit).cpu())
@@ -190,7 +197,7 @@ def make_gif(args):
     print("Generating GIF...")
     viz = Visualizer(args.checkpoint_dir)
     # Use 'manual' prefix to distinguish from training GIFs
-    viz.create_gif(step, images[0], targets, pred_actions, requery_preds, save_prefix='manual_episode')
+    viz.create_gif(step, images[0], targets, pred_actions, requery_preds, inference_times=inference_times, save_prefix='manual_episode')
     print("Done!")
 
 if __name__ == "__main__":

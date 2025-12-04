@@ -125,7 +125,7 @@ class Visualizer:
         except Exception as e:
             print(f"Error visualizing batch: {e}")
 
-    def create_gif(self, step, images, target_actions, pred_actions, requery_preds, save_prefix='episode'):
+    def create_gif(self, step, images, target_actions, pred_actions, requery_preds, inference_times=None, save_prefix='episode'):
         """
         Creates a GIF visualizing an entire episode.
         Args:
@@ -134,6 +134,7 @@ class Visualizer:
             target_actions: (T, 7) numpy array or tensor
             pred_actions: (T, 7) numpy array or tensor
             requery_preds: (T, 1) numpy array or tensor
+            inference_times: (T,) list or array of inference times in seconds (optional)
         """
         try:
             import matplotlib.animation as animation
@@ -157,7 +158,10 @@ class Visualizer:
                 
                 # 1. Image
                 ax_img.imshow(images[t])
-                ax_img.set_title(f"Step {t}/{T}")
+                title = f"Step {t}/{T}"
+                if inference_times is not None and t < len(inference_times):
+                    title += f"\nInference: {inference_times[t]*1000:.1f} ms"
+                ax_img.set_title(title)
                 ax_img.axis('off')
                 
                 # 2. Action Bar Chart
