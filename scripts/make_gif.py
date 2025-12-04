@@ -13,14 +13,19 @@ from training.model.axis_v1 import AxisModel
 from training.utils.visualizer import Visualizer
 from training.data.goal_oracle import GoalOracle
 
+from scipy.spatial.transform import Rotation as R
+
 def load_episode(dataset_name, data_dir, split='train'):
     """Loads a single random episode from the dataset safely."""
     print(f"Loading dataset {dataset_name} from {data_dir}...")
-    if data_dir and data_dir.startswith('gs://'):
+    
+    # Special handling for fractal on GCS
+    if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
         full_path = f"{data_dir}/{dataset_name}/0.1.0"
         builder = tfds.builder_from_directory(builder_dir=full_path)
         ds = builder.as_dataset(split=split, shuffle_files=True)
     else:
+        # Standard load for Droid and others
         ds = tfds.load(dataset_name, split=split, shuffle_files=True, data_dir=data_dir)
     
     # Use safe iteration
@@ -31,24 +36,48 @@ def load_episode(dataset_name, data_dir, split='train'):
     images = []
     proprio = []
     
+    # Image keys to check
+    image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+    
     for s in steps:
+        obs = s['observation']
+        
         # Image
-        img = s['observation']['image']
-        img = tf.image.resize(img, (128, 128))
-        img = tf.cast(img, tf.float32) / 255.0
-        images.append(tf.transpose(img, [2, 0, 1]).numpy())
+        img = None
+        for key in image_keys:
+            if key in obs:
+                img = obs[key]
+                break
+        
+        if img is not None:
+            img = tf.image.resize(img, (128, 128))
+            img = tf.cast(img, tf.float32) / 255.0
+            images.append(tf.transpose(img, [2, 0, 1]).numpy())
+        else:
+            images.append(np.zeros((3, 128, 128), dtype=np.float32))
         
         # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
-        obs = s['observation']
         p = np.zeros(7, dtype=np.float32)
+        
         if 'base_pose_tool_reached' in obs:
             p = obs['base_pose_tool_reached'].numpy()
+        elif 'cartesian_position' in obs:
+            # Droid: 6D [x, y, z, rx, ry, rz]
+            p6 = obs['cartesian_position'].numpy()
+            if p6.shape[0] == 6:
+                pos = p6[:3]
+                euler = p6[3:]
+                quat = R.from_euler('xyz', euler).as_quat()
+                p = np.concatenate([pos, quat])
         elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
         elif 'pose' in obs: p = obs['pose'].numpy()
         
+        # Gripper
         g = 0.0
         if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
+        elif 'gripper_position' in obs: g = obs['gripper_position'].numpy()
         elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
+        
         if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
         
         p8 = np.zeros(8, dtype=np.float32)
