@@ -228,8 +228,11 @@ def train(args):
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch']
         print(f"Resumed at step {start_step}, epoch {start_epoch}")
+    elif os.path.exists(checkpoint_path):
+        print(f"WARNING: Checkpoint found at {checkpoint_path} but --resume was not provided.")
+        print("Starting from scratch. Use --resume to continue training.")
     else:
-        print("No checkpoint found or resume not requested. Starting from scratch.")
+        print("No checkpoint found. Starting from scratch.")
 
     # Determine total steps/epochs
     if args.epochs > 0:

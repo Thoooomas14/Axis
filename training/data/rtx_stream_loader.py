@@ -38,7 +38,9 @@ class RTXStreamLoader(IterableDataset):
             full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
             self.builder = tfds.builder_from_directory(builder_dir=full_path)
         else:
-            self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=True)
+            # Only try GCS if explicitly requested or if data_dir is None (default TFDS behavior)
+            use_gcs = (self.data_dir is None) 
+            self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=use_gcs)
             
     def __len__(self):
         """Returns the number of episodes in the dataset."""
