@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import IterableDataset
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import tensorflow_io as tfio # Required for GCS
+# import tensorflow_io as tfio # Moved to __init__
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from .goal_oracle import GoalOracle
@@ -28,8 +28,14 @@ class RTXStreamLoader(IterableDataset):
         self.builder = None
         self.ds = None
         
-        if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
-            full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
+        if self.data_dir and self.data_dir.startswith('gs://'):
+            try:
+                import tensorflow_io as tfio
+            except ImportError:
+                print("Warning: tensorflow_io not found, GCS access might fail.")
+            
+            if 'fractal' in self.dataset_name:
+                full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
             self.builder = tfds.builder_from_directory(builder_dir=full_path)
         else:
             self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=True)

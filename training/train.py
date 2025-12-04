@@ -1,8 +1,9 @@
+import os
+import sys
 
-import os
-import sys
-import os
-import sys
+# Suppress TF INFO/WARNING logs to reduce noise (e.g. OUT_OF_RANGE)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -260,17 +261,22 @@ def train(args):
         if args.epochs == 0:
             pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps")
         
+        steps_per_epoch_actual = None
+        
         for epoch in range(start_epoch, num_epochs):
             if args.epochs > 0:
                 print(f"--- Epoch {epoch + 1}/{num_epochs} ---")
                 
-                # Estimate steps per epoch
-                # Heuristic: ~100 steps per episode, divided by batch size
-                num_episodes = len(stream_loader)
-                est_steps = (num_episodes * 100) // args.batch_size
-                if est_steps == 0: est_steps = None
+                # Dynamic Progress Bar
+                # For the first epoch, we don't know the size, so we use total=None (counter only).
+                # For subsequent epochs, we use the number of steps from the previous epoch.
+                if epoch == 0:
+                    epoch_total = None
+                else:
+                    epoch_total = steps_per_epoch_actual
                 
-                pbar = tqdm(total=est_steps, desc=f"Epoch {epoch + 1} (Est)")
+                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}")
+                steps_in_current_epoch = 0
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
@@ -317,6 +323,7 @@ def train(args):
                 logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
                 
                 step += 1
+                steps_in_current_epoch += 1
                 pbar.update(1)
                 pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
                 
@@ -340,6 +347,7 @@ def train(args):
             # Close epoch pbar
             if args.epochs > 0:
                 pbar.close()
+                steps_per_epoch_actual = steps_in_current_epoch
 
             # End of Epoch Actions (Epoch-based)
             if args.epochs > 0:
