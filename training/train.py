@@ -27,29 +27,14 @@ import numpy as np
 def generate_episode_gif(model, args, step, visualizer):
     """Loads one episode and generates a GIF."""
     try:
-        print(f"DEBUG: Starting generate_episode_gif (v2) for step {step}...", flush=True)
+        # Clear cache to free up VRAM for visualization
+        torch.cuda.empty_cache()
+        
         # Load one episode
         # Use RTXStreamLoader to load one episode safely
-        # We create a temporary loader just for this visualization
-        # This avoids the GCS recursion/hanging issues of raw tfds.load
         from training.data.rtx_stream_loader import RTXStreamLoader
         
-        temp_loader = RTXStreamLoader(
-            dataset_name=args.dataset,
-            split='train',
-            batch_size=1,
-            window_size=1, # We want full episode, so window size doesn't matter much if we just extract steps
-            image_size=(128, 128),
-            data_dir=args.data_dir,
-            shuffle_buffer_size=1 # Minimal shuffle
-        )
-        
         # Manually iterate to get one episode
-        # RTXStreamLoader yields windows, but we need full episode.
-        # Actually, RTXStreamLoader's internal _process_episode yields windows.
-        # We need access to the raw episode.
-        
-        # Let's use the same logic as RTXStreamLoader.__iter__ but stop after one episode.
         if args.data_dir and args.data_dir.startswith('gs://'):
             full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
             builder = tfds.builder_from_directory(builder_dir=full_path)
@@ -60,7 +45,6 @@ def generate_episode_gif(model, args, step, visualizer):
         # Take one episode
         images_np, proprio_np = None, None
         
-        # Use iter() to avoid potential hanging with for loop on streaming dataset?
         iterator = iter(ds)
         episode = next(iterator)
         
@@ -95,43 +79,23 @@ def generate_episode_gif(model, args, step, visualizer):
         images_np = np.array(imgs)
         proprio_np = np.array(props)
         
-        if images_np is None: 
-            print("DEBUG: Failed to load any episode from dataset.", flush=True)
-            return
-        print(f"DEBUG: Loaded episode with {images_np.shape[0]} frames.", flush=True)
+        if images_np is None: return
 
         # Prepare Inputs
-        print(f"DEBUG: images_np shape: {images_np.shape}, dtype: {images_np.dtype}", flush=True)
-        T = images_np.shape[0]
-        # args.device does not exist! Get device from model.
         device = next(model.parameters()).device
-        print(f"DEBUG: Moving to device: {device}", flush=True)
-        
-        try:
-            print("DEBUG: Creating images tensor (CPU)...", flush=True)
-            images_cpu = torch.tensor(images_np, dtype=torch.float32)
-            print("DEBUG: Moving images to GPU...", flush=True)
-            images = images_cpu.to(device).unsqueeze(0)
-            
-            print("DEBUG: Creating proprio tensor...", flush=True)
-            proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
-            print("DEBUG: Tensors created successfully.", flush=True)
-        except Exception as e:
-            print(f"DEBUG: CRASH during tensor creation: {e}", flush=True)
-            raise e
+        T = images_np.shape[0]
+        images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0)
+        proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
         
         # Mock Goal (using start/end)
-        print("DEBUG: Importing GoalOracle...", flush=True)
         from training.data.goal_oracle import GoalOracle
         oracle = GoalOracle(output_dim=64)
-        print("DEBUG: GoalOracle initialized. Encoding goal...", flush=True)
         start_grip = proprio_np[0][7]
         end_grip = proprio_np[-1][7]
         task_type = 0
         if start_grip < 0.5 and end_grip > 0.5: task_type = 1
         elif start_grip > 0.5 and end_grip < 0.5: task_type = 2
         goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1]).to(device).unsqueeze(0)
-        print("DEBUG: Goal encoded.", flush=True)
 
         # Inference
         pred_actions = []
@@ -139,10 +103,8 @@ def generate_episode_gif(model, args, step, visualizer):
         model.reset_memory(1)
         W = 8 # window size
         
-        print("DEBUG: Starting inference loop...", flush=True)
         with torch.no_grad():
             for t in range(T):
-                if t % 10 == 0: print(f"DEBUG: Inference step {t}/{T}", flush=True)
                 if t < W:
                     pad_len = W - 1 - t
                     curr_imgs = images[:, :t+1]
@@ -158,7 +120,6 @@ def generate_episode_gif(model, args, step, visualizer):
                 pred_act, _, req_logit = model(win_imgs, win_props, goal_emb, update_queue=True, use_memory=True)
                 pred_actions.append(pred_act.cpu())
                 requery_preds.append(torch.sigmoid(req_logit).cpu())
-        print("DEBUG: Inference loop complete.", flush=True)
 
         pred_actions = torch.stack(pred_actions, dim=1).squeeze(0)
         requery_preds = torch.stack(requery_preds, dim=1).squeeze(0)
@@ -168,7 +129,6 @@ def generate_episode_gif(model, args, step, visualizer):
         targets[-1] = proprio_np[-1]
         targets = torch.tensor(targets, dtype=torch.float32)
 
-        print("DEBUG: Calling visualizer.create_gif...", flush=True)
         visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
         print(f"Generated episode GIF for step {step}", flush=True)
     except Exception as e:

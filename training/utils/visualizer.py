@@ -182,11 +182,19 @@ class Visualizer:
                 ax_act.text(0.5, 1.05, f"Requery: {req:.2f}", transform=ax_act.transAxes, 
                             ha='center', fontsize=12, color=req_color, weight='bold')
                 
+            # Limit frames to avoid OOM
+            if T > 100:
+                print(f"Warning: Episode too long ({T} frames), truncating to 100 for GIF.", flush=True)
+                T = 100
+                
             ani = animation.FuncAnimation(fig, update, frames=T, interval=200)
             
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.gif")
-            ani.save(save_path, writer='pillow')
-            plt.close()
+            # Reduce DPI to save memory
+            ani.save(save_path, writer='pillow', dpi=50) 
+            plt.close(fig)
+            import gc
+            gc.collect()
             print(f"Saved GIF to {save_path}", flush=True)
             
         except Exception as e:
