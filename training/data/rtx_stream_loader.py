@@ -212,6 +212,8 @@ class RTXStreamLoader(IterableDataset):
                 data_dir=self.data_dir
             )
             
+        # Repeat indefinitely so we don't run out of data
+        ds = ds.repeat()
         ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
