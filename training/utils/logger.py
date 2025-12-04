@@ -14,12 +14,12 @@ class TrainingLogger:
         if not os.path.exists(self.log_path):
             with open(self.log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['step', 'loss', 'action_loss', 'requery_loss'])
+                writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss'])
 
-    def log_step(self, step, loss, action_loss, requery_loss):
+    def log_step(self, step, epoch, loss, action_loss, requery_loss):
         with open(self.log_path, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([step, loss, action_loss, requery_loss])
+            writer.writerow([step, epoch, loss, action_loss, requery_loss])
 
     def plot_progress(self):
         try:

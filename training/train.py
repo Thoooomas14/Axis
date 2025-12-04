@@ -167,9 +167,11 @@ def train(args):
     print("Model initialized.")
 
     # Dataset
-    # RTXStreamLoader yields individual windows.
-    # We use DataLoader to batch them.
-    print(f"Initializing RTXStreamLoader for {args.dataset}...")
+    # If epochs > 0, we do NOT repeat the dataset (finite epoch).
+    # If steps > 0 (and epochs=0), we repeat the dataset (infinite stream).
+    repeat_dataset = (args.epochs == 0)
+    
+    print(f"Initializing RTXStreamLoader for {args.dataset} (repeat={repeat_dataset})...")
     stream_loader = RTXStreamLoader(
         dataset_name=args.dataset, 
         split='train', 
@@ -177,11 +179,11 @@ def train(args):
         window_size=config['window_size'],
         image_size=(128, 128),
         data_dir=args.data_dir,
-        shuffle_buffer_size=args.shuffle_buffer_size
+        shuffle_buffer_size=args.shuffle_buffer_size,
+        repeat=repeat_dataset
     )
     
     # Wrap in DataLoader for batching
-    # Note: num_workers=0 is usually safer for streaming datasets to avoid forking issues with GCS
     dataloader = torch.utils.data.DataLoader(
         stream_loader, 
         batch_size=args.batch_size, 
@@ -207,9 +209,10 @@ def train(args):
     
     # --- Resume from Checkpoint ---
     start_step = 0
+    start_epoch = 0
     checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
     
-    if os.path.exists(checkpoint_path):
+    if args.resume and os.path.exists(checkpoint_path):
         print(f"Resuming from latest checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
         
@@ -221,16 +224,28 @@ def train(args):
         model.load_state_dict(filtered_state_dict, strict=False)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_step = checkpoint['step']
-        print(f"Resumed at step {start_step}")
+        if 'epoch' in checkpoint:
+            start_epoch = checkpoint['epoch']
+        print(f"Resumed at step {start_step}, epoch {start_epoch}")
     else:
-        print("No checkpoint found. Starting from scratch.")
+        print("No checkpoint found or resume not requested. Starting from scratch.")
+
+    # Determine total steps/epochs
+    if args.epochs > 0:
+        total_steps = args.steps # Fallback
+        print(f"Training for {args.epochs} epochs.")
+    else:
+        total_steps = args.steps
+        print(f"Training for {args.steps} steps.")
 
     # Calculate target step (relative to start)
-    target_step = start_step + args.steps
-    print(f"Training for {args.steps} additional steps. Target step: {target_step}")
-
+    if args.epochs == 0:
+        target_step = start_step + args.steps
+    else:
+        target_step = float('inf')
+    
     print("Starting training...")
-    pbar = tqdm(total=target_step, initial=start_step)
+    pbar = tqdm(total=target_step if args.epochs == 0 else None, initial=start_step)
     
     import time
     start_time = time.time()
@@ -238,86 +253,107 @@ def train(args):
     
     try:
         print("DEBUG: Entering training loop...", flush=True)
-        # Iterate over batches
-        for batch in dataloader:
-            print(f"DEBUG: Batch loaded for step {step}", flush=True)
-            if step >= target_step:
-                break
+        
+        # Loop structure
+        num_epochs = args.epochs if args.epochs > 0 else 1
+        
+        for epoch in range(start_epoch, num_epochs):
+            if args.epochs > 0:
+                print(f"--- Epoch {epoch + 1}/{num_epochs} ---")
             
-            # Check time limit
-            if args.time_limit_min > 0:
-                elapsed_min = (time.time() - start_time) / 60.0
-                if elapsed_min >= args.time_limit_min:
-                    print(f"\nTime limit of {args.time_limit_min} minutes reached. Stopping.")
+            for batch in dataloader:
+                if args.epochs == 0 and step >= target_step:
                     break
                 
-            # Unpack Batch
-            # RTXStreamLoader yields: {'images', 'proprio', 'goal', 'action', 'requery'}
-            images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
-            proprio = batch['proprio'].to(device) # (B, 8, 7)
-            goal_embs = batch['goal'].to(device)  # (B, 64)
-            target_action = batch['action'].to(device) # (B, 7)
-            target_requery = batch['requery'].to(device) # (B, 1)
+                # Check time limit
+                if args.time_limit_min > 0:
+                    elapsed_min = (time.time() - start_time) / 60.0
+                    if elapsed_min >= args.time_limit_min:
+                        print(f"\nTime limit of {args.time_limit_min} minutes reached. Stopping.")
+                        break
+                    
+                # Unpack Batch
+                images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
+                proprio = batch['proprio'].to(device) # (B, 8, 7)
+                goal_embs = batch['goal'].to(device)  # (B, 64)
+                target_action = batch['action'].to(device) # (B, 7)
+                target_requery = batch['requery'].to(device) # (B, 1)
 
-            B = images.shape[0]
+                B = images.shape[0]
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
+                model.reset_memory(B) 
+                
+                # Forward Pass
+                pred_action, next_latent, requery_logit = model(
+                    images, 
+                    proprio, 
+                    goal_embs, 
+                    update_queue=args.use_latent_memory,
+                    use_memory=args.use_latent_memory
+                )
+                
+                # Compute Loss
+                action_loss = torch.mean((pred_action - target_action)**2)
+                requery_loss = requery_criterion(requery_logit, target_requery)
+                loss = action_loss + requery_loss
+                
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                
+                # Logging
+                logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
+                
+                step += 1
+                pbar.update(1)
+                pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
+                
+                # Checkpointing (Step-based)
+                if args.epochs == 0 and step % args.save_interval == 0:
+                    torch.save({
+                        'step': step,
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': loss.item(),
+                    }, checkpoint_path)
+                    logger.plot_progress()
+                    
+                # Visualization (Step-based)
+                if args.epochs == 0 and args.viz and step % args.viz_interval == 0:
+                    visualizer.visualize_batch(step, batch, pred_action)
+                    if args.save_gif:
+                        generate_episode_gif(model, args, step, visualizer)
             
-            # Reset Latent Queue for the new batch?
-            # Note: In this streaming window approach, each batch is independent. 
-            # We don't maintain state across batches for the same episode because batches are shuffled.
-            # So we should reset memory for every batch.
-            model.reset_memory(B) 
-            
-            # Forward Pass
-            # Model takes (B, W, ...) and outputs prediction for the LAST step in the window.
-            pred_action, next_latent, requery_logit = model(
-                images, 
-                proprio, 
-                goal_embs, 
-                update_queue=args.use_latent_memory,
-                use_memory=args.use_latent_memory
-            )
-            
-            # Compute Action Loss (MSE)
-            action_loss = torch.mean((pred_action - target_action)**2)
-            
-            # Compute Requery Loss (BCE)
-            requery_loss = requery_criterion(requery_logit, target_requery)
-            
-            # Combine
-            loss = action_loss + requery_loss
-            
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            
-            # Logging
-            logger.log_step(step, loss.item(), action_loss.item(), requery_loss.item())
-            
-            step += 1
-            pbar.update(1)
-            pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
-            
-            # Checkpointing
-            if step % args.save_interval == 0:
-                # Save Latest Checkpoint
+            # End of Epoch Actions (Epoch-based)
+            if args.epochs > 0:
+                print(f"Saving checkpoint at end of epoch {epoch + 1}")
                 torch.save({
                     'step': step,
+                    'epoch': epoch + 1, # Save as next epoch start
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': loss.item(),
                 }, checkpoint_path)
-                
-                # Update Plot
                 logger.plot_progress()
                 
-            # Visualization (if enabled and interval met)
-            if args.viz and step % args.viz_interval == 0:
-                visualizer.visualize_batch(step, batch, pred_action)
-                # Only generate GIF if explicitly requested (memory intensive)
-                if args.save_gif:
-                    generate_episode_gif(model, args, step, visualizer)
+                if args.viz:
+                    print(f"Visualizing at end of epoch {epoch + 1}")
+                    # Use the last batch for visualization
+                    visualizer.visualize_batch(step, batch, pred_action)
+                    if args.save_gif:
+                        generate_episode_gif(model, args, step, visualizer)
+            
+            # End of inner loop
+            if args.epochs == 0 and step >= target_step:
+                break
+            
+            # Time limit check break outer
+            if args.time_limit_min > 0:
+                elapsed_min = (time.time() - start_time) / 60.0
+                if elapsed_min >= args.time_limit_min:
+                    break
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
@@ -326,28 +362,29 @@ def train(args):
         import traceback
         traceback.print_exc()
     finally:
-        # Archival: Rename latest checkpoint to run checkpoint
+        # Archival
         if os.path.exists(checkpoint_path):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = f"run_{timestamp}_{args.dataset}_steps{step}.pt"
             run_path = os.path.join(args.checkpoint_dir, run_name)
             shutil.copy(checkpoint_path, run_path)
             print(f"\nRun saved to: {run_path}")
-            
-            # Also save final plot
             logger.plot_progress()
             print("Training complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, required=True, help='TFDS Dataset Name')
-    parser.add_argument('--data_dir', type=str, default=None, help='Directory to store/load dataset')
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--steps', type=int, default=10000)
-    parser.add_argument('--warmup_steps', type=int, default=1000)
-    parser.add_argument('--save_interval', type=int, default=1000)
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    # Training Args
+    parser.add_argument('--dataset', type=str, default='fractal20220817_data', help="Dataset name")
+    parser.add_argument('--data_dir', type=str, default=None, help="Data directory (local or GCS)")
+    parser.add_argument('--steps', type=int, default=10000, help="Number of training steps")
+    parser.add_argument('--epochs', type=int, default=0, help="Number of training epochs (overrides steps if > 0)")
+    parser.add_argument('--batch_size', type=int, default=1, help="Batch size")
+    parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
+    parser.add_argument('--warmup_steps', type=int, default=1000, help="Number of warmup steps for LR scheduler")
+    parser.add_argument('--save_interval', type=int, default=1000, help="Interval to save checkpoints")
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help="Checkpoint directory")
+    parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
     parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
     
     # New Arguments

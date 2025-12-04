@@ -12,7 +12,7 @@ class RTXStreamLoader(IterableDataset):
     Streams RT-X datasets from GCS, splits them into subtasks, and yields sliding windows.
     Supports 'fractal20220817_data' and 'droid' datasets.
     """
-    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None):
+    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None, repeat=True):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -20,8 +20,13 @@ class RTXStreamLoader(IterableDataset):
         self.image_size = image_size
         self.shuffle_buffer_size = shuffle_buffer_size
         self.data_dir = data_dir
+        self.repeat = repeat
         
         self.oracle = GoalOracle(output_dim=64)
+
+    # ... (methods _get_pose, _process_image, _process_episode remain unchanged) ...
+
+
 
     def _get_pose(self, obs):
         """Extracts 8D pose (3 Pos + 4 Quat + 1 Gripper) from observation."""
@@ -119,7 +124,7 @@ class RTXStreamLoader(IterableDataset):
         props = np.array(props)
         
         # 2. Identify Subtasks (Gripper Changes)
-        grippers = props[:, 6]
+        grippers = props[:, 7]
         is_closed = grippers > 0.5
         changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
         
@@ -138,8 +143,8 @@ class RTXStreamLoader(IterableDataset):
             
             # Infer Task Type
             # 0: Move, 1: Pick, 2: Place
-            start_grip = subtask_props[0][6]
-            end_grip = subtask_props[-1][6]
+            start_grip = subtask_props[0][7]
+            end_grip = subtask_props[-1][7]
             
             task_type = 0 # Default Move
             if start_grip < 0.5 and end_grip > 0.5:
@@ -212,8 +217,10 @@ class RTXStreamLoader(IterableDataset):
                 data_dir=self.data_dir
             )
             
-        # Repeat indefinitely so we don't run out of data
-        ds = ds.repeat()
+        # Repeat indefinitely ONLY if requested
+        if self.repeat:
+            ds = ds.repeat()
+            
         ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
