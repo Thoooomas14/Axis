@@ -197,7 +197,8 @@ def make_gif(args):
     print("Generating GIF...")
     viz = Visualizer(args.checkpoint_dir)
     # Use 'manual' prefix to distinguish from training GIFs
-    viz.create_gif(step, images[0], targets, pred_actions, requery_preds, inference_times=inference_times, save_prefix='manual_episode')
+    # Use higher DPI for manual generation
+    viz.create_gif(step, images[0], targets, pred_actions, requery_preds, inference_times=inference_times, save_prefix='manual_episode', dpi=100)
     print("Done!")
 
 if __name__ == "__main__":

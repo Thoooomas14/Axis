@@ -125,7 +125,7 @@ class Visualizer:
         except Exception as e:
             print(f"Error visualizing batch: {e}")
 
-    def create_gif(self, step, images, target_actions, pred_actions, requery_preds, inference_times=None, save_prefix='episode'):
+    def create_gif(self, step, images, target_actions, pred_actions, requery_preds, inference_times=None, save_prefix='episode', dpi=50):
         """
         Creates a GIF visualizing an entire episode.
         Args:
@@ -135,6 +135,8 @@ class Visualizer:
             pred_actions: (T, 7) numpy array or tensor
             requery_preds: (T, 1) numpy array or tensor
             inference_times: (T,) list or array of inference times in seconds (optional)
+            save_prefix: Prefix for the saved file
+            dpi: Dots per inch for the GIF (default 50 for memory safety)
         """
         try:
             import matplotlib.animation as animation
@@ -194,8 +196,8 @@ class Visualizer:
             ani = animation.FuncAnimation(fig, update, frames=T, interval=200)
             
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.gif")
-            # Reduce DPI to save memory
-            ani.save(save_path, writer='pillow', dpi=50) 
+            # Use specified DPI
+            ani.save(save_path, writer='pillow', dpi=dpi) 
             plt.close(fig)
             import gc
             gc.collect()
