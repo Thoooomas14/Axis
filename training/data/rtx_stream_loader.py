@@ -192,7 +192,8 @@ class RTXStreamLoader(IterableDataset):
 
     def __iter__(self):
         # Load dataset in streaming mode
-        if self.data_dir and self.data_dir.startswith('gs://'):
+        # Special handling for fractal on GCS to avoid recursion error
+        if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
             # Use builder_from_directory for GCS to avoid recursion error
             # Construct full path: gs://bucket/dataset_name/version
             # Note: We assume the data_dir points to the root containing the dataset folder
@@ -202,7 +203,7 @@ class RTXStreamLoader(IterableDataset):
             builder = tfds.builder_from_directory(builder_dir=full_path)
             ds = builder.as_dataset(split=self.split, shuffle_files=True)
         else:
-            # Fallback to standard load
+            # Fallback to standard load (works for droid and local)
             ds = tfds.load(
                 self.dataset_name, 
                 split=self.split, 
