@@ -34,8 +34,8 @@ class RTXStreamLoader(IterableDataset):
             except ImportError:
                 print("Warning: tensorflow_io not found, GCS access might fail.")
             
-            if 'fractal' in self.dataset_name:
-                full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
+        if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
+            full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
             self.builder = tfds.builder_from_directory(builder_dir=full_path)
         else:
             self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=True)
