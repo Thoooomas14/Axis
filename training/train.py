@@ -208,7 +208,9 @@ def train(args):
     )
     
     # Requery Loss Function
-    requery_criterion = nn.BCEWithLogitsLoss()
+    # pos_weight allows us to penalize False Negatives (missing help signal) more than False Positives.
+    pos_weight = torch.tensor([args.pos_weight]).to(device)
+    requery_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # --- Training Loop ---
     model.train()
@@ -431,6 +433,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
     parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
     parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss (increase to 10.0+ to prioritize asking for help)")
+    parser.add_argument('--pos_weight', type=float, default=1.0, help="Asymmetric loss weight for positive class (increase to >1.0 to penalize missing 'help needed' signals)")
 
     args = parser.parse_args()
     print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
