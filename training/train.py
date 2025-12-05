@@ -321,7 +321,9 @@ def train(args):
                 # Compute Loss
                 action_loss = torch.mean((pred_action - target_action)**2)
                 requery_loss = requery_criterion(requery_logit, target_requery)
-                loss = action_loss + requery_loss
+                
+                # Weighted Loss
+                loss = action_loss + (requery_loss * args.requery_weight)
                 
                 loss.backward()
                 optimizer.step()
@@ -428,6 +430,7 @@ if __name__ == "__main__":
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
     parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
+    parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss (increase to 10.0+ to prioritize asking for help)")
 
     args = parser.parse_args()
     print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
