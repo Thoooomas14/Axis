@@ -23,7 +23,11 @@ class TrainingLogger:
 
     def plot_progress(self):
         try:
-            df = pd.read_csv(self.log_path)
+            try:
+                df = pd.read_csv(self.log_path, on_bad_lines='skip')
+            except TypeError:
+                # Fallback for older pandas versions
+                df = pd.read_csv(self.log_path, error_bad_lines=False)
             if len(df) < 2: return
             
             plt.figure(figsize=(12, 6))
