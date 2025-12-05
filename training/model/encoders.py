@@ -92,9 +92,9 @@ class VisionEncoder(nn.Module):
 class ProprioEncoder(nn.Module):
     """
     Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
-    Default input_dim=6 (3 Pos + 3 Rot).
+    Default input_dim=7 (3 Pos + 3 Rot + 1 Gripper).
     """
-    def __init__(self, input_dim=6, output_dim=256, hidden_dim=128):
+    def __init__(self, input_dim=7, output_dim=256, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -112,7 +112,7 @@ class GoalEncoder(nn.Module):
     """
     Project semantic goal embeddings (from LLM/Gemini) into the model's dimension.
     """
-    def __init__(self, input_dim=768, output_dim=256): # Default input_dim 768 for standard BERT/Gemini embeddings
+    def __init__(self, input_dim=64, output_dim=256): # Default input_dim 64 for parsed Gemini embeddings
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, output_dim),

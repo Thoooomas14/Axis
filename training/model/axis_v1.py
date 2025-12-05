@@ -1,17 +1,22 @@
 import torch
 import torch.nn as nn
-from .encoders import VisionEncoder, GoalEncoder
+from .encoders import VisionEncoder, GoalEncoder, ProprioEncoder
 from .token_learner import TokenLearner
 from .latent import LatentQueue, LatentProjection
 from .transformer import AxisTransformer
-from .decoders import RequeryDecoder
-from .adapters import RobotAdapter
+from .decoders import RequeryDecoder, ActionDecoder
 
 class AxisModel(nn.Module):
     """
-    The Axis V1 Model (Multi-Robot Support).
+    The Axis V1 Model.
     Integrates Vision, Semantic Goals, and Latent Memory into a Transformer-based policy.
-    Uses RobotAdapters to handle robot-specific proprioception and actions.
+    Inputs:
+        - Images: (B, Window, C, H, W)
+        - Proprio: (B, Window, 8) [Pos, Rot(Quat), Gripper]
+        - Goal: (B, 64) [Parsed Gemini Output]
+    Outputs:
+        - Action: (B, 8) [Next EE Pose]
+        - Requery: (B, 1)
     """
     def __init__(self, config):
         super().__init__()
@@ -20,7 +25,7 @@ class AxisModel(nn.Module):
 
         # --- Shared Components ---
         self.goal_encoder = GoalEncoder(
-            input_dim=config.get('goal_dim', 768), 
+            input_dim=config.get('goal_dim', 64), 
             output_dim=config.get('cond_dim', 256)
         )
         
@@ -66,81 +71,99 @@ class AxisModel(nn.Module):
             embed_dim=embed_dim
         )
 
-        # --- Robot Adapters ---
-        # config['robots'] should be a dict: { 'robot_name': { 'proprio_dim': 6, 'action_dim': 6 } }
-        self.adapters = nn.ModuleDict()
-        if 'robots' in config:
-            for robot_name, robot_cfg in config['robots'].items():
-                self.adapters[robot_name] = RobotAdapter(
-                    proprio_input_dim=robot_cfg['proprio_dim'],
-                    action_output_dim=robot_cfg['action_dim'],
-                    embed_dim=config.get('embed_dim', 256)
-                )
-        else:
-            # Fallback for backward compatibility or single robot mode
-            # We create a 'default' adapter
-            self.adapters['default'] = RobotAdapter(
-                proprio_input_dim=config.get('proprio_dim', 6),
-                action_output_dim=config.get('action_dim', 6),
-                embed_dim=config.get('embed_dim', 256)
-            )
+        # --- Robot Components (Directly Instantiated) ---
+        self.proprio_encoder = ProprioEncoder(
+            input_dim=config.get('proprio_dim', 8),
+            output_dim=embed_dim,
+            hidden_dim=config.get('hidden_dim', 128)
+        )
 
-    def forward(self, images, proprio, goal_embedding, robot_name='default', update_queue=True):
+        self.action_decoder = ActionDecoder(
+            input_dim=embed_dim,
+            output_dim=config.get('action_dim', 8),
+            hidden_dim=config.get('hidden_dim', 128)
+        )
+
+    def forward(self, images, proprio, goal_embedding, update_queue=True, use_memory=False):
         """
         Args:
-            images: (B, C, H, W)
-            proprio: (B, proprio_dim)
+            images: (B, Window, C, H, W)
+            proprio: (B, Window, proprio_dim)
             goal_embedding: (B, goal_dim)
-            robot_name: str, name of the robot to use (must be in self.adapters)
-            update_queue: Whether to update the latent queue (inference mode)
-        Returns:
-            pred_action: (B, action_dim)
-            next_latent: (B, latent_dim)
-            requery_logit: (B, 1)
+            update_queue: bool
+            use_memory: bool (Default False for early training)
         """
-        B = images.shape[0]
+        B, W, C, H, _ = images.shape
         
-        if robot_name not in self.adapters:
-            raise ValueError(f"Robot '{robot_name}' not found in adapters: {list(self.adapters.keys())}")
-        
-        adapter = self.adapters[robot_name]
-
-        # 1. Encode Goal
+        # 1. Encode Goal (Shared across window)
         goal_cond = self.goal_encoder(goal_embedding) # (B, cond_dim)
+        # Expand goal for the window batch processing
+        goal_cond_expanded = goal_cond.unsqueeze(1).expand(-1, W, -1).reshape(B*W, -1)
 
-        # 2. Encode Vision (Conditioned on Goal)
-        vision_features = self.vision_encoder(images, goal_cond) # (B, C_feat, H', W')
-        vision_tokens = self.token_learner(vision_features) # (B, K, embed_dim)
+        # 2. Encode Vision
+        # Flatten B and W -> (B*W, C, H, W)
+        images_flat = images.reshape(B*W, C, H, -1)
+        vision_features = self.vision_encoder(images_flat, goal_cond_expanded) # (B*W, C_feat, H', W')
+        vision_tokens = self.token_learner(vision_features) # (B*W, 1, embed_dim)
+        vision_tokens = vision_tokens.reshape(B, W, 1, -1).squeeze(2) # (B, W, embed_dim)
 
-        # 3. Encode Proprio (Robot Specific)
-        proprio_emb = adapter.encode_proprio(proprio) # (B, embed_dim)
-        proprio_tokens = proprio_emb.unsqueeze(1) # (B, 1, embed_dim)
+        # 3. Encode Proprio
+        proprio_flat = proprio.reshape(B*W, -1)
+        proprio_emb = self.proprio_encoder(proprio_flat) # (B*W, embed_dim)
+        proprio_tokens = proprio_emb.reshape(B, W, 1, -1) # (B, W, 1, embed_dim)
 
-        # 4. Get Latent History
-        latent_history = self.latent_queue.forward()
-        if latent_history.shape[0] != B:
-            latent_history = latent_history.expand(B, -1, -1)
-            
-        latent_tokens = self.latent_proj(latent_history) # (B, T, embed_dim)
+        # 4. Construct Sequence: Interleaved [Proprio_t, Vision_t_1...Vision_t_k]
+        # We want: P0, V0_1..V0_k, P1, ...
+        # Concatenate along token dim then flatten
+        # (B, W, 1+K, D)
+        
+        # vision_tokens from TokenLearner is (B*W, K, D)
+        K = vision_tokens.shape[1]
+        vision_tokens = vision_tokens.reshape(B, W, K, -1) # (B, W, K, embed_dim)
+        
+        context_tokens = torch.cat([proprio_tokens, vision_tokens], dim=2)
+        context_tokens = context_tokens.reshape(B, W * (1 + K), -1) # (B, T_seq, D)
 
-        # 5. Concatenate Tokens
-        input_tokens = torch.cat([latent_tokens, vision_tokens, proprio_tokens], dim=1)
+        # 5. Add Latent History (Optional)
+        # Latent is appended at the end
+        input_tokens_list = [context_tokens]
+        
+        if use_memory:
+            latent_history = self.latent_queue.forward()
+            if latent_history.shape[0] != B:
+                latent_history = latent_history.expand(B, -1, -1)
+            latent_tokens = self.latent_proj(latent_history) # (B, T_latent, embed_dim)
+            input_tokens_list.append(latent_tokens)
+
+        input_tokens = torch.cat(input_tokens_list, dim=1)
 
         # 6. Transformer Pass
         output_tokens = self.transformer(input_tokens)
 
         # 7. Decode
-        last_token = output_tokens[:, -1, :]
+        # Readout from the LAST Proprio token in the window.
+        # Window indices: 0..W-1.
+        # Stride per step: 1 + K
+        # Proprio indices: 0, 1+K, 2(1+K)...
+        # Last Proprio index: (W-1) * (1 + K)
+        stride = 1 + K
+        readout_idx = (W - 1) * stride
+        last_token = output_tokens[:, readout_idx, :]
         
-        pred_action = adapter.decode_action(last_token) # Robot Specific
+        pred_action = self.action_decoder(last_token)
         
-        # Simple projection for latent state (Identity if dims match)
+        # Simple projection for latent state
         next_latent = self.latent_proj_out(last_token)
         
         requery_logit = self.requery_decoder(last_token)
 
-        # 8. Update Queue (Inference only usually)
+        # 8. Update Queue
         if update_queue:
             self.latent_queue.enqueue(next_latent.detach())
 
         return pred_action, next_latent, requery_logit
+
+    def reset_memory(self, batch_size):
+        """Resets the latent memory for a new batch."""
+        self.latent_queue.reset(batch_size)
+
