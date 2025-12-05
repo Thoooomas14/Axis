@@ -184,6 +184,11 @@ def train(args):
         repeat=repeat_dataset
     )
     
+    # Warn about memory usage if using multiple workers
+    if args.num_workers > 0:
+        print(f"WARNING: Using {args.num_workers} workers. Total shuffle buffer usage: {args.num_workers * args.shuffle_buffer_size} episodes.")
+        print("If you encounter OOM errors, reduce --num_workers or --shuffle_buffer_size.")
+    
     # Wrap in DataLoader for batching
     dataloader = torch.utils.data.DataLoader(
         stream_loader, 
@@ -422,7 +427,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_gif', action='store_true', help="Enable GIF generation (memory intensive)")
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
-    parser.add_argument('--shuffle_buffer_size', type=int, default=100, help="Shuffle buffer size for TFDS")
+    parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
 
     args = parser.parse_args()
     print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)

@@ -101,5 +101,73 @@ def verify_loader_logic():
     else:
         print("\n❌ Verification Failed: No windows generated.")
 
+import argparse
+import time
+import shutil
+from tqdm import tqdm
+
+def stress_test(args):
+    print(f"Starting Stress Test for {args.dataset}...")
+    print(f"Workers: {args.num_workers}, Shuffle Buffer: {args.shuffle_buffer_size}")
+    
+    # Check Shared Memory (common crash cause in Docker/Cloud)
+    if os.path.exists('/dev/shm'):
+        shm_total = shutil.disk_usage('/dev/shm').total / (1024**3)
+        print(f"Shared Memory (/dev/shm) Total: {shm_total:.2f} GB_")
+        if shm_total < 2.0 and args.num_workers > 0:
+            print("WARNING: Low shared memory detected (<2GB). Workers may crash. Try --num_workers 0.")
+
+    loader = RTXStreamLoader(
+        dataset_name=args.dataset,
+        split='train',
+        batch_size=1,
+        window_size=8,
+        shuffle_buffer_size=args.shuffle_buffer_size,
+        data_dir=args.data_dir
+    )
+    
+    dataloader = torch.utils.data.DataLoader(
+        loader,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    
+    print("Iterating through DataLoader...")
+    start_time = time.time()
+    count = 0
+    
+    try:
+        pbar = tqdm(total=args.steps)
+        for i, batch in enumerate(dataloader):
+            if i >= args.steps: break
+            
+            # Simulate basic tensor usage
+            _ = batch['images'].float()
+            
+            count += 1
+            pbar.update(1)
+            
+        print(f"\n✅ Stress Test Passed! Processed {count} batches in {time.time() - start_time:.2f}s")
+        
+    except Exception as e:
+        print(f"\n❌ Stress Test Failed: {e}")
+        import traceback
+        traceback.print_exc()
+
 if __name__ == "__main__":
-    verify_loader_logic()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, default='logic', choices=['logic', 'stress'], help='Test mode')
+    parser.add_argument('--dataset', type=str, default='fractal20220817_data', help='Dataset for stress test')
+    parser.add_argument('--data_dir', type=str, default=None, help='Data directory')
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of workers')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
+    parser.add_argument('--shuffle_buffer_size', type=int, default=10, help='Shuffle buffer size')
+    parser.add_argument('--steps', type=int, default=1000, help='Steps to run')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'logic':
+        verify_loader_logic()
+    else:
+        stress_test(args)

@@ -109,23 +109,15 @@ class RTXStreamLoader(IterableDataset):
         Yields:
             dict: Windowed sample
         """
-        steps = list(episode['steps'])
-        if len(steps) == 0: return
-        
-        instr = ""
-        if 'language_instruction' in episode:
-            val = episode['language_instruction']
-            if hasattr(val, 'numpy'): instr = val.numpy().decode('utf-8')
-            else: instr = str(val)
-
-        # 1. Extract Full Episode Data
+        # 1. Extract Full Episode Data without holding raw steps in memory
         imgs = []
         props = []
         
         # Image keys to check in order of preference
         image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
         
-        for s in steps:
+        # Iterate directly over the TF dataset iterator to save memory
+        for s in episode['steps']:
             obs = s['observation']
             
             # Handle image (search for first available key)
@@ -142,15 +134,18 @@ class RTXStreamLoader(IterableDataset):
                 
             props.append(self._get_pose(obs))
         
+        if not imgs: return # Empty episode
+        
         imgs = np.array(imgs)
         props = np.array(props)
+        total_steps = len(imgs)
         
         # 2. Identify Subtasks (Gripper Changes)
         grippers = props[:, 7]
         is_closed = grippers > 0.5
         changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
         
-        split_indices = [0] + list(changes) + [len(steps)]
+        split_indices = [0] + list(changes) + [total_steps]
         
         # 3. Process Subtasks
         for i in range(len(split_indices) - 1):
