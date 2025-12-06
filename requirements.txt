@@ -1,0 +1,15 @@
+numpy<2.0
+torch==2.2.1
+tqdm
+tensorflow
+tensorflow_datasets
+tensorflow-io
+matplotlib
+pandas
+scipy
+apache_beam
+torchvision
+pytest
+flake8
+pyyaml
+pillow

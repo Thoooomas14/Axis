@@ -3,9 +3,25 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
-  - numpy
+  - python=3.10
+  - numpy>=1.24
   - pip
+  # Install heavy ML frameworks via Conda (faster resolution & downloads)
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - tensorflow
+  - tqdm
+  - protobuf>=4.25.3 # Force newer protobuf for TF compatibility
   - pip:
-      - torch~=2.2.1 --index-url https://download.pytorch.org/whl/cu121
-      - mlagents
+      - tensorflow-datasets
+      - tensorflow-io
+      - matplotlib
+      - pandas
+      - apache_beam
+      - scipy
+      - pytest
+      - flake8
+      - pyyaml
+      - pillow
