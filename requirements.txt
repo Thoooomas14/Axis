@@ -4,3 +4,10 @@ tqdm
 tensorflow
 tensorflow_datasets
 tensorflow-io
+matplotlib
+pandas
+scipy
+apache_beam
+torchvision
+pytest
+flake8

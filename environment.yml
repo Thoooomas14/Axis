@@ -21,3 +21,5 @@ dependencies:
       - pandas
       - apache_beam
       - scipy
+      - pytest
+      - flake8
