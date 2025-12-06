@@ -112,11 +112,18 @@ def parse_environment_yml(filepath):
             package = re.split(r'[<>=!]', dep)[0].strip()
             if package != 'python' and package != 'pip':
                 packages.add(normalize_package_name(package))
-        elif isinstance(dep, dict) and 'pip' in dep:
             for pip_dep in dep['pip']:
                 package = re.split(r'[<>=!]', pip_dep)[0].strip()
                 packages.add(normalize_package_name(package))
                 
+    # Aliases
+    if 'scikit-learn' in packages: 
+        packages.remove('scikit-learn')
+        packages.add('sklearn')
+    if 'pytorch' in packages:
+        packages.remove('pytorch')
+        packages.add('torch')
+        
     return packages
 
 def test_requirements_vs_codebase():
