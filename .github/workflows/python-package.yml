@@ -29,11 +29,11 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         # Install CPU-only versions of massive libraries to speed up CI
+        # We ONLY install what is needed for tests (smoke test + dependency test)
         pip install torch==2.2.1 torchvision --index-url https://download.pytorch.org/whl/cpu
-        pip install tensorflow-cpu
-        # Install rest of requirements (will skip already installed packages)
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install flake8 pytest
+        pip install numpy scipy pytest flake8 pyyaml pandas
+        # NOTE: We intentionally DO NOT install full requirements.txt (e.g. tensorflow) to save time.
+        # The smoke test does not require TensorFlow.
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names

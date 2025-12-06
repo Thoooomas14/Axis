@@ -11,3 +11,4 @@ apache_beam
 torchvision
 pytest
 flake8
+pyyaml
