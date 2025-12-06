@@ -2,6 +2,10 @@
 
 Axis is a PyTorch-based robot learning framework designed for real-time, adaptive motion control. It integrates vision, semantic goals, and latent memory into a unified transformer-based policy, capable of controlling multiple robot embodiments (e.g., UR3e, WidowX).
 
+## Latest Results
+![Eval Episode latest](fractal_episode_step_59108.gif)
+![Driod Eval Episode latest](images/driod_100_episode_step_41600.GIF)
+
 ## Features
 
 -   **Multi-Modal Input**: Consumes RGB images, Proprioception (7D EE Pose), and Semantic Goal Embeddings (64D).
