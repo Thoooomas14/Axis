@@ -12,3 +12,4 @@ torchvision
 pytest
 flake8
 pyyaml
+pillow

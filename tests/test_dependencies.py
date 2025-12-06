@@ -8,6 +8,10 @@ import sys
 # Define project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
+def normalize_package_name(name):
+    """Normalizes package name to lowercase and hyphens instead of underscores."""
+    return name.lower().replace('_', '-')
+
 def get_imports_from_file(filepath):
     """Extracts top-level imports from a Python file."""
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -23,8 +27,30 @@ def get_imports_from_file(filepath):
                 imports.add(alias.name.split('.')[0])
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                imports.add(node.module.split('.')[0])
+                # Handle relative imports (start with .)
+                if not node.level:
+                    imports.add(node.module.split('.')[0])
     return imports
+
+def is_internal_module(module_name, current_dir, root_dir):
+    """Checks if a module is likely internal (exists as file or dir in codebase)."""
+    # 1. Check relative to current directory (for poor man's relative imports without dot)
+    if os.path.exists(os.path.join(current_dir, f"{module_name}.py")):
+        return True
+    if os.path.isdir(os.path.join(current_dir, module_name)):
+        return True
+        
+    # 2. Check relative to project root (absolute internal imports)
+    if os.path.exists(os.path.join(root_dir, f"{module_name}.py")):
+        return True
+    if os.path.isdir(os.path.join(root_dir, module_name)):
+        return True
+    
+    # 3. Known Internal prefixes
+    if module_name in ['training', 'scripts', 'simulation', 'tests', 'data']:
+        return True
+        
+    return False
 
 def get_codebase_imports(root_dir, ignore_dirs=None):
     """Scans the codebase for external imports."""
@@ -32,15 +58,11 @@ def get_codebase_imports(root_dir, ignore_dirs=None):
         ignore_dirs = ['.git', '.github', '__pycache__', 'venv', 'env', 'tests', 'simulation']
     
     unique_imports = set()
-    std_lib = sys.stdlib_module_names if hasattr(sys, 'stdlib_module_names') else set() # Python 3.10+
+    std_lib = sys.stdlib_module_names if hasattr(sys, 'stdlib_module_names') else set()
     
-    # Fallback for older python or if sys.stdlib_module_names is missing (unlikely in 3.10)
+    # Fallback
     if not std_lib:
-        import sysconfig
-        # This is a rough approximation
-        std_lib = set(['os', 'sys', 'math', 'json', 're', 'time', 'datetime', 'argparse', 'shutil', 'pickle', 'traceback', 'typing', 'unittest', 'csv', 'random'])
-
-    custom_modules = set(['training', 'scripts']) # Internal packages
+        std_lib = set(['os', 'sys', 'math', 'json', 're', 'time', 'datetime', 'argparse', 'shutil', 'pickle', 'traceback', 'typing', 'unittest', 'csv', 'random', 'collections', 'functools', 'itertools'])
 
     for subdir, dirs, files in os.walk(root_dir):
         # Filter directories
@@ -52,13 +74,15 @@ def get_codebase_imports(root_dir, ignore_dirs=None):
                 file_imports = get_imports_from_file(filepath)
                 
                 for imp in file_imports:
-                    if imp not in std_lib and imp not in custom_modules:
-                        unique_imports.add(imp)
+                    if imp not in std_lib:
+                        # Check if internal
+                        if not is_internal_module(imp, subdir, root_dir):
+                            unique_imports.add(imp)
 
     return unique_imports
 
 def parse_requirements(filepath):
-    """Parses requirements.txt into a set of package names."""
+    """Parses requirements.txt into a set of normalized package names."""
     if not os.path.exists(filepath):
         return set()
     
@@ -68,16 +92,12 @@ def parse_requirements(filepath):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            # Remove version specifiers
             package = re.split(r'[<>=!]', line)[0].strip()
-            # Handle package aliases (e.g. scikit-learn vs sklearn)
-            if package == 'scikit-learn': package = 'sklearn'
-            if package == 'Pillow': package = 'PIL'
-            packages.add(package.lower())
+            packages.add(normalize_package_name(package))
     return packages
 
 def parse_environment_yml(filepath):
-    """Parses environment.yml into a set of package names."""
+    """Parses environment.yml into a set of normalized package names."""
     if not os.path.exists(filepath):
         return set()
     
@@ -91,20 +111,12 @@ def parse_environment_yml(filepath):
         if isinstance(dep, str):
             package = re.split(r'[<>=!]', dep)[0].strip()
             if package != 'python' and package != 'pip':
-                packages.add(package.lower())
+                packages.add(normalize_package_name(package))
         elif isinstance(dep, dict) and 'pip' in dep:
             for pip_dep in dep['pip']:
                 package = re.split(r'[<>=!]', pip_dep)[0].strip()
-                packages.add(package.lower())
+                packages.add(normalize_package_name(package))
                 
-    # Aliases
-    if 'scikit-learn' in packages: 
-        packages.remove('scikit-learn')
-        packages.add('sklearn')
-    if 'pytorch' in packages:
-        packages.remove('pytorch')
-        packages.add('torch')
-        
     return packages
 
 def test_requirements_vs_codebase():
@@ -120,34 +132,27 @@ def test_requirements_vs_codebase():
         'yaml': 'pyyaml',
         'skimage': 'scikit-image',
         'tqdm': 'tqdm',
-        'bs4': 'beautifulsoup4'
+        'bs4': 'beautifulsoup4',
+        'google.colab': None, # Ignore colab specific
     }
-    
-    # Invert requirements alias mapping for checking
-    # requirements.txt usually has 'pillow', code has 'PIL'
-    # strict check: name in code import -> name in requirements line
     
     missing_deps = []
     
     for imp in code_imports:
+        norm_imp = normalize_package_name(imp)
+        
         # Check direct match
-        if imp.lower() in reqs:
+        if norm_imp in reqs:
             continue
             
         # Check mapped match
         if imp in import_map:
-            if import_map[imp] in reqs:
+            target = import_map[imp]
+            if target is None: continue # Ignored
+            if normalize_package_name(target) in reqs:
                 continue
         
-        # Check if it's a known non-pypi package or special case
-        # e.g., 'training' is internal, but we filtered that.
-        # 'tensorflow' -> 'tensorflow'
-        
         missing_deps.append(imp)
-    
-    # Filter out some known loose ends if necessary, or fail
-    # For now, we want stricness.
-    # Note: 'tensorflow.keras' -> 'tensorflow' checked by logic 'tensorflow'
     
     assert not missing_deps, f"The following imports are used in code but missing from requirements.txt: {missing_deps}"
 
@@ -157,22 +162,10 @@ def test_environment_vs_requirements():
     env_deps = parse_environment_yml(os.path.join(PROJECT_ROOT, 'environment.yml'))
     
     # Check for items in requirements that are missing from environment.yml
-    # Note: environment.yml often has conda packages which might be named differently
-    # But for now we assume mostly pip consistency or same names.
-    
     missing_in_env = reqs - env_deps
     
-    # Allow some differences (e.g. system libs)
-    ignored = {'tensorflow-io'} # specific exclusion if needed, but let's try strict first
-    missing_in_env = {d for d in missing_in_env if d not in ignored}
-
-    # Fixup alias issues manual check
-    # e.g. torch vs pytorch (handled in parser)
+    # Exclusions
+    # 'pip' is implicit
     
     assert not missing_in_env, f"packages in requirements.txt but missing from environment.yml: {missing_in_env}"
 
-if __name__ == "__main__":
-    # verification
-    print("Imports in codebase:", get_codebase_imports(PROJECT_ROOT))
-    print("Requirements:", parse_requirements(os.path.join(PROJECT_ROOT, 'requirements.txt')))
-    print("Env:", parse_environment_yml(os.path.join(PROJECT_ROOT, 'environment.yml')))
