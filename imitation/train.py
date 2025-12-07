@@ -16,11 +16,11 @@ from datetime import datetime
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.model.axis_v1 import AxisModel
-from training.data.rtx_stream_loader import RTXStreamLoader
-from training.utils.scheduler import CosineAnnealingWarmupRestarts
-from training.utils.logger import TrainingLogger
-from training.utils.visualizer import Visualizer
+from src.models.axis_v1 import AxisModel
+from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
+from imitation.utils.logger import TrainingLogger
+from imitation.utils.visualizer import Visualizer
 import tensorflow_datasets as tfds
 import tensorflow as tf
 import numpy as np
@@ -33,7 +33,7 @@ def generate_episode_gif(model, args, step, visualizer):
         
         # Load one episode
         # Use RTXStreamLoader to load one episode safely
-        from training.data.rtx_stream_loader import RTXStreamLoader
+        from imitation.data.rtx_stream_loader import RTXStreamLoader
         
         # Manually iterate to get one episode
         if args.data_dir and args.data_dir.startswith('gs://'):
@@ -89,7 +89,7 @@ def generate_episode_gif(model, args, step, visualizer):
         proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
         
         # Mock Goal (using start/end)
-        from training.data.goal_oracle import GoalOracle
+        from imitation.data.goal_oracle import GoalOracle
         oracle = GoalOracle(output_dim=64)
         start_grip = proprio_np[0][7]
         end_grip = proprio_np[-1][7]

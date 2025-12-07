@@ -7,7 +7,7 @@ import tensorflow as tf
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.rtx_stream_loader import RTXStreamLoader
 
 def create_fake_episode(length=20):
     """Creates a fake episode with a gripper change in the middle."""

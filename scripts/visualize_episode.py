@@ -9,7 +9,7 @@ from PIL import Image
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.data.rtx_loader import RTXDataset
+from imitation.data.rtx_loader import RTXDataset
 
 def visualize_episode(args):
     print("Visualizing Training Episode...")

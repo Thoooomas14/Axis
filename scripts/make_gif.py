@@ -9,9 +9,9 @@ import tensorflow as tf
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.model.axis_v1 import AxisModel
-from training.utils.visualizer import Visualizer
-from training.data.goal_oracle import GoalOracle
+from src.models.axis_v1 import AxisModel
+from imitation.utils.visualizer import Visualizer
+from imitation.data.goal_oracle import GoalOracle
 
 from scipy.spatial.transform import Rotation as R
 

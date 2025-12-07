@@ -1,0 +1,16 @@
+[project]
+name = "my_robot_ext"
+version = "0.1.0"
+description = "Starting Project for Custom Robot Environments in Isaac Lab"
+authors = [
+    { name = "User", email = "user@example.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "omni.isaac.lab>=1.0.0",  # Adjust version as needed
+]
+
+[project.entry-points."omni.isaac.lab"]
+# Register the extension so Isaac Lab can find the environments
+# The naming convention is "extension_name = package_name:module"
+my_robot_ext = "my_robot_ext:my_robot_ext"
