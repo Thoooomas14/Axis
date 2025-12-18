@@ -17,9 +17,9 @@ Axis processes a sliding window of observations (size $W=8$) at each step. This 
 ```mermaid
 graph TD
     subgraph Inputs
-        Img[Image Window (B, W, C, H, W)]
-        Prop[Proprio Window (B, W, 8)]
-        Goal[Goal Embedding (B, 64)]
+        Img[Image Window<br/>B, W, C, H, W]
+        Prop[Proprio Window<br/>B, W, 8]
+        Goal[Goal Embedding<br/>B, 64]
     end
 
     subgraph Encoders
