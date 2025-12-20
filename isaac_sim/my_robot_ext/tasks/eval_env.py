@@ -106,23 +106,7 @@ class AxisSceneCfg(InteractiveSceneCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.0, 0.05)),
     )
-
-    # 6. Camera (User Defined)
-    # Pos: -0.96961, 1.03466, 0.68941
-    # Rot: 71.09, 0, -128.65 (Euler XYZ deg)
-    
-    # We need to compute quat.
-    # Let's hope scipy works, otherwise I'll need to pre-compute.
-    # Pre-computing here to be safe:
-    # 71.1, 0, -128.6
-    # q = (0.264, 0.355, -0.687, -0.574) ? No, let's trust the script execution or do it in runtime.
-    # Actually, I'll put the values provided by the manual conversion tool for now if I can't import scipy.
-    # Wait, the user manual conversion allowed me to verify it.
-    
-    # Using approximated Quaternion for (71, 0, -128):
-    # (w, x, y, z) = (0.366, 0.383, -0.662, -0.528) 
-    # This is a guess. Let's rely on valid rotation logic if available.
-    
+   
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Camera",
         update_period=0.1,
