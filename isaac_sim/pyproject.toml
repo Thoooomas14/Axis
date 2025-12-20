@@ -7,7 +7,7 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "omni.isaac.lab>=1.0.0",  # Adjust version as needed
+    # "omni.isaac.lab>=1.0.0",  # Provided by the Isaac Lab environment
 ]
 
 [project.entry-points."omni.isaac.lab"]

@@ -74,6 +74,7 @@ Detailed documentation is available in the `docs/` directory:
 -   [Model Design](docs/model_design.md): Architecture details (64D Goal, 7D Proprio).
 -   [Training Process](docs/training_process.md): GCS Auth, Configuration, and Checkpointing.
 -   [Data Pipeline](docs/data_pipeline.md): Explanation of `RTXStreamLoader` and `GoalOracle`.
+-   [Isaac Lab Integration](docs/isaac_integration.md): Guide for RL & Simulation.
 -   [References](docs/references.md): Related papers and concepts.
 
 ## Project Structure

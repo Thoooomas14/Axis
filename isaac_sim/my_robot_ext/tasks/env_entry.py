@@ -3,10 +3,13 @@
 try:
     from omni.isaac.lab.envs import ManagerBasedRLEnv
 except ImportError:
-    # Fallback for environments where Isaac Lab is not installed (e.g. dev machine)
-    class ManagerBasedRLEnv:
-        def __init__(self, cfg, **kwargs):
-            pass
+    try:
+        from isaaclab.envs import ManagerBasedRLEnv
+    except ImportError:
+        # Fallback for environments where Isaac Lab is not installed (e.g. dev machine)
+        class ManagerBasedRLEnv:
+            def __init__(self, cfg, **kwargs):
+                pass
 
 class MyRobotEnv(ManagerBasedRLEnv):
     """
