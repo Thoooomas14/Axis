@@ -6,22 +6,24 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - numpy>=1.24
+  # Pin numpy < 2.0 to avoid binary incompatibility with TF/Torch
+  - numpy<2.0
   - pip
-  # PyTorch & CUDA via Conda
-  - pytorch
+  # Pin PyTorch to match requirements.txt
+  - pytorch=2.2.1
   - torchvision
   - torchaudio
   - pytorch-cuda=12.1
   - tqdm
-  # REMOVED tensorflow and protobuf from here to avoid conflicts
   - pip:
-      - tensorflow # Moved to pip to ensure correct protobuf dependency
-      - tensorflow-datasets
-      - tensorflow-io
+      # Pin versions to prevent dependency resolution errors
+      - tensorflow==2.15.0
+      - tensorflow-datasets==4.9.4
+      - tensorflow-io==0.35.0
+      - apache-beam==2.54.0
+      - protobuf==4.25.3  # Ensures compatibility with TF 2.15
       - matplotlib
       - pandas
-      - apache_beam
       - scipy
       - pytest
       - flake8
