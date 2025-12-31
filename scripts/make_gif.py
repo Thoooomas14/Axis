@@ -180,23 +180,27 @@ def make_gif(args):
     
     import time
     
-    print("Running inference...")
+    print("Running inference (Autoregressive)...")
     inference_times = []
+    
+    # Clone proprio for autoregressive updates
+    simulated_proprio = proprio.clone()
+    
     with torch.no_grad():
         for t in range(T):
             if t % 10 == 0: print(f"Step {t}/{T}")
-            # Construct Window ending at t
+            # Construct Window ending at t using simulated_proprio
             if t < W:
                 pad_len = W - 1 - t
                 curr_imgs = images[:, :t+1]
-                curr_props = proprio[:, :t+1]
+                curr_props = simulated_proprio[:, :t+1]
                 pad_imgs = curr_imgs[:, 0:1].repeat(1, pad_len, 1, 1, 1)
                 pad_props = curr_props[:, 0:1].repeat(1, pad_len, 1)
                 win_imgs = torch.cat([pad_imgs, curr_imgs], dim=1)
                 win_props = torch.cat([pad_props, curr_props], dim=1)
             else:
                 win_imgs = images[:, t-W+1 : t+1]
-                win_props = proprio[:, t-W+1 : t+1]
+                win_props = simulated_proprio[:, t-W+1 : t+1]
             
             # Measure inference time
             start_time = time.time()
@@ -209,6 +213,12 @@ def make_gif(args):
             )
             end_time = time.time()
             inference_times.append(end_time - start_time)
+            
+            # Autoregressive update: If we are not at the last step, update the NEXT step's input
+            # Predicted action corresponds to state at t+1
+            if t + 1 < T:
+                 # pred_act is (1, 8), simulated_proprio is (1, T, 8)
+                 simulated_proprio[:, t+1, :] = pred_act
             
             pred_actions.append(pred_act.cpu())
             requery_preds.append(torch.sigmoid(req_logit).cpu())

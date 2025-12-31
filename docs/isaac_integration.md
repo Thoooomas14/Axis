@@ -73,7 +73,7 @@ Once linked, you can run the evaluation script. This script loads your trained m
 
     ```powershell
     cd c:\isaac-lab
-    .\isaaclab.bat -p "c:\Users\thoma\AI Projects\Axis\scripts\eval_isaac.py" --checkpoint "c:\Users\thoma\AI Projects\Axis\checkpoints\checkpoint_latest.pt" --robot franka
+    .\isaaclab.bat -p "c:\Users\thoma\AI Projects\Axis\scripts\eval_isaac.py" --checkpoint "c:\Users\thoma\AI Projects\Axis\checkpoints\checkpoint_latest.pt" --robot franka --enable_cameras --video --steps 1000000 --model_refresh 15
     ```
 
 ### Configuration
