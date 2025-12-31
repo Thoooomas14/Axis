@@ -1,3 +1,4 @@
+
 # isaac_sim/my_robot_ext/tasks/eval_env.py
 
 import isaaclab.sim as sim_utils
@@ -27,23 +28,7 @@ from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation # Try importing scipy (might fail, we'll try numpy fallback or hardcode)
-
-# Helper for Quat
-def euler_to_quat(roll, pitch, yaw):
-    # Input degrees
-    # XYZ order
-    # return (w, x, y, z)
-    try:
-        r = Rotation.from_euler('xyz', [roll, pitch, yaw], degrees=True)
-        x, y, z, w = r.as_quat()
-        return (w, x, y, z)
-    except:
-        # Fallback if scipy missing (Isaac Lab usually has it though)
-        # Using approximated values from user screenshot if this fails
-        # 71, 0, -128.6 -> 
-        # Very rough approx: 
-        return (0.2, -0.07, 0.58, 0.78) # Placeholder if scipy fails, but hopefully it works or standard lib math
+from scipy.spatial.transform import Rotation 
 
 @configclass
 class AxisSceneCfg(InteractiveSceneCfg):
@@ -56,7 +41,7 @@ class AxisSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
     )
 
-    # 2. Table (From Reach Task)
+    # 2. Table
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.UsdFileCfg(
@@ -69,26 +54,6 @@ class AxisSceneCfg(InteractiveSceneCfg):
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    )
-    
-    distant_light = AssetBaseCfg(
-        prim_path="/World/distant_light",
-        spawn=sim_utils.DistantLightCfg(
-            color=(0.9, 0.9, 0.9), 
-            intensity=3000.0,
-            angle=30.0
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(rot=(0.707, 0.0, 0.707, 0.0)),
-    )
-    
-    table_light = AssetBaseCfg(
-        prim_path="/World/table_light",
-        spawn=sim_utils.SphereLightCfg(
-            color=(1.0, 1.0, 0.9),
-            intensity=5000.0,
-            radius=0.1,
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 1.0)), # Above table
     )
 
     # 4. Robot
@@ -104,9 +69,9 @@ class AxisSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0), metallic=0.2),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.0, 0.05)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.2, 0.05)),
     )
-   
+    # 6. Camera
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Camera",
         update_period=0.1,
@@ -115,8 +80,8 @@ class AxisSceneCfg(InteractiveSceneCfg):
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(),
         offset=CameraCfg.OffsetCfg(
-            pos=(-1.0915, 1.4521, 0.9148),
-            rot=(-0.2005, 0.3087, -0.7797, 0.5065), # w, x, y, z (Permuted to fix coordinate mismatch)
+            pos=(-0.3, 0.3, 0.3),
+            rot=(0.37527, -0.46577, 0.62404, -0.50279),
         ),
     )
 
@@ -124,12 +89,12 @@ class AxisSceneCfg(InteractiveSceneCfg):
 @configclass
 class ActionsCfg:
     """Action specifications for the environment."""
-    # Absolute Pose Control (Reach Style)
+    # Absolute Pose Control
     arm_action = DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
         body_name="panda_hand",
-        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls"),
+        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="pinv"),
         body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]), # Tip offset
     )
     
@@ -148,26 +113,29 @@ class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
-        # 1. End-Effector Pose (7D)
+        
+        # 1. Wrist Pose (Stable Rotation)
         ee_pose = ObsTerm(func=mdp.body_pose_w, params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"])})
         
-        # 2. Gripper Width (1D - approximation using joint pos)
+        # 2. Finger Tips (Accurate Position)
+        tool_tips = ObsTerm(func=mdp.body_pose_w, params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_leftfinger", "panda_rightfinger"])})
+
+        # 3. Gripper Width
         gripper_width = ObsTerm(func=mdp.joint_pos, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])})
         
-        # 3. Image
+        # 4. Image
         rgb = ObsTerm(func=mdp.image, params={"sensor_cfg": SceneEntityCfg("camera"), "data_type": "rgb"})
         
         def __post_init__(self):
             self.enable_corruption = False
-            self.concatenate_terms = False # Return dict
-
+            self.concatenate_terms = False 
+            
     policy: PolicyCfg = PolicyCfg()
 
 
 @configclass
 class EventCfg:
     """Configuration for events."""
-    # Reset
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
@@ -179,13 +147,10 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms (empty for eval but required)."""
-    # dummy = RewTerm(func=mdp.is_alive, weight=1.0) # Optional
     pass
 
 @configclass
 class TerminationsCfg:
-    """Termination terms."""
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 @configclass
@@ -200,9 +165,9 @@ class AxisEvalEnvCfg(ManagerBasedRLEnvCfg):
     
     def __post_init__(self):
         self.decimation = 2
-        self.sim.dt = 1.0 / 60.0 # 60Hz
+        self.sim.dt = 1.0 / 60.0 
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 500.0 # Long episode for eval
+        self.episode_length_s = 500.0
 
 class AxisEvalEnv(ManagerBasedRLEnv):
     """The evaluation environment."""
