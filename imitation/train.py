@@ -194,7 +194,9 @@ def train(args):
         stream_loader, 
         batch_size=args.batch_size, 
         num_workers=args.num_workers, 
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=4,       # Build a queue of 4 batches ready for the GPU
+        persistent_workers=True  # Don't kill the worker between epochs
     )
     
     # --- Optimizer & Scheduler ---
