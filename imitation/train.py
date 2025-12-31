@@ -281,6 +281,8 @@ def train(args):
         steps_per_epoch_actual = None
         
         for epoch in range(start_epoch, num_epochs):
+            steps_in_current_epoch = 0  # Initialize for both modes
+            
             if args.epochs > 0:
                 print(f"--- Epoch {epoch + 1}/{num_epochs} ---")
                 
@@ -293,7 +295,6 @@ def train(args):
                     epoch_total = steps_per_epoch_actual
                 
                 pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}")
-                steps_in_current_epoch = 0
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
