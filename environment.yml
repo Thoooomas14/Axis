@@ -1,5 +1,7 @@
 name: axis_env
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
