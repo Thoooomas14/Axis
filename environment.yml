@@ -8,15 +8,15 @@ dependencies:
   - python=3.10
   - numpy>=1.24
   - pip
-  # Install heavy ML frameworks via Conda (faster resolution & downloads)
+  # PyTorch & CUDA via Conda
   - pytorch
   - torchvision
   - torchaudio
   - pytorch-cuda=12.1
-  - tensorflow
   - tqdm
-  - protobuf>=4.25.3 # Force newer protobuf for TF compatibility
+  # REMOVED tensorflow and protobuf from here to avoid conflicts
   - pip:
+      - tensorflow # Moved to pip to ensure correct protobuf dependency
       - tensorflow-datasets
       - tensorflow-io
       - matplotlib
