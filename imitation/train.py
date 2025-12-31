@@ -269,6 +269,11 @@ def train(args):
         # Loop structure
         num_epochs = args.epochs if args.epochs > 0 else 1
         
+        # For step-based training, ignore epoch from checkpoint
+        # (prevents range(51, 1) = empty when resuming epoch-trained checkpoint)
+        if args.epochs == 0:
+            start_epoch = 0
+        
         # Global pbar for step-based training
         if args.epochs == 0:
             pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps")
@@ -309,22 +314,68 @@ def train(args):
                 target_requery = batch['requery'].to(device) # (B, 1)
 
                 B = images.shape[0]
+                W = images.shape[1]  # Window size
 
                 optimizer.zero_grad()
                 model.reset_memory(B) 
                 
-                # Forward Pass
-                pred_action, next_latent, requery_logit = model(
-                    images, 
-                    proprio, 
-                    goal_embs, 
-                    update_queue=args.use_latent_memory,
-                    use_memory=args.use_latent_memory
-                )
+                # Autoregressive Training Loop
+                # For autoregressive_steps > 1, we predict, then shift the window
+                # and feed our prediction back in, repeating before backprop.
+                # This teaches the model to handle its own prediction errors.
                 
-                # Compute Loss
-                action_loss = torch.mean((pred_action - target_action)**2)
-                requery_loss = requery_criterion(requery_logit, target_requery)
+                current_images = images.clone()
+                current_proprio = proprio.clone()
+                
+                total_action_loss = 0.0
+                total_requery_loss = 0.0
+                
+                for ar_step in range(args.autoregressive_steps):
+                    # Forward Pass
+                    pred_action, next_latent, requery_logit = model(
+                        current_images, 
+                        current_proprio, 
+                        goal_embs, 
+                        update_queue=args.use_latent_memory,
+                        use_memory=args.use_latent_memory
+                    )
+                    
+                    # Compute Loss for this step
+                    # Only the first step has ground truth target
+                    # For subsequent steps, we can't compute action loss (no GT)
+                    # but we accumulate loss to backprop through the rollout
+                    if ar_step == 0:
+                        step_action_loss = torch.mean((pred_action - target_action)**2)
+                        step_requery_loss = requery_criterion(requery_logit, target_requery)
+                        total_action_loss = step_action_loss
+                        total_requery_loss = step_requery_loss
+                    else:
+                        # For autoregressive steps, we use a consistency term:
+                        # The prediction should be similar to the target direction
+                        # This encourages the model to continue moving toward the goal
+                        step_action_loss = torch.mean((pred_action - target_action)**2)
+                        total_action_loss = total_action_loss + step_action_loss * args.ar_loss_decay
+                    
+                    # Prepare next iteration: shift window and inject prediction
+                    if ar_step < args.autoregressive_steps - 1:
+                        # Images: Keep using ground truth images (shift window forward)
+                        # This provides accurate visual context while testing proprio prediction
+                        # Note: We shift to simulate time passing, but use GT data
+                        current_images = torch.cat([
+                            current_images[:, 1:, :, :, :],
+                            images[:, -1:, :, :, :]  # Use original GT for last frame
+                        ], dim=1)
+                        
+                        # Proprio: Shift window and inject our prediction
+                        # This is the key mechanism that breaks trend-copying behavior
+                        current_proprio = torch.cat([
+                            current_proprio[:, 1:, :],
+                            pred_action.unsqueeze(1)  # (B, 1, 8)
+                        ], dim=1)
+                
+                # Final losses (average over steps if > 1)
+                action_loss = total_action_loss / args.autoregressive_steps
+                requery_loss = total_requery_loss  # Only computed once
                 
                 # Weighted Loss
                 loss = action_loss + (requery_loss * args.requery_weight)
@@ -436,6 +487,10 @@ if __name__ == "__main__":
     parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
     parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss (increase to 10.0+ to prioritize asking for help)")
     parser.add_argument('--pos_weight', type=float, default=1.0, help="Asymmetric loss weight for positive class (increase to >1.0 to penalize missing 'help needed' signals)")
+    
+    # Autoregressive Training Args
+    parser.add_argument('--autoregressive_steps', type=int, default=1, help="Number of autoregressive rollout steps during training. 1=standard, >1=predict and feed back before backprop")
+    parser.add_argument('--ar_loss_decay', type=float, default=0.5, help="Decay factor for loss on subsequent autoregressive steps (0.5 = each step contributes half as much)")
 
     args = parser.parse_args()
     print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
