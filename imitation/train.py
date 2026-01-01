@@ -463,7 +463,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Training Args
     parser.add_argument('--dataset', type=str, default='fractal20220817_data', help="Dataset name")
-    parser.add_argument('--data_dir', type=str, default=None, help="Data directory (local or GCS)")
+    parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics', help="Data directory (local or GCS)")
     parser.add_argument('--steps', type=int, default=10000, help="Number of training steps")
     parser.add_argument('--epochs', type=int, default=0, help="Number of training epochs (overrides steps if > 0)")
     parser.add_argument('--batch_size', type=int, default=1, help="Batch size")
