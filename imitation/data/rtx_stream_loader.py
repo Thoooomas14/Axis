@@ -12,7 +12,7 @@ class RTXStreamLoader(IterableDataset):
     Streams RT-X datasets from GCS, splits them into subtasks, and yields sliding windows.
     Supports 'fractal20220817_data' and 'droid' datasets.
     """
-    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None, repeat=True):
+    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None, repeat=True, max_ar_steps=1):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -21,6 +21,7 @@ class RTXStreamLoader(IterableDataset):
         self.shuffle_buffer_size = shuffle_buffer_size
         self.data_dir = data_dir
         self.repeat = repeat
+        self.max_ar_steps = max_ar_steps  # Number of sequential targets to yield
         
         self.oracle = GoalOracle(output_dim=64)
         
@@ -196,20 +197,26 @@ class RTXStreamLoader(IterableDataset):
                 w_props = subtask_props[w : w+self.window_size]
                 
                 # Target is the step AFTER the window.
-                if w + self.window_size < T:
-                    target_pose = subtask_props[w + self.window_size]
-                    requery = 0.0
-                else:
-                    # End of subtask
-                    target_pose = subtask_props[-1]
-                    requery = 1.0
+                # For AR training, we need N sequential targets
+                target_poses = []
+                requery_flags = []
+                
+                for k in range(self.max_ar_steps):
+                    target_idx = w + self.window_size + k
+                    if target_idx < T:
+                        target_poses.append(subtask_props[target_idx])
+                        requery_flags.append(0.0)
+                    else:
+                        # End of subtask - use last pose and signal requery
+                        target_poses.append(subtask_props[-1])
+                        requery_flags.append(1.0)
                 
                 yield {
                     'images': torch.tensor(w_imgs, dtype=torch.float32),
                     'proprio': torch.tensor(w_props, dtype=torch.float32),
                     'goal': goal_emb,
-                    'action': torch.tensor(target_pose, dtype=torch.float32),
-                    'requery': torch.tensor([requery], dtype=torch.float32)
+                    'actions': torch.tensor(np.array(target_poses), dtype=torch.float32),  # (N, 8)
+                    'requery': torch.tensor([requery_flags[0]], dtype=torch.float32)  # Use first step's requery for now
                 }
 
     def __iter__(self):

@@ -181,7 +181,8 @@ def train(args):
         image_size=(128, 128),
         data_dir=args.data_dir,
         shuffle_buffer_size=args.shuffle_buffer_size,
-        repeat=repeat_dataset
+        repeat=repeat_dataset,
+        max_ar_steps=args.autoregressive_steps  # Yield N sequential targets
     )
     
     # Warn about memory usage if using multiple workers
@@ -309,9 +310,9 @@ def train(args):
                     
                 # Unpack Batch
                 images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
-                proprio = batch['proprio'].to(device) # (B, 8, 7)
+                proprio = batch['proprio'].to(device) # (B, 8, 8)
                 goal_embs = batch['goal'].to(device)  # (B, 64)
-                target_action = batch['action'].to(device) # (B, 7)
+                target_actions = batch['actions'].to(device) # (B, N, 8) - N sequential targets
                 target_requery = batch['requery'].to(device) # (B, 1)
 
                 B = images.shape[0]
@@ -342,20 +343,17 @@ def train(args):
                     )
                     
                     # Compute Loss for this step
-                    # Only the first step has ground truth target
-                    # For subsequent steps, we can't compute action loss (no GT)
-                    # but we accumulate loss to backprop through the rollout
+                    # Each AR step uses its temporally-aligned target
+                    target_action = target_actions[:, ar_step, :]  # (B, 8)
+                    step_action_loss = torch.mean((pred_action - target_action)**2)
+                    
                     if ar_step == 0:
-                        step_action_loss = torch.mean((pred_action - target_action)**2)
                         step_requery_loss = requery_criterion(requery_logit, target_requery)
                         total_action_loss = step_action_loss
                         total_requery_loss = step_requery_loss
                     else:
-                        # For autoregressive steps, we use a consistency term:
-                        # The prediction should be similar to the target direction
-                        # This encourages the model to continue moving toward the goal
-                        step_action_loss = torch.mean((pred_action - target_action)**2)
-                        total_action_loss = total_action_loss + step_action_loss * args.ar_loss_decay
+                        # Later steps contribute with decay
+                        total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
                     
                     # Prepare next iteration: shift window and inject prediction
                     if ar_step < args.autoregressive_steps - 1:
