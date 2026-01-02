@@ -25,6 +25,9 @@ from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 import tensorflow_datasets as tfds
 import tensorflow as tf
+# Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
+tf.config.set_visible_devices([], 'GPU')
+
 import numpy as np
 import torchvision.transforms as T
 
