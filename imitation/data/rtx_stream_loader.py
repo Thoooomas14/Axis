@@ -153,15 +153,24 @@ class RTXStreamLoader(IterableDataset):
             start_idx = split_indices[i]
             end_idx = split_indices[i+1]
             
-            # Minimum length check
+            # Minimum length check (for the core subtask, excluding lookback)
             if end_idx - start_idx < 2: continue
             
-            subtask_imgs = imgs[start_idx:end_idx]
-            subtask_props = props[start_idx:end_idx]
+            # Include lookback from previous subtask for temporal context
+            # This allows the model to see the approach motion before a pick/place
+            lookback = min(start_idx, self.window_size - 1)
+            lookback_start = start_idx - lookback
             
-            # Infer Task Type
+            subtask_imgs = imgs[lookback_start:end_idx]
+            subtask_props = props[lookback_start:end_idx]
+            
+            # Track where the actual subtask starts within our extended array
+            subtask_offset = lookback  # First `lookback` frames are context from previous subtask
+            
+            # Infer Task Type (from actual subtask, not lookback context)
             # 0: Move, 1: Pick, 2: Place
-            start_grip = subtask_props[0][7]
+            actual_subtask_start = subtask_offset  # Index within subtask_props where actual subtask begins
+            start_grip = subtask_props[actual_subtask_start][7]
             end_grip = subtask_props[-1][7]
             
             task_type = 0 # Default Move
@@ -170,15 +179,16 @@ class RTXStreamLoader(IterableDataset):
             elif start_grip > 0.5 and end_grip < 0.5:
                 task_type = 2 # Place
             
-            # Compute Goal for this subtask
-            start_pose = subtask_props[0]
+            # Compute Goal for this subtask (using actual subtask bounds)
+            start_pose = subtask_props[actual_subtask_start]
             end_pose = subtask_props[-1]
             goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
             
             # Windowing
             T = len(subtask_imgs)
+            actual_subtask_len = T - subtask_offset  # Length of actual subtask (excluding lookback)
             
-            # If subtask is shorter than window, pad it
+            # If subtask (including lookback) is shorter than window, pad it
             if T < self.window_size:
                 pad_len = self.window_size - T
                 # Pad with first frame at start (history)
@@ -187,7 +197,9 @@ class RTXStreamLoader(IterableDataset):
                 
                 subtask_imgs = np.concatenate([pad_imgs, subtask_imgs], axis=0)
                 subtask_props = np.concatenate([pad_props, subtask_props], axis=0)
-                T = self.window_size # Now it's at least window size
+                # Adjust offset to account for padding
+                actual_subtask_start += pad_len
+                T = len(subtask_imgs)
             
             # Sliding Window Logic
             num_windows = T - self.window_size + 1
