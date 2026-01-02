@@ -241,11 +241,22 @@ class RTXStreamLoader(IterableDataset):
             
         ds = self.ds
             
+        # Sharding for PyTorch DataLoader Workers
+        # This ensures each worker processes a unique slice of the dataset
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # tf.data.Dataset.shard(num_shards, index)
+            ds = ds.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+            
         # Repeat indefinitely ONLY if requested
+        # Note: Repeat should generally come after shard to ensure we repeat the shard
         if self.repeat:
             ds = ds.repeat()
             
-        ds = ds.shuffle(self.shuffle_buffer_size)
+        # Only shuffle if buffer is significant (>1) to save RAM
+        # Droid images are huge; buffering 10+ episodes can OOM 64GB RAM.
+        if self.shuffle_buffer_size > 1:
+            ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
             yield from self._process_episode(episode)

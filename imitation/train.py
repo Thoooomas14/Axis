@@ -208,15 +208,15 @@ def train(args):
                 stream, 
                 batch_size=batch_size,
                 num_workers=0,
-                pin_memory=True
+                pin_memory=False
             )
         else:
             loader = torch.utils.data.DataLoader(
                 stream, 
                 batch_size=batch_size,
                 num_workers=num_workers,
-                pin_memory=True,
-                prefetch_factor=4,
+                pin_memory=False, # Disable to save RAM
+                prefetch_factor=2, # Reduce to 2 to save RAM (default 4 was too aggressive with large episodes)
                 persistent_workers=True
             )
         return loader
