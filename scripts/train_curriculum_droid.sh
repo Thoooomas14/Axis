@@ -10,9 +10,7 @@ COMMON_ARGS="--dataset droid \
     --batch_size 128 \
     --resume \
     --num_workers 1 \
-    --shuffle_buffer_size 5 \
-    --viz \
-    --viz_interval 10000"
+    --shuffle_buffer_size 2"
 
 echo "=========================================="
 echo "Phase 1: Standard Training (AR=1)"
