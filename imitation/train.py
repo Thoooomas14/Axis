@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 
 # Suppress TF INFO/WARNING logs to reduce noise (e.g. OUT_OF_RANGE)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
@@ -172,33 +173,48 @@ def train(args):
     # If steps > 0 (and epochs=0), we repeat the dataset (infinite stream).
     repeat_dataset = (args.epochs == 0)
     
-    print(f"Initializing RTXStreamLoader for {args.dataset} (repeat={repeat_dataset})...")
-    stream_loader = RTXStreamLoader(
-        dataset_name=args.dataset, 
-        split='train', 
-        batch_size=1, # Loader yields 1 window at a time
-        window_size=config['window_size'],
-        image_size=(128, 128),
-        data_dir=args.data_dir,
-        shuffle_buffer_size=args.shuffle_buffer_size,
-        repeat=repeat_dataset,
-        max_ar_steps=args.autoregressive_steps  # Yield N sequential targets
-    )
+    # === Dynamic Memory Parameters (can be reduced on OOM) ===
+    effective_batch_size = args.batch_size
+    effective_shuffle_buffer = args.shuffle_buffer_size
+    effective_num_workers = args.num_workers
     
-    # Warn about memory usage if using multiple workers
-    if args.num_workers > 0:
-        print(f"WARNING: Using {args.num_workers} workers. Total shuffle buffer usage: {args.num_workers * args.shuffle_buffer_size} episodes.")
-        print("If you encounter OOM errors, reduce --num_workers or --shuffle_buffer_size.")
+    def create_dataloader(batch_size, shuffle_buffer, num_workers):
+        """Factory function to create/recreate dataloader with specified params."""
+        print(f"Creating dataloader: batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
+        stream = RTXStreamLoader(
+            dataset_name=args.dataset, 
+            split='train', 
+            batch_size=1,
+            window_size=config['window_size'],
+            image_size=(128, 128),
+            data_dir=args.data_dir,
+            shuffle_buffer_size=shuffle_buffer,
+            repeat=repeat_dataset,
+            max_ar_steps=args.autoregressive_steps
+        )
+        
+        # Handle num_workers=0 case (no prefetch_factor or persistent_workers)
+        if num_workers == 0:
+            loader = torch.utils.data.DataLoader(
+                stream, 
+                batch_size=batch_size,
+                num_workers=0,
+                pin_memory=True
+            )
+        else:
+            loader = torch.utils.data.DataLoader(
+                stream, 
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=True
+            )
+        return loader
     
-    # Wrap in DataLoader for batching
-    dataloader = torch.utils.data.DataLoader(
-        stream_loader, 
-        batch_size=args.batch_size, 
-        num_workers=args.num_workers, 
-        pin_memory=True,
-        prefetch_factor=4,       # Build a queue of 4 batches ready for the GPU
-        persistent_workers=True  # Don't kill the worker between epochs
-    )
+    # Create initial dataloader
+    dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers)
+    need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
     
     # --- Optimizer & Scheduler ---
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -261,8 +277,20 @@ def train(args):
     print("Starting training...")
     
     import time
+    import psutil  # For system RAM monitoring
     start_time = time.time()
-    step = start_step 
+    step = start_step
+    
+    # === Dynamic Memory Management State ===
+    consecutive_cuda_oom = 0
+    consecutive_ram_oom = 0
+    max_consecutive_ooms = 3
+    successful_batches_since_oom = 0
+    
+    # Minimum values before graceful exit
+    MIN_BATCH_SIZE = 1
+    MIN_SHUFFLE_BUFFER = 1
+    MIN_NUM_WORKERS = 0 
     
     try:
         print("DEBUG: Entering training loop...", flush=True)
@@ -307,106 +335,213 @@ def train(args):
                     if elapsed_min >= args.time_limit_min:
                         print(f"\nTime limit of {args.time_limit_min} minutes reached. Stopping.")
                         break
+                
+                # === OOM Protection: Wrap batch processing in try/except ===
+                try:
+                    # Periodic memory cleanup (every 100 steps)
+                    if step % 100 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     
-                # Unpack Batch
-                images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
-                proprio = batch['proprio'].to(device) # (B, 8, 8)
-                goal_embs = batch['goal'].to(device)  # (B, 64)
-                target_actions = batch['actions'].to(device) # (B, N, 8) - N sequential targets
-                target_requery = batch['requery'].to(device) # (B, 1)
+                    # Unpack Batch
+                    images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
+                    proprio = batch['proprio'].to(device) # (B, 8, 8)
+                    goal_embs = batch['goal'].to(device)  # (B, 64)
+                    target_actions = batch['actions'].to(device) # (B, N, 8) - N sequential targets
+                    target_requery = batch['requery'].to(device) # (B, 1)
 
-                B = images.shape[0]
-                W = images.shape[1]  # Window size
+                    B = images.shape[0]
+                    W = images.shape[1]  # Window size
 
-                optimizer.zero_grad()
-                model.reset_memory(B) 
-                
-                # Autoregressive Training Loop
-                # For autoregressive_steps > 1, we predict, then shift the window
-                # and feed our prediction back in, repeating before backprop.
-                # This teaches the model to handle its own prediction errors.
-                
-                current_images = images.clone()
-                current_proprio = proprio.clone()
-                
-                total_action_loss = 0.0
-                total_requery_loss = 0.0
-                
-                for ar_step in range(args.autoregressive_steps):
-                    # Forward Pass
-                    pred_action, next_latent, requery_logit = model(
-                        current_images, 
-                        current_proprio, 
-                        goal_embs, 
-                        update_queue=args.use_latent_memory,
-                        use_memory=args.use_latent_memory
-                    )
+                    optimizer.zero_grad()
+                    model.reset_memory(B) 
                     
-                    # Compute Loss for this step
-                    # Each AR step uses its temporally-aligned target
-                    target_action = target_actions[:, ar_step, :]  # (B, 8)
-                    step_action_loss = torch.mean((pred_action - target_action)**2)
+                    # Autoregressive Training Loop
+                    # For autoregressive_steps > 1, we predict, then shift the window
+                    # and feed our prediction back in, repeating before backprop.
+                    # This teaches the model to handle its own prediction errors.
                     
-                    if ar_step == 0:
-                        step_requery_loss = requery_criterion(requery_logit, target_requery)
-                        total_action_loss = step_action_loss
-                        total_requery_loss = step_requery_loss
-                    else:
-                        # Later steps contribute with decay
-                        total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
+                    current_images = images.clone()
+                    current_proprio = proprio.clone()
                     
-                    # Prepare next iteration: shift window and inject prediction
-                    if ar_step < args.autoregressive_steps - 1:
-                        # Images: Keep using ground truth images (shift window forward)
-                        # This provides accurate visual context while testing proprio prediction
-                        # Note: We shift to simulate time passing, but use GT data
-                        current_images = torch.cat([
-                            current_images[:, 1:, :, :, :],
-                            images[:, -1:, :, :, :]  # Use original GT for last frame
-                        ], dim=1)
+                    total_action_loss = 0.0
+                    total_requery_loss = 0.0
+                    
+                    for ar_step in range(args.autoregressive_steps):
+                        # Forward Pass
+                        pred_action, next_latent, requery_logit = model(
+                            current_images, 
+                            current_proprio, 
+                            goal_embs, 
+                            update_queue=args.use_latent_memory,
+                            use_memory=args.use_latent_memory
+                        )
                         
-                        # Proprio: Shift window and inject our prediction
-                        # This is the key mechanism that breaks trend-copying behavior
-                        current_proprio = torch.cat([
-                            current_proprio[:, 1:, :],
-                            pred_action.unsqueeze(1)  # (B, 1, 8)
-                        ], dim=1)
-                
-                # Final losses (average over steps if > 1)
-                action_loss = total_action_loss / args.autoregressive_steps
-                requery_loss = total_requery_loss  # Only computed once
-                
-                # Weighted Loss
-                loss = action_loss + (requery_loss * args.requery_weight)
-                
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                
-                # Logging
-                logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
-                
-                step += 1
-                steps_in_current_epoch += 1
-                pbar.update(1)
-                pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
-                
-                # Checkpointing (Step-based)
-                if args.epochs == 0 and step % args.save_interval == 0:
-                    torch.save({
-                        'step': step,
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'loss': loss.item(),
-                    }, checkpoint_path)
-                    logger.plot_progress()
+                        # Compute Loss for this step
+                        # Each AR step uses its temporally-aligned target
+                        target_action = target_actions[:, ar_step, :]  # (B, 8)
+                        step_action_loss = torch.mean((pred_action - target_action)**2)
+                        
+                        if ar_step == 0:
+                            step_requery_loss = requery_criterion(requery_logit, target_requery)
+                            total_action_loss = step_action_loss
+                            total_requery_loss = step_requery_loss
+                        else:
+                            # Later steps contribute with decay
+                            total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
+                        
+                        # Prepare next iteration: shift window and inject prediction
+                        if ar_step < args.autoregressive_steps - 1:
+                            # Images: Keep using ground truth images (shift window forward)
+                            # This provides accurate visual context while testing proprio prediction
+                            # Note: We shift to simulate time passing, but use GT data
+                            current_images = torch.cat([
+                                current_images[:, 1:, :, :, :],
+                                images[:, -1:, :, :, :]  # Use original GT for last frame
+                            ], dim=1)
+                            
+                            # Proprio: Shift window and inject our prediction
+                            # This is the key mechanism that breaks trend-copying behavior
+                            current_proprio = torch.cat([
+                                current_proprio[:, 1:, :],
+                                pred_action.unsqueeze(1)  # (B, 1, 8)
+                            ], dim=1)
                     
-                # Visualization (Step-based)
-                if args.epochs == 0 and args.viz and step % args.viz_interval == 0:
-                    visualizer.visualize_batch(step, batch, pred_action)
-                    if args.save_gif:
-                        generate_episode_gif(model, args, step, visualizer)
+                    # Final losses (average over steps if > 1)
+                    action_loss = total_action_loss / args.autoregressive_steps
+                    requery_loss = total_requery_loss  # Only computed once
+                    
+                    # Weighted Loss
+                    loss = action_loss + (requery_loss * args.requery_weight)
+                    
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+                    
+                    # Logging
+                    logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
+                    
+                    step += 1
+                    steps_in_current_epoch += 1
+                    pbar.update(1)
+                    pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
+                    
+                    # Checkpointing (Step-based)
+                    if args.epochs == 0 and step % args.save_interval == 0:
+                        torch.save({
+                            'step': step,
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': loss.item(),
+                        }, checkpoint_path)
+                        logger.plot_progress()
+                        
+                    # Visualization (Step-based)
+                    if args.epochs == 0 and args.viz and step % args.viz_interval == 0:
+                        visualizer.visualize_batch(step, batch, pred_action)
+                        if args.save_gif:
+                            generate_episode_gif(model, args, step, visualizer)
+                
+                except torch.cuda.OutOfMemoryError:
+                    # CUDA OOM: Reduce batch size
+                    consecutive_cuda_oom += 1
+                    successful_batches_since_oom = 0
+                    
+                    print(f"\n[CUDA OOM] Out of memory at step {step}. (OOM #{consecutive_cuda_oom})")
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    optimizer.zero_grad(set_to_none=True)
+                    
+                    if consecutive_cuda_oom >= max_consecutive_ooms:
+                        if effective_batch_size > MIN_BATCH_SIZE:
+                            effective_batch_size = max(MIN_BATCH_SIZE, effective_batch_size // 2)
+                            consecutive_cuda_oom = 0
+                            need_dataloader_rebuild = True
+                            print(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
+                            break  # Exit batch loop to rebuild dataloader
+                        else:
+                            print(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
+                            print("[CUDA OOM] Saving checkpoint and exiting gracefully...")
+                            raise SystemExit("CUDA OOM: Cannot reduce batch size further")
+                    
+                    continue
+                
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        # Treat as CUDA OOM
+                        consecutive_cuda_oom += 1
+                        successful_batches_since_oom = 0
+                        
+                        print(f"\n[CUDA OOM] Runtime memory error at step {step}. (OOM #{consecutive_cuda_oom})")
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        optimizer.zero_grad(set_to_none=True)
+                        
+                        if consecutive_cuda_oom >= max_consecutive_ooms:
+                            if effective_batch_size > MIN_BATCH_SIZE:
+                                effective_batch_size = max(MIN_BATCH_SIZE, effective_batch_size // 2)
+                                consecutive_cuda_oom = 0
+                                need_dataloader_rebuild = True
+                                print(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
+                                break
+                            else:
+                                print(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
+                                raise SystemExit("CUDA OOM: Cannot reduce batch size further")
+                        
+                        continue
+                    else:
+                        raise
+                
+                except MemoryError:
+                    # System RAM OOM: Reduce shuffle_buffer first, then num_workers
+                    consecutive_ram_oom += 1
+                    successful_batches_since_oom = 0
+                    
+                    print(f"\n[RAM OOM] System memory exhausted at step {step}. (OOM #{consecutive_ram_oom})")
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    optimizer.zero_grad(set_to_none=True)
+                    
+                    if consecutive_ram_oom >= max_consecutive_ooms:
+                        # First try reducing shuffle buffer
+                        if effective_shuffle_buffer > MIN_SHUFFLE_BUFFER:
+                            effective_shuffle_buffer = max(MIN_SHUFFLE_BUFFER, effective_shuffle_buffer // 2)
+                            consecutive_ram_oom = 0
+                            need_dataloader_rebuild = True
+                            print(f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}")
+                            break
+                        # Then try reducing workers
+                        elif effective_num_workers > MIN_NUM_WORKERS:
+                            effective_num_workers = max(MIN_NUM_WORKERS, effective_num_workers - 1)
+                            consecutive_ram_oom = 0
+                            need_dataloader_rebuild = True
+                            print(f"[RAM OOM] Reducing num_workers to {effective_num_workers}")
+                            break
+                        else:
+                            print(f"[RAM OOM] All parameters at minimum. Cannot reduce further.")
+                            print("[RAM OOM] Saving checkpoint and exiting gracefully...")
+                            raise SystemExit("RAM OOM: Cannot reduce memory parameters further")
+                    
+                    continue
+                
+                # Successful batch - reset OOM counters
+                consecutive_cuda_oom = 0
+                consecutive_ram_oom = 0
+                successful_batches_since_oom += 1
+                
+                # Auto-recover AR steps after sustained success (disabled for now)
+                # if ar_reduction_active and successful_batches_since_oom >= 500:
+                #     ...
+            
+            # Check if we need to rebuild dataloader (from OOM reduction)
+            if need_dataloader_rebuild:
+                print(f"[Memory] Rebuilding dataloader with new parameters...")
+                dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers)
+                need_dataloader_rebuild = False
+                continue  # Restart epoch loop with new dataloader
             
             # Close epoch pbar
             if args.epochs > 0:
