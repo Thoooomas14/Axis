@@ -19,6 +19,9 @@ class EMA:
             ssd = self.shadow.state_dict()
             for k in msd:
                 if msd[k].dtype.is_floating_point:
+                    # Skip if shape mismatch (e.g. dynamic buffers like latent_queue)
+                    if msd[k].shape != ssd[k].shape:
+                        continue
                     ssd[k].copy_(self.decay * ssd[k] + (1. - self.decay) * msd[k])
 
     def state_dict(self):
