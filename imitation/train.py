@@ -22,9 +22,11 @@ from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from imitation.utils.visualizer import Visualizer
+from imitation.utils.ema import EMA
 import tensorflow_datasets as tfds
 import tensorflow as tf
 import numpy as np
+import torchvision.transforms as T
 
 def generate_episode_gif(model, args, step, visualizer):
     """Loads one episode and generates a GIF."""
@@ -178,18 +180,22 @@ def train(args):
     effective_shuffle_buffer = args.shuffle_buffer_size
     effective_num_workers = args.num_workers
     
-    def create_dataloader(batch_size, shuffle_buffer, num_workers):
+    def create_dataloader(batch_size, shuffle_buffer, num_workers, split='train'):
         """Factory function to create/recreate dataloader with specified params."""
-        print(f"Creating dataloader: batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
+        # Split logic: 'train[:95%]' vs 'train[95%:]'
+        # Note: shuffle_buffer only applies to training
+        is_train = '[:' in split or split == 'train'
+        
+        print(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
         stream = RTXStreamLoader(
             dataset_name=args.dataset, 
-            split='train', 
+            split=split, 
             batch_size=1,
             window_size=config['window_size'],
             image_size=(128, 128),
             data_dir=args.data_dir,
-            shuffle_buffer_size=shuffle_buffer,
-            repeat=repeat_dataset,
+            shuffle_buffer_size=shuffle_buffer if is_train else 0,
+            repeat=repeat_dataset if is_train else False, # Only repeat train
             max_ar_steps=args.autoregressive_steps
         )
         
@@ -213,7 +219,15 @@ def train(args):
         return loader
     
     # Create initial dataloader
-    dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers)
+    train_split = f'train[:{int(args.train_split_pct*100)}%]'
+    val_split = f'train[{int(args.train_split_pct*100)}%:]'
+    
+    dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
+    
+    # Validation Dataloader (smaller batch size to save memory if needed, or same)
+    # We use 0 workers for val to save overhead unless it's huge
+    val_dataloader = create_dataloader(effective_batch_size, 0, 0, split=val_split)
+    
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
     
     # --- Optimizer & Scheduler ---
@@ -225,6 +239,22 @@ def train(args):
         min_lr=1e-6, 
         warmup_steps=args.warmup_steps
     )
+    
+    # --- GradScaler (AMP) ---
+    scaler = torch.cuda.amp.GradScaler()
+    
+    # --- EMA ---
+    ema = EMA(model, decay=0.9999)
+    print("EMA initialized.")
+    
+    # --- Augmentation ---
+    # Applied on GPU
+    augmentations = nn.Sequential(
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+        T.RandomGrayscale(p=0.05),
+        # Add slight blur occasionally
+        T.RandomApply([T.GaussianBlur(kernel_size=3)], p=0.1)
+    ).to(device)
     
     # Requery Loss Function
     # pos_weight allows us to penalize False Negatives (missing help signal) more than False Positives.
@@ -354,70 +384,76 @@ def train(args):
                     B = images.shape[0]
                     W = images.shape[1]  # Window size
 
+                    # === Data Augmentation ===
+                    if model.training:
+                        # Reshape to (B*T, C, H, W) for efficient augmentation
+                        fl_imgs = images.view(-1, 3, 128, 128)
+                        aug_imgs = augmentations(fl_imgs)
+                        images = aug_imgs.view(B, W, 3, 128, 128)
+
                     optimizer.zero_grad()
                     model.reset_memory(B) 
                     
-                    # Autoregressive Training Loop
-                    # For autoregressive_steps > 1, we predict, then shift the window
-                    # and feed our prediction back in, repeating before backprop.
-                    # This teaches the model to handle its own prediction errors.
-                    
-                    current_images = images.clone()
-                    current_proprio = proprio.clone()
-                    
-                    total_action_loss = 0.0
-                    total_requery_loss = 0.0
-                    
-                    for ar_step in range(args.autoregressive_steps):
-                        # Forward Pass
-                        pred_action, next_latent, requery_logit = model(
-                            current_images, 
-                            current_proprio, 
-                            goal_embs, 
-                            update_queue=args.use_latent_memory,
-                            use_memory=args.use_latent_memory
-                        )
+                    # === Forward Pass with AMP ===
+                    with torch.cuda.amp.autocast():
+                        current_images = images.clone()
+                        current_proprio = proprio.clone()
                         
-                        # Compute Loss for this step
-                        # Each AR step uses its temporally-aligned target
-                        target_action = target_actions[:, ar_step, :]  # (B, 8)
-                        step_action_loss = torch.mean((pred_action - target_action)**2)
+                        total_action_loss = 0.0
+                        total_requery_loss = 0.0
                         
-                        if ar_step == 0:
-                            step_requery_loss = requery_criterion(requery_logit, target_requery)
-                            total_action_loss = step_action_loss
-                            total_requery_loss = step_requery_loss
-                        else:
-                            # Later steps contribute with decay
-                            total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
-                        
-                        # Prepare next iteration: shift window and inject prediction
-                        if ar_step < args.autoregressive_steps - 1:
-                            # Images: Keep using ground truth images (shift window forward)
-                            # This provides accurate visual context while testing proprio prediction
-                            # Note: We shift to simulate time passing, but use GT data
-                            current_images = torch.cat([
-                                current_images[:, 1:, :, :, :],
-                                images[:, -1:, :, :, :]  # Use original GT for last frame
-                            ], dim=1)
+                        for ar_step in range(args.autoregressive_steps):
+                            # Forward Pass
+                            pred_action, next_latent, requery_logit = model(
+                                current_images, 
+                                current_proprio, 
+                                goal_embs, 
+                                update_queue=args.use_latent_memory,
+                                use_memory=args.use_latent_memory
+                            )
                             
-                            # Proprio: Shift window and inject our prediction
-                            # This is the key mechanism that breaks trend-copying behavior
-                            current_proprio = torch.cat([
-                                current_proprio[:, 1:, :],
-                                pred_action.unsqueeze(1)  # (B, 1, 8)
-                            ], dim=1)
+                            # Compute Loss for this step
+                            # Each AR step uses its temporally-aligned target
+                            target_action = target_actions[:, ar_step, :]  # (B, 8)
+                            step_action_loss = torch.mean((pred_action - target_action)**2)
+                            
+                            if ar_step == 0:
+                                step_requery_loss = requery_criterion(requery_logit, target_requery)
+                                total_action_loss = step_action_loss
+                                total_requery_loss = step_requery_loss
+                            else:
+                                # Later steps contribute with decay
+                                total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
+                            
+                            # Prepare next iteration: shift window and inject prediction
+                            if ar_step < args.autoregressive_steps - 1:
+                                current_images = torch.cat([
+                                    current_images[:, 1:, :, :, :],
+                                    images[:, -1:, :, :, :]  # Use original GT for last frame
+                                ], dim=1)
+                                
+                                current_proprio = torch.cat([
+                                    current_proprio[:, 1:, :],
+                                    pred_action.unsqueeze(1)  # (B, 1, 8)
+                                ], dim=1)
+                        
+                        # Final losses (average over steps if > 1)
+                        action_loss = total_action_loss / args.autoregressive_steps
+                        requery_loss = total_requery_loss  # Only computed once
+                        
+                        # Weighted Loss
+                        loss = action_loss + (requery_loss * args.requery_weight)
                     
-                    # Final losses (average over steps if > 1)
-                    action_loss = total_action_loss / args.autoregressive_steps
-                    requery_loss = total_requery_loss  # Only computed once
-                    
-                    # Weighted Loss
-                    loss = action_loss + (requery_loss * args.requery_weight)
-                    
-                    loss.backward()
+                    # === Backward with Scaler ===
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) 
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    # === EMA Update ===
+                    ema.update(model)
+                    
                     scheduler.step()
                     
                     # Logging
@@ -428,13 +464,53 @@ def train(args):
                     pbar.update(1)
                     pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
                     
+                    # === Validation Loop ===
+                    if step % args.val_interval == 0:
+                        model.eval()
+                        val_loss_total = 0.0
+                        val_batches = 0
+                        print("\nRunning Validation...", flush=True)
+                        with torch.no_grad():
+                            for val_batch in val_dataloader:
+                                if val_batches >= args.val_batches: break # Limit val batches
+                                
+                                v_imgs = val_batch['images'].to(device)
+                                v_props = val_batch['proprio'].to(device)
+                                v_goals = val_batch['goal'].to(device)
+                                v_actions = val_batch['actions'].to(device)
+                                v_requery = val_batch['requery'].to(device)
+                                
+                                B_val = v_imgs.shape[0]
+                                model.reset_memory(B_val)
+                                
+                                with torch.cuda.amp.autocast():
+                                    # Non-AR validation for speed/standard metric (or should it be AR?)
+                                    # Let's do AR=1 for standard validation
+                                    v_pred, _, v_req_logit = model(v_imgs, v_props, v_goals, update_queue=False, use_memory=True)
+                                    
+                                    v_target_act = v_actions[:, 0, :]
+                                    v_a_loss = torch.mean((v_pred - v_target_act)**2)
+                                    v_r_loss = requery_criterion(v_req_logit, v_requery)
+                                    v_loss = v_a_loss + (v_r_loss * args.requery_weight)
+                                    val_loss_total += v_loss.item()
+                                    val_batches += 1
+                        
+                        avg_val_loss = val_loss_total / max(1, val_batches)
+                        print(f"Validation Loss: {avg_val_loss:.4f}", flush=True)
+                        # Log validation loss (You might need to update Logger to handle 'val_loss' key or just print)
+                        # Assuming Logger has a generic log_scalar or we just print for now.
+                        # logger.writer.add_scalar("Loss/val", avg_val_loss, step) 
+                        model.train()
+
                     # Checkpointing (Step-based)
                     if args.epochs == 0 and step % args.save_interval == 0:
                         torch.save({
                             'step': step,
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
+                            'ema_state_dict': ema.state_dict(), # Save EMA
                             'optimizer_state_dict': optimizer.state_dict(),
+                            'scaler_state_dict': scaler.state_dict(), # Save Scaler
                             'loss': loss.item(),
                         }, checkpoint_path)
                         logger.plot_progress()
@@ -626,6 +702,11 @@ if __name__ == "__main__":
     # Autoregressive Training Args
     parser.add_argument('--autoregressive_steps', type=int, default=1, help="Number of autoregressive rollout steps during training. 1=standard, >1=predict and feed back before backprop")
     parser.add_argument('--ar_loss_decay', type=float, default=0.5, help="Decay factor for loss on subsequent autoregressive steps (0.5 = each step contributes half as much)")
+
+    # Validation Args
+    parser.add_argument('--train_split_pct', type=float, default=0.95, help="Percentage of data to use for training (remainder for validation)")
+    parser.add_argument('--val_interval', type=int, default=5000, help="Step interval for validation")
+    parser.add_argument('--val_batches', type=int, default=50, help="Number of batches to run during validation")
 
     args = parser.parse_args()
     print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
