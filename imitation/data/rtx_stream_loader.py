@@ -275,3 +275,13 @@ class RTXStreamLoader(IterableDataset):
             yield from self._process_episode(episode)
             # Active GC after each episode to prevent leaks
             gc.collect()
+            
+            # Anti-Fragmentation for Persistent Workers
+            # Force glibc to release free memory back to OS
+            try:
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except Exception:
+                pass
+

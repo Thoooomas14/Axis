@@ -465,8 +465,18 @@ def train(args):
                     
                     step += 1
                     steps_in_current_epoch += 1
-                    pbar.update(1)
                     pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
+                    
+                    # === Persistent Memory Fix ===
+                    # Python doesn't always release memory to OS. We force it periodically.
+                    if step % 1000 == 0:
+                        try:
+                            import ctypes
+                            libc = ctypes.CDLL("libc.so.6")
+                            libc.malloc_trim(0)
+                        except Exception:
+                            pass # Ignored on Windows/Non-Linux
+
                     
                     # === Validation Loop ===
                     if step % args.val_interval == 0:
