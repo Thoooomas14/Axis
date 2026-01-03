@@ -5,7 +5,7 @@ import torch
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.model.axis_v1 import AxisModel
+from src.models.axis_v1 import AxisModel
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: my_robot_ext
+Version: 0.1.0
+Summary: Starting Project for Custom Robot Environments in Isaac Lab
+Author-email: User <user@example.com>
+Requires-Python: >=3.10

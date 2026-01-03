@@ -13,3 +13,6 @@ pytest
 flake8
 pyyaml
 pillow
+psutil
+toml
+gymnasium

@@ -8,8 +8,8 @@ import argparse
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.model.axis_v1 import AxisModel
-from training.data.rtx_loader import RTXDataset
+from src.models.axis_v1 import AxisModel
+from imitation.data.rtx_loader import RTXDataset
 
 def evaluate_sequence(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -71,7 +71,7 @@ def evaluate_sequence(args):
     print("Loading data...")
     
     if args.use_processed_data:
-        from training.data.processed_loader import ProcessedDataset
+        from imitation.data.processed_loader import ProcessedDataset
         from torch.utils.data import DataLoader
         
         dataset = ProcessedDataset(args.data_dir, max_len=64)

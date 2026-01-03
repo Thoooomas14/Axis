@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from training.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.rtx_stream_loader import RTXStreamLoader
 
 def visualize_requery(args):
     print(f"Initializing Loader for {args.dataset}...")

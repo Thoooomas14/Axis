@@ -1,0 +1,2 @@
+[omni.isaac.lab]
+my_robot_ext = my_robot_ext:my_robot_ext

@@ -142,6 +142,12 @@ def test_requirements_vs_codebase():
         'tqdm': 'tqdm',
         'bs4': 'beautifulsoup4',
         'google.colab': None, # Ignore colab specific
+        'mpl_toolkits': 'matplotlib',  # Part of matplotlib
+        # Isaac Sim/Lab ecosystem (not pip-installable, installed via Isaac Sim)
+        'omni': None,
+        'isaacsim': None,
+        'isaaclab': None,
+        'my_robot_ext': None,  # Local Isaac Lab extension package
     }
     
     missing_deps = []

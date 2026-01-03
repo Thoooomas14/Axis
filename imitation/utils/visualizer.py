@@ -7,7 +7,12 @@ class Visualizer:
     def __init__(self, save_dir):
         plt.switch_backend('Agg') # Essential for headless VMs
         self.save_dir = os.path.join(save_dir, 'visualizations')
-        os.makedirs(self.save_dir, exist_ok=True)
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+        except PermissionError:
+            print(f"Warning: Permission denied creating {self.save_dir}. Falling back to ./visualizations")
+            self.save_dir = './visualizations'
+            os.makedirs(self.save_dir, exist_ok=True)
         self.action_labels = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'g']
 
     def visualize_batch(self, step, batch, pred_action, save_prefix='viz'):
@@ -118,9 +123,13 @@ class Visualizer:
             ax_act.grid(True, alpha=0.3)
             
             plt.tight_layout()
+            plt.tight_layout()
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.png")
             plt.savefig(save_path)
-            plt.close()
+            plt.close(fig) # Close the specific figure
+            plt.close('all') # Safety net
+            import gc
+            gc.collect() # Force cleanup of the heavy figure object
             
         except Exception as e:
             print(f"Error visualizing batch: {e}")
