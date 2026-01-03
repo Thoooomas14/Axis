@@ -1,18 +1,23 @@
 import torch
 from torch.utils.data import IterableDataset
 import tensorflow as tf
+
+# Force TensorFlow to use CPU only in all workers
+# This prevents VRAM OOM and CUDA initialization errors in forked processes.
+tf.config.set_visible_devices([], 'GPU')
+
 import tensorflow_datasets as tfds
-# import tensorflow_io as tfio # Moved to __init__
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from .goal_oracle import GoalOracle
+import gc
 
 class RTXStreamLoader(IterableDataset):
     """
     Streams RT-X datasets from GCS, splits them into subtasks, and yields sliding windows.
     Supports 'fractal20220817_data' and 'droid' datasets.
     """
-    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None, repeat=True):
+    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, image_size=(128, 128), shuffle_buffer_size=1000, data_dir=None, repeat=True, max_ar_steps=1):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -21,6 +26,7 @@ class RTXStreamLoader(IterableDataset):
         self.shuffle_buffer_size = shuffle_buffer_size
         self.data_dir = data_dir
         self.repeat = repeat
+        self.max_ar_steps = max_ar_steps  # Number of sequential targets to yield
         
         self.oracle = GoalOracle(output_dim=64)
         
@@ -47,8 +53,6 @@ class RTXStreamLoader(IterableDataset):
         if self.builder:
             return self.builder.info.splits[self.split].num_examples
         return 0
-
-    # ... (methods _get_pose, _process_image, _process_episode remain unchanged) ...
 
     def _get_pose(self, obs):
         """Extracts 8D pose (3 Pos + 4 Quat + 1 Gripper) from observation."""
@@ -128,7 +132,10 @@ class RTXStreamLoader(IterableDataset):
                     break
             
             if img is not None:
-                imgs.append(self._process_image(img))
+                # Eagerly process/resize IMMEDIATELY to save RAM
+                # Do not append the raw 'img' tensor to any list!
+                processed_img = self._process_image(img)
+                imgs.append(processed_img)
             else:
                 imgs.append(np.zeros((3, 128, 128), dtype=np.float32))
                 
@@ -136,7 +143,9 @@ class RTXStreamLoader(IterableDataset):
         
         if not imgs: return # Empty episode
         
-        imgs = np.array(imgs)
+        # Convert to numpy one by one (already done in _process_image) 
+        # but we need to stack them efficiently
+        imgs = np.array(imgs) # This is now efficient because they are already 128x128
         props = np.array(props)
         total_steps = len(imgs)
         
@@ -152,15 +161,24 @@ class RTXStreamLoader(IterableDataset):
             start_idx = split_indices[i]
             end_idx = split_indices[i+1]
             
-            # Minimum length check
+            # Minimum length check (for the core subtask, excluding lookback)
             if end_idx - start_idx < 2: continue
             
-            subtask_imgs = imgs[start_idx:end_idx]
-            subtask_props = props[start_idx:end_idx]
+            # Include lookback from previous subtask for temporal context
+            # This allows the model to see the approach motion before a pick/place
+            lookback = min(start_idx, self.window_size - 1)
+            lookback_start = start_idx - lookback
             
-            # Infer Task Type
+            subtask_imgs = imgs[lookback_start:end_idx]
+            subtask_props = props[lookback_start:end_idx]
+            
+            # Track where the actual subtask starts within our extended array
+            subtask_offset = lookback  # First `lookback` frames are context from previous subtask
+            
+            # Infer Task Type (from actual subtask, not lookback context)
             # 0: Move, 1: Pick, 2: Place
-            start_grip = subtask_props[0][7]
+            actual_subtask_start = subtask_offset  # Index within subtask_props where actual subtask begins
+            start_grip = subtask_props[actual_subtask_start][7]
             end_grip = subtask_props[-1][7]
             
             task_type = 0 # Default Move
@@ -169,15 +187,16 @@ class RTXStreamLoader(IterableDataset):
             elif start_grip > 0.5 and end_grip < 0.5:
                 task_type = 2 # Place
             
-            # Compute Goal for this subtask
-            start_pose = subtask_props[0]
+            # Compute Goal for this subtask (using actual subtask bounds)
+            start_pose = subtask_props[actual_subtask_start]
             end_pose = subtask_props[-1]
             goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
             
             # Windowing
             T = len(subtask_imgs)
+            actual_subtask_len = T - subtask_offset  # Length of actual subtask (excluding lookback)
             
-            # If subtask is shorter than window, pad it
+            # If subtask (including lookback) is shorter than window, pad it
             if T < self.window_size:
                 pad_len = self.window_size - T
                 # Pad with first frame at start (history)
@@ -186,7 +205,9 @@ class RTXStreamLoader(IterableDataset):
                 
                 subtask_imgs = np.concatenate([pad_imgs, subtask_imgs], axis=0)
                 subtask_props = np.concatenate([pad_props, subtask_props], axis=0)
-                T = self.window_size # Now it's at least window size
+                # Adjust offset to account for padding
+                actual_subtask_start += pad_len
+                T = len(subtask_imgs)
             
             # Sliding Window Logic
             num_windows = T - self.window_size + 1
@@ -196,38 +217,71 @@ class RTXStreamLoader(IterableDataset):
                 w_props = subtask_props[w : w+self.window_size]
                 
                 # Target is the step AFTER the window.
-                if w + self.window_size < T:
-                    target_pose = subtask_props[w + self.window_size]
-                    requery = 0.0
-                else:
-                    # End of subtask
-                    target_pose = subtask_props[-1]
-                    requery = 1.0
+                # For AR training, we need N sequential targets
+                target_poses = []
+                requery_flags = []
+                
+                for k in range(self.max_ar_steps):
+                    target_idx = w + self.window_size + k
+                    if target_idx < T:
+                        target_poses.append(subtask_props[target_idx])
+                        requery_flags.append(0.0)
+                    else:
+                        # End of subtask - use last pose and signal requery
+                        target_poses.append(subtask_props[-1])
+                        requery_flags.append(1.0)
                 
                 yield {
                     'images': torch.tensor(w_imgs, dtype=torch.float32),
                     'proprio': torch.tensor(w_props, dtype=torch.float32),
                     'goal': goal_emb,
-                    'action': torch.tensor(target_pose, dtype=torch.float32),
-                    'requery': torch.tensor([requery], dtype=torch.float32)
+                    'actions': torch.tensor(np.array(target_poses), dtype=torch.float32),  # (N, 8)
+                    'requery': torch.tensor([requery_flags[0]], dtype=torch.float32)  # Use first step's requery for now
                 }
 
     def __iter__(self):
         # Load dataset in streaming mode
+        # Disable autocache to prevent TFDS from loading typically "small" datasets into RAM
+        # which defeats the purpose of streaming huge robotics datasets.
+        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        
         if self.ds is None:
+            # We must use the same read_config for both cases
             if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True)
+                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
             else:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True)
+                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
             
         ds = self.ds
             
+        # Sharding for PyTorch DataLoader Workers
+        # This ensures each worker processes a unique slice of the dataset
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # tf.data.Dataset.shard(num_shards, index)
+            ds = ds.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+            
         # Repeat indefinitely ONLY if requested
+        # Note: Repeat should generally come after shard to ensure we repeat the shard
         if self.repeat:
             ds = ds.repeat()
             
-        ds = ds.shuffle(self.shuffle_buffer_size)
+        # Only shuffle if buffer is significant (>1) to save RAM
+        # Droid images are huge; buffering 10+ episodes can OOM 64GB RAM.
+        if self.shuffle_buffer_size > 1:
+            ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
             yield from self._process_episode(episode)
+            # Active GC after each episode to prevent leaks
+            gc.collect()
+            
+            # Anti-Fragmentation for Persistent Workers
+            # Force glibc to release free memory back to OS
+            try:
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except Exception:
+                pass
 

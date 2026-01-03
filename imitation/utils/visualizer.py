@@ -123,9 +123,13 @@ class Visualizer:
             ax_act.grid(True, alpha=0.3)
             
             plt.tight_layout()
+            plt.tight_layout()
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.png")
             plt.savefig(save_path)
-            plt.close()
+            plt.close(fig) # Close the specific figure
+            plt.close('all') # Safety net
+            import gc
+            gc.collect() # Force cleanup of the heavy figure object
             
         except Exception as e:
             print(f"Error visualizing batch: {e}")
