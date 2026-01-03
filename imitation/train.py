@@ -229,7 +229,8 @@ def train(args):
     
     # Validation Dataloader (smaller batch size to save memory if needed, or same)
     # We use 0 workers for val to save overhead unless it's huge
-    val_dataloader = create_dataloader(effective_batch_size, 0, 0, split=val_split)
+    # LIMIT VAL BATCH SIZE TO 32 to prevent OOM spikes during validation
+    val_dataloader = create_dataloader(32, 0, 0, split=val_split)
     
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
     
@@ -469,6 +470,10 @@ def train(args):
                     
                     # === Validation Loop ===
                     if step % args.val_interval == 0:
+                        # Force GC to clear any transient training memory
+                        gc.collect()
+                        if torch.cuda.is_available(): os.environ.get('empty_cache', torch.cuda.empty_cache)()
+
                         model.eval()
                         val_loss_total = 0.0
                         val_batches = 0
@@ -504,6 +509,11 @@ def train(args):
                         # Assuming Logger has a generic log_scalar or we just print for now.
                         # logger.writer.add_scalar("Loss/val", avg_val_loss, step) 
                         model.train()
+                        
+                        # Cleanup validation variables
+                        del val_loss_total, val_batches
+                        gc.collect()
+                        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
                     # Checkpointing (Step-based)
                     if args.epochs == 0 and step % args.save_interval == 0:
