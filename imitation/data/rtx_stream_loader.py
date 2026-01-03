@@ -1,11 +1,16 @@
 import torch
 from torch.utils.data import IterableDataset
 import tensorflow as tf
+
+# Force TensorFlow to use CPU only in all workers
+# This prevents VRAM OOM and CUDA initialization errors in forked processes.
+tf.config.set_visible_devices([], 'GPU')
+
 import tensorflow_datasets as tfds
-# import tensorflow_io as tfio # Moved to __init__
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from .goal_oracle import GoalOracle
+import gc
 
 class RTXStreamLoader(IterableDataset):
     """
@@ -48,8 +53,6 @@ class RTXStreamLoader(IterableDataset):
         if self.builder:
             return self.builder.info.splits[self.split].num_examples
         return 0
-
-    # ... (methods _get_pose, _process_image, _process_episode remain unchanged) ...
 
     def _get_pose(self, obs):
         """Extracts 8D pose (3 Pos + 4 Quat + 1 Gripper) from observation."""
@@ -129,7 +132,10 @@ class RTXStreamLoader(IterableDataset):
                     break
             
             if img is not None:
-                imgs.append(self._process_image(img))
+                # Eagerly process/resize IMMEDIATELY to save RAM
+                # Do not append the raw 'img' tensor to any list!
+                processed_img = self._process_image(img)
+                imgs.append(processed_img)
             else:
                 imgs.append(np.zeros((3, 128, 128), dtype=np.float32))
                 
@@ -137,7 +143,9 @@ class RTXStreamLoader(IterableDataset):
         
         if not imgs: return # Empty episode
         
-        imgs = np.array(imgs)
+        # Convert to numpy one by one (already done in _process_image) 
+        # but we need to stack them efficiently
+        imgs = np.array(imgs) # This is now efficient because they are already 128x128
         props = np.array(props)
         total_steps = len(imgs)
         
@@ -233,11 +241,16 @@ class RTXStreamLoader(IterableDataset):
 
     def __iter__(self):
         # Load dataset in streaming mode
+        # Disable autocache to prevent TFDS from loading typically "small" datasets into RAM
+        # which defeats the purpose of streaming huge robotics datasets.
+        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        
         if self.ds is None:
+            # We must use the same read_config for both cases
             if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True)
+                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
             else:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True)
+                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
             
         ds = self.ds
             
@@ -260,4 +273,5 @@ class RTXStreamLoader(IterableDataset):
         
         for episode in ds:
             yield from self._process_episode(episode)
-
+            # Active GC after each episode to prevent leaks
+            gc.collect()
