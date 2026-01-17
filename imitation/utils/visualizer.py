@@ -18,61 +18,17 @@ class Visualizer:
     def visualize_batch(self, step, batch, pred_action, save_prefix='viz'):
         """
         Visualizes the first episode in the batch.
+        
+        Displays the 8-frame window with an action bar chart comparing
+        ground truth vs prediction for the last frame.
+        
         Args:
             step: Current training step
-            batch: Dict from RTXStreamLoader
-            pred_action: (B, 7) - Prediction for the LAST step in the window.
-                         Wait, during training we only predict the last step.
-                         To visualize a sequence, we need to run inference on the whole window?
-                         Or just visualize the single step prediction?
-                         
-                         User asked for "10 timesteps over an episode".
-                         Since the training loop processes random windows, we can't easily reconstruct a full episode
-                         unless we specifically fetch one or accumulate windows.
-                         
-                         However, the batch contains a WINDOW of 8 steps.
-                         We can visualize these 8 steps.
-                         But we only have prediction for the LAST step (t=7).
-                         
-                         Option A: Run inference on all steps in the window (0..7).
-                         Option B: Just visualize the last step.
-                         
-                         Let's do Option A: Run inference on the window steps to show trajectory.
+            batch: Dict from RTXStreamLoader with 'images', 'action' keys
+            pred_action: (B, 7) tensor - predicted action for last frame
+            save_prefix: Filename prefix for saved image
         """
         try:
-            # Unpack
-            images = batch['images'] # (B, 8, 3, 128, 128)
-            target_action = batch['action'] # (B, 7) -> This is the target for the LAST step?
-            # Wait, RTXStreamLoader yields:
-            # 'action': target_pose (next step)
-            # It yields ONE target per window.
-            
-            # If we want to visualize a sequence, we need to look at the window inputs.
-            # The window inputs contain 'proprio' which is the state at each step.
-            # We can compare the proprio trajectory?
-            # Or we can run the model on the window to predict actions for each step?
-            
-            # Let's visualize the 8 steps in the window.
-            # We will plot the Image for each step.
-            # And we will plot the Ground Truth Action (from proprio next step?) vs Predicted Action.
-            
-            # Actually, 'target_action' in the batch is only for the *last* step of the window.
-            # We don't have ground truth actions for the earlier steps in the window readily available in the batch dictionary
-            # UNLESS we change the loader to yield them.
-            # But the loader yields (Window, Target).
-            
-            # Compromise: Visualize the 8 images in the window.
-            # And visualize the prediction vs target for the LAST step.
-            
-            # User asked: "shows 10 timesteps over an episode... and where the robot moved compared to what my model predicted"
-            # Since we are training on shuffled windows, we don't have a full episode.
-            # We only have a window of 8.
-            
-            # Let's visualize the 8 steps of the window.
-            # And for the last step, show the bar chart comparison.
-            
-            # Search for a sample with significant movement (action norm > threshold)
-            # to avoid visualizing boring "pause" frames.
             best_idx = 0
             max_norm = -1.0
             

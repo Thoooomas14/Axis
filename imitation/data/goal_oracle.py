@@ -1,51 +1,77 @@
 import torch
 import numpy as np
-import hashlib
+
 
 class GoalOracle:
     """
-    Deterministically generates 'Gemini-like' goal embeddings from instruction and poses.
-    Replaces the need for a live Gemini instance during training.
+    Generates standardized 64D goal embeddings for robot manipulation tasks.
+    
+    Goal Vector Layout (64D) - Updated for 7D SE(3) minimal poses:
+    | Indices | Component                              |
+    |---------|----------------------------------------|
+    | 0-2     | Task type one-hot [Move, Pick, Place]  |
+    | 3-9     | Start pose (7D): [φ, p, gripper]       |
+    | 10-16   | Target pose (7D): [φ, p, gripper]      |
+    | 17-25   | Object properties (size, color, shape) |
+    | 26-39   | Spatial relations / Reserved           |
+    | 40-55   | Reserved (zeros)                       |
+    | 56-63   | Random noise                           |
     """
-    def __init__(self, output_dim=64):
+    
+    def __init__(self, output_dim: int = 64, noise_scale: float = 0.1):
+        assert output_dim == 64, "Goal vector must be 64D"
         self.output_dim = output_dim
-        # Fixed random projection matrix for stability
-        # We use a fixed seed so it's deterministic across runs
-        rng = np.random.RandomState(42)
-        self.proj = rng.randn(7 + 7 + 32, output_dim).astype(np.float32) # Start(7) + End(7) + InstrHash(32)
+        self.noise_scale = noise_scale
 
-    def encode_goal(self, task_type: int, start_pose: np.ndarray, end_pose: np.ndarray) -> torch.Tensor:
+    def encode_goal(
+        self,
+        task_type: int,
+        start_pose: np.ndarray,
+        end_pose: np.ndarray,
+        object_props: dict = None
+    ) -> torch.Tensor:
         """
+        Construct standardized 64D goal vector.
+        
         Args:
-            task_type: int (0=Move, 1=Pick, 2=Place)
-            start_pose: (7,)
-            end_pose: (7,)
+            task_type: 0=Move, 1=Pick, 2=Place
+            start_pose: 7D current pose [φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
+            end_pose: 7D target pose [φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
+            object_props: Optional dict with 'size', 'color', 'shape'
+                - size: (3,) array [width, height, depth]
+                - color: (3,) array [r, g, b] normalized to [0, 1]
+                - shape: (3,) one-hot array [cube, cylinder, sphere]
+        
         Returns:
-            (output_dim,) tensor
+            (64,) float32 tensor
         """
-        # 1. One-hot encode task type
-        # We assume 3 types for now
-        type_vec = np.zeros(3, dtype=np.float32)
+        goal = np.zeros(64, dtype=np.float32)
+        
+        # Task type one-hot (indices 0-2)
         if 0 <= task_type < 3:
-            type_vec[task_type] = 1.0
-            
-        # 2. Concatenate inputs
-        # Ensure poses are 7D
-        if start_pose.shape[0] < 7: start_pose = np.pad(start_pose, (0, 7 - start_pose.shape[0]))
-        if end_pose.shape[0] < 7: end_pose = np.pad(end_pose, (0, 7 - end_pose.shape[0]))
+            goal[task_type] = 1.0
         
-        # Input vector: [Type(3) + Start(7) + End(7)] = 17
-        input_vec = np.concatenate([type_vec, start_pose, end_pose]) 
+        # Start pose (indices 3-9) - 7D minimal SE(3) + gripper
+        goal[3:10] = start_pose[:7]
         
-        # 3. Project
-        # Resize projection matrix if needed or just slice it
-        # Original was 46. New is 17.
-        # We can just use the first 17 rows of the existing random matrix (if it was large enough)
-        # or re-initialize. Since we re-init every time the class is created, we can just change init.
+        # Target pose (indices 10-16) - 7D minimal SE(3) + gripper
+        goal[10:17] = end_pose[:7]
         
-        embedding = np.dot(input_vec, self.proj[:input_vec.shape[0]])
+        # Object properties (indices 17-25) - optional
+        if object_props:
+            if 'size' in object_props:
+                goal[17:20] = object_props['size']
+            if 'color' in object_props:
+                goal[20:23] = object_props['color']
+            if 'shape' in object_props:  # one-hot [cube, cylinder, sphere]
+                goal[23:26] = object_props['shape']
         
-        # Normalize embedding
-        embedding = embedding / (np.linalg.norm(embedding) + 1e-6)
+        # Spatial relations (indices 32-39) - reserved for future use
+        # Currently zeros
         
-        return torch.tensor(embedding, dtype=torch.float32)
+        # Reserved (indices 40-55) - zeros
+        
+        # Random noise for regularization (indices 56-63)
+        goal[56:64] = np.random.randn(8) * self.noise_scale
+        
+        return torch.tensor(goal, dtype=torch.float32)

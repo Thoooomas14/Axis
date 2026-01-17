@@ -2,100 +2,78 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class FiLMLayer(nn.Module):
-    """
-    Feature-wise Linear Modulation (FiLM) layer.
-    Applies an affine transformation to the input feature map based on a conditioning embedding.
-    """
-    def __init__(self, num_features, cond_dim):
-        super().__init__()
-        self.num_features = num_features
-        self.fc = nn.Linear(cond_dim, 2 * num_features)
-
-    def forward(self, x, cond):
-        """
-        Args:
-            x: Input feature map (B, C, H, W) or (B, C)
-            cond: Conditioning embedding (B, cond_dim)
-        """
-        # Project condition to scale (gamma) and shift (beta)
-        params = self.fc(cond)
-        gamma, beta = torch.split(params, self.num_features, dim=1)
-
-        # Reshape for broadcasting
-        if x.dim() == 4:
-            gamma = gamma.view(gamma.size(0), gamma.size(1), 1, 1)
-            beta = beta.view(beta.size(0), beta.size(1), 1, 1)
-        else:
-            gamma = gamma.view(gamma.size(0), gamma.size(1))
-            beta = beta.view(beta.size(0), beta.size(1))
-
-        return (1 + gamma) * x + beta
+from torchvision.models import resnet18, ResNet18_Weights
 
 class VisionEncoder(nn.Module):
     """
-    Encodes RGB images into a feature map, conditioned on a goal embedding via FiLM.
-    Uses a simplified ResNet-like structure for real-time performance.
+    Encodes RGB images using a pretrained ResNet-18 backbone.
+    Outputs feature map (B, C, H, W).
     """
-    def __init__(self, input_channels=3, base_channels=32, cond_dim=256):
+    def __init__(self, input_channels=3, feature_dim=256, pretrained=True):
         super().__init__()
         
-        self.conv1 = nn.Conv2d(input_channels, base_channels, kernel_size=7, stride=2, padding=3)
-        self.bn1 = nn.BatchNorm2d(base_channels)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        # Layer 1
-        self.conv2 = nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(base_channels * 2)
-        self.film1 = FiLMLayer(base_channels * 2, cond_dim)
-
-        # Layer 2
-        self.conv3 = nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1)
-        self.bn3 = nn.BatchNorm2d(base_channels * 4)
-        self.film2 = FiLMLayer(base_channels * 4, cond_dim)
-
-        # Layer 3
-        self.conv4 = nn.Conv2d(base_channels * 4, base_channels * 8, kernel_size=3, stride=2, padding=1)
-        self.bn4 = nn.BatchNorm2d(base_channels * 8)
-        self.film3 = FiLMLayer(base_channels * 8, cond_dim)
+        # Load ResNet-18
+        backbone = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
         
+        # If input channels != 3, adjust the first conv layer
+        if input_channels != 3:
+            backbone.conv1 = nn.Conv2d(
+                input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        
+        # We take layers up to layer4 (before avgpool/fc) to keep spatial features
+        # ResNet layer channels: layer1=64, layer2=128, layer3=256, layer4=512
+        self.backbone = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            backbone.relu,
+            backbone.maxpool,
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4
+        )
+        
+        # Project 512 channels from layer4 to feature_dim
+        self.proj = nn.Conv2d(512, feature_dim, kernel_size=1)
+        self.bn_proj = nn.BatchNorm2d(feature_dim)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, x, cond):
+    def forward(self, x):
         """
         Args:
             x: Images (B, C, H, W)
-            cond: Goal embedding (B, cond_dim)
         Returns:
-            Feature map (B, C_out, H_out, W_out)
+            Feature map (B, feature_dim, H_out, W_out)
         """
-        x = self.act(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.film1(x, cond)
-        x = self.act(x)
-
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.film2(x, cond)
-        x = self.act(x)
-
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.film3(x, cond)
-        x = self.act(x)
-
+        x = self.backbone(x)
+        x = self.act(self.bn_proj(self.proj(x)))
         return x
 
 class ProprioEncoder(nn.Module):
     """
     Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
-    Default input_dim=7 (3 Pos + 3 Rot + 1 Gripper).
+    Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
+    Default input_dim=7 (3 Rotation Vector + 3 Translation + 1 Gripper).
+    
+    Args:
+        input_dim: Dimension of proprioceptive input (default 7)
+        output_dim: Dimension of output embedding
+        hidden_dim: Dimension of hidden layers
+        normalize: If True, apply running normalization using EMA statistics
     """
-    def __init__(self, input_dim=7, output_dim=256, hidden_dim=128):
+    def __init__(self, input_dim=7, output_dim=256, hidden_dim=128, normalize=True):
         super().__init__()
+        self.input_dim = input_dim
+        self.normalize = normalize
+        
+        # Running statistics buffers for normalization
+        if normalize:
+            self.register_buffer('running_mean', torch.zeros(input_dim))
+            self.register_buffer('running_std', torch.ones(input_dim))
+            self.register_buffer('count', torch.tensor(0, dtype=torch.long))
+            self.ema_alpha = 0.1
+        
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -105,14 +83,69 @@ class ProprioEncoder(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
 
+    def update_stats(self, x):
+        """
+        Update running mean and std with EMA (alpha=0.1).
+        Only call during training.
+        
+        Args:
+            x: Input tensor of shape (B, input_dim) or (B, T, input_dim)
+        """
+        if not self.normalize:
+            return
+        
+        # Flatten to (N, input_dim) if needed
+        if x.dim() == 3:
+            x = x.reshape(-1, x.size(-1))
+        
+        # Compute batch statistics
+        batch_mean = x.mean(dim=0)
+        batch_std = x.std(dim=0)
+        
+        # EMA update
+        if self.count == 0:
+            # First update: initialize with batch stats
+            self.running_mean.copy_(batch_mean)
+            self.running_std.copy_(batch_std.clamp(min=1e-6))
+        else:
+            # EMA: new = (1 - alpha) * old + alpha * batch
+            self.running_mean.copy_(
+                (1 - self.ema_alpha) * self.running_mean + self.ema_alpha * batch_mean
+            )
+            self.running_std.copy_(
+                (1 - self.ema_alpha) * self.running_std + self.ema_alpha * batch_std.clamp(min=1e-6)
+            )
+        
+        self.count.add_(1)
+
     def forward(self, x):
+        """
+        Args:
+            x: Proprioceptive state (B, input_dim) or (B, T, input_dim)
+        Returns:
+            Encoded embedding of same batch shape with output_dim
+        """
+        # Apply normalization if enabled
+        if self.normalize:
+            # Update stats during training
+            if self.training:
+                self.update_stats(x)
+            
+            # Normalize: (x - mean) / std
+            # Clamp std to avoid division by zero
+            std_clamped = self.running_std.clamp(min=1e-6)
+            x = (x - self.running_mean) / std_clamped
+        
         return self.net(x)
+
+
+
 
 class GoalEncoder(nn.Module):
     """
     Project semantic goal embeddings (from LLM/Gemini) into the model's dimension.
     """
-    def __init__(self, input_dim=64, output_dim=256): # Default input_dim 64 for parsed Gemini embeddings
+    def __init__(self, input_dim=64, output_dim=256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, output_dim),
@@ -123,3 +156,6 @@ class GoalEncoder(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+

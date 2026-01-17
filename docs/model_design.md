@@ -1,106 +1,137 @@
-# Axis Model Design
+# Axis Model Design (V2)
 
-The Axis model is designed to be a general-purpose, multi-robot control policy that learns from diverse datasets. It treats robot control as a sequence modeling problem, predicting the next action based on a history of observations and a semantic goal.
+The Axis model is a general-purpose, multi-robot control policy that learns from diverse datasets. It treats robot control as a sequence modeling problem, predicting **SE(3) twist actions** based on a history of observations and a semantic goal.
+
+## Key V2 Changes
+
+- **7D Minimal Poses**: Uses SE(3) representation (Rotation Vector + Translation + Gripper)
+- **7D Twist Actions**: Predicts Lie algebra twists (ω, v, gripper) instead of delta poses
+- **Action Chunking**: Outputs `(B, W, 7)` - a sequence of W future actions per forward pass
+- **Confidence Requery**: Self-supervised confidence prediction based on action loss
+- **RoPE**: Rotary Position Embeddings for better sequence modeling
 
 ## Architecture Overview
-
-The model follows a modular architecture composed of:
-1.  **Encoders**: Process raw inputs (Vision, Goal, Proprioception).
-2.  **Bottleneck**: Compresses high-dimensional visual data into a compact set of tokens.
-3.  **Latent Memory**: Maintains a running context of the episode (optional/disabled by default).
-4.  **Transformer Backbone**: Fuses all modalities and attends to relevant features.
-5.  **Decoders**: Translates transformer outputs into robot actions.
-
-**Window-Based Processing**:
-Axis processes a sliding window of observations (size $W=8$) at each step. This allows the model to attend to immediate temporal gradients and short-term history directly in the transformer.
 
 ```mermaid
 graph TD
     subgraph Inputs
-        Img[Image Window<br/>B, W, C, H, W]
-        Prop[Proprio Window<br/>B, W, 8]
+        Img[Image Window<br/>B, W, 3, 128, 128]
+        Prop[Proprio Window<br/>B, W, 7]
         Goal[Goal Embedding<br/>B, 64]
     end
 
     subgraph Encoders
-        VE[Vision Encoder]
-        GE[Goal Encoder]
-        PE[Proprio Encoder]
+        VE[Vision Encoder<br/>ResNet-18]
+        PE[Proprio Encoder<br/>7D → 128D]
+        GE[Goal Encoder<br/>64D → 128D]
     end
 
     subgraph Bottleneck
-        TL[Token Learner]
-    end
-
-    subgraph Memory
-        LQ[Latent Queue]
-        LP[Latent Projection]
+        TL[Token Learner<br/>1 token/frame]
     end
 
     subgraph Backbone
-        T[Axis Transformer]
+        T[Axis Transformer<br/>512D, RoPE]
     end
 
     subgraph Outputs
-        AD[Action Decoder]
-        RD[Requery Decoder]
-        L_Out[Latent Update]
+        AD[Action Decoder<br/>512D → 7D twist]
+        RD[Requery Decoder<br/>Confidence 0-1]
     end
 
-    Goal --> GE
-    GE --> VE
     Img --> VE --> TL
     Prop --> PE
+    Goal --> GE
     
-    LQ --> LP
-    
-    TL --> T
-    PE --> T
-    LP --> T
+    TL --> Concat
+    PE --> Concat
+    GE --> Concat
+    Concat[Concat: 256+128+128=512D] --> T
     
     T --> AD
     T --> RD
-    T --> L_Out
-    L_Out -.-> LQ
 ```
+
+## Dimensions
+
+| Component | Dimension | Description |
+|-----------|-----------|-------------|
+| Proprioception | 7D | `[φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]` - Rotation vector + translation + gripper |
+| Action (Twist) | 7D | `[ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]` - Angular velocity + linear velocity + gripper |
+| Goal | 64D | Structured semantic goal vector |
+| Vision tokens | 256D | Per-frame visual features (1 token/frame) |
+| Proprio tokens | 128D | Encoded proprioceptive state |
+| Goal tokens | 128D | Encoded goal embedding |
+| Transformer | 512D | Concatenated token embedding |
 
 ## Component Details
 
-### 1. Goal Encoder
--   **Input**: A **64-dimensional** semantic vector.
--   **Composition**: The goal vector is a random projection of:
-    -   **Task Type** (One-hot: Pick, Place, Move)
-    -   **Start Pose** (8D: 3 Pos + 4 Quat + 1 Gripper)
-    -   **End Pose / POI** (8D: 3 Pos + 4 Quat + 1 Gripper)
--   **Function**: Projects the goal embedding into a conditioning vector used by the Vision Encoder.
+### 1. Encoders
 
-### 2. Vision Encoder & Token Learner
--   **Vision Encoder**: A CNN-based backbone that extracts spatial features from the input image. It is conditioned on the goal embedding via FiLM to focus on relevant objects.
--   **Token Learner**: Reduces the spatial feature map (H x W x C) into a small, fixed number of tokens (8 per image). This significantly reduces the computational cost for the transformer.
+#### Proprio Encoder
+- **Input**: 7D minimal SE(3) pose `[rotation_vector(3), translation(3), gripper(1)]`
+- **Running Normalization**: Uses EMA to normalize inputs during training
+- **Output**: 128D latent vector
 
-### 3. Latent Memory (Queue)
--   **Concept**: Axis maintains a "Latent Queue" of the past $N$ states to handle long-term history.
--   **Status**: Currently disabled by default for initial training phases to focus on immediate window-based control.
+#### Vision Encoder & Token Learner
+- **Vision Encoder**: ResNet-18 backbone with FiLM conditioning on goal
+- **Token Learner**: Compresses spatial features to 1 token per frame (256D)
 
-### 4. Axis Transformer
--   **Type**: Transformer Encoder (standard attention mechanism).
--   **Input**: A concatenated sequence of:
-    -   **Latent Tokens**: Projected history from the queue (if enabled).
-    -   **Context Tokens**: Interleaved sequence of `[Proprio_t, Vision_t]` for each step $t$ in the window $W$.
--   **Role**: Performs sensor fusion and reasoning. It allows the proprioceptive state to attend to visual features and historical context to determine the best action.
+#### Goal Encoder
+- **Input**: 64D structured goal vector
+- **Output**: 128D goal embedding
 
-### 5. Decoders
--   **Action Decoder**: Projects the transformer's output token (corresponding to the last step) into the **8D Action Space** (Position + Rotation(Quat) + Gripper).
--   **Requery Decoder**: Predicts a binary logit indicating if the agent needs a new high-level instruction (e.g., subtask complete).
+### 2. Axis Transformer
+
+- **Type**: Transformer Encoder with RoPE (Rotary Position Embeddings)
+- **Embedding**: 512D (256 vision + 128 proprio + 128 goal concatenated per timestep)
+- **Token Order**: `[Proprio(128) | Vision(256) | Goal(128)]` per timestep
+- **Layers**: 4 layers, 8 heads
+
+The transformer processes a sliding window of W=8 timesteps, with each timestep's tokens concatenated into a single 512D vector.
+
+### 3. Decoders
+
+#### Action Decoder
+- **Input**: Transformer output tokens `(B, W, 512)`
+- **Output**: 7D twist per timestep `(B, W, 7)`
+- **SafeActionDecoder**: Wraps output with safety clamps (rotation and translation limits)
+
+#### Requery Decoder (Confidence)
+- **Function**: Predicts model confidence as a self-supervised signal
+- **Training**: Target = `exp(-action_loss / temperature)` - high when predictions are accurate
+- **Output**: Single scalar `(B, 1)` via attention pooling across all timesteps
+- **Inference**: When confidence < threshold, request new goal from high-level planner
+
+## SE(3) Representation
+
+Axis V2 uses **SE(3) Lie group** representation for rigid body motion:
+
+### Poses (7D Minimal)
+```
+[φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
+ └─ Rotation Vector ─┘  └─ Translation ─┘   └─ Gripper
+```
+
+The rotation vector `φ = θ * axis` encodes rotation about an axis by angle θ (Rodrigues form).
+
+### Actions (7D Twist)
+```
+[ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]
+ └─ Angular Velocity ─┘  └─ Linear Velocity ─┘   └─ Gripper Δ
+```
+
+Twist actions are integrated using the SE(3) exponential map:
+```python
+T_new = T_current @ se3_exp(twist)
+```
 
 ## Data Flow
 
-1.  **Observation**: The data loader streams a window of $W=8$ images and proprioceptive states.
-2.  **Encoding**:
-    -   Goal (64D) is encoded.
-    -   Images are processed and tokenized (conditioned on goal).
-    -   Proprioception (8D) is projected to embedding space.
-3.  **Fusion**: All tokens are fed into the Transformer.
-4.  **Prediction**:
-    -   The output corresponding to the **last proprioception token** in the window is decoded into the next **Action** (8D).
-    -   A **Requery** signal is predicted.
+1. **Input**: Window of W=8 images, 7D proprio states, and 64D goal
+2. **Encoding**: Each modality encoded to its latent dimension
+3. **Concatenation**: Per-timestep tokens concatenated to 512D
+4. **Transformer**: RoPE-based attention across temporal sequence
+5. **Decoding**:
+   - Action: 7D twist for each timestep in window `(B, W, 7)`
+   - Requery: Single confidence value `(B, 1)`

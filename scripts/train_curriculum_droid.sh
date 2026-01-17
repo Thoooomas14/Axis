@@ -1,19 +1,25 @@
 #!/bin/bash
-# Autoregressive Training Curriculum Script
-# Runs each phase sequentially - if one fails, the next still runs
+# Endpoint Loss Horizon Curriculum Training Script (DROID Dataset)
+# Gradually increases loss_horizon from immediate to full chunk
+# This trains the model to focus on increasingly long-horizon task completion
 
-set -e  # Exit on error (remove if you want all phases to attempt)
+set -e  # Exit on error
 
-# Common args
+# Common args (lower shuffle_buffer for DROID's larger episodes)
 COMMON_ARGS="--dataset droid \
     --data_dir gs://gresearch/robotics \
     --batch_size 128 \
     --resume \
     --num_workers 1 \
-    --shuffle_buffer_size 2"
+    --shuffle_buffer_size 2 \
+    --window_size 8 \
+    --omega_rot 1.0 \
+    --omega_trans 1.0 \
+    --confidence_temperature 1.0"
 
 echo "=========================================="
-echo "Phase 1: Standard Training (AR=1)"
+echo "Phase 1: Immediate Loss (loss_horizon=1)"
+echo "Focus: Learn basic twist predictions"
 echo "=========================================="
 docker run --gpus all --rm --shm-size=16g \
     -v $(pwd):/app \
@@ -22,10 +28,11 @@ docker run --gpus all --rm --shm-size=16g \
     python imitation/train.py \
     $COMMON_ARGS \
     --steps 40000 \
-    --autoregressive_steps 1
+    --loss_horizon 1
 
 echo "=========================================="
-echo "Phase 2: Autoregressive Training (AR=2)"
+echo "Phase 2: Short Horizon (loss_horizon=2)"
+echo "Focus: 2-step endpoint accuracy"
 echo "=========================================="
 docker run --gpus all --rm --shm-size=16g \
     -v $(pwd):/app \
@@ -34,10 +41,11 @@ docker run --gpus all --rm --shm-size=16g \
     python imitation/train.py \
     $COMMON_ARGS \
     --steps 20000 \
-    --autoregressive_steps 2
+    --loss_horizon 2
 
 echo "=========================================="
-echo "Phase 3: Autoregressive Training (AR=4)"
+echo "Phase 3: Medium Horizon (loss_horizon=4)"
+echo "Focus: Half-window endpoint accuracy"
 echo "=========================================="
 docker run --gpus all --rm --shm-size=16g \
     -v $(pwd):/app \
@@ -46,10 +54,11 @@ docker run --gpus all --rm --shm-size=16g \
     python imitation/train.py \
     $COMMON_ARGS \
     --steps 15000 \
-    --autoregressive_steps 4
+    --loss_horizon 4
 
 echo "=========================================="
-echo "Phase 4: Autoregressive Training (AR=8)"
+echo "Phase 4: Full Chunk (loss_horizon=8)"
+echo "Focus: Complete task endpoint accuracy"
 echo "=========================================="
 docker run --gpus all --rm --shm-size=16g \
     -v $(pwd):/app \
@@ -58,7 +67,7 @@ docker run --gpus all --rm --shm-size=16g \
     python imitation/train.py \
     $COMMON_ARGS \
     --steps 10000 \
-    --autoregressive_steps 8
+    --loss_horizon 8
 
 echo "=========================================="
 echo "Training Curriculum Complete!"

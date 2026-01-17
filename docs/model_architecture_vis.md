@@ -1,115 +1,154 @@
-# Axis V1 Model Architecture
+# Axis V2 Model Architecture
 
-This document visualizes the data flow and structure of the compiled AxisModel based on `src/models/axis_v1.py` and `imitation/train.py`.
+This document visualizes the data flow and structure of the Axis V2 model.
 
 ## High-Level Data Flow
 
-``` mermaid
+```mermaid
 graph TD
     subgraph Inputs
-        IMG[("Images<br/>(B, Window, 3, 128, 128)")]
-        PROP[("Proprioception<br/>(B, Window, 8)<br/>[Pos, Quat, Gripper]")]
+        IMG[("Images<br/>(B, W, 3, 128, 128)")]
+        PROP[("Proprioception<br/>(B, W, 7)<br/>[RotVec, Pos, Gripper]")]
         GOAL[("Goal Embed<br/>(B, 64)")]
     end
 
     subgraph Encoders
-        GE[("GoalEncoder<br/>(MLP)")]
-        VE[("VisionEncoder<br/>(ResNet/CNN)")]
-        PE[("ProprioEncoder<br/>(MLP)")]
-        TL[("TokenLearner<br/>(Spatial Attention)")]
+        VE[("VisionEncoder<br/>ResNet-18")]
+        PE[("ProprioEncoder<br/>7D → 128D")]
+        GE[("GoalEncoder<br/>64D → 128D")]
+        TL[("TokenLearner<br/>1 token/frame")]
     end
 
-    subgraph Context_Construction
-        CAT[("Concatenate & Interleave<br/>[P_t, V_t^1...V_t^K]")]
-        LQ[("Latent Queue<br/>(Memory)")]
-        LP[("LatentProjection")]
+    subgraph Token_Construction
+        CAT[("Per-Frame Concatenation<br/>[Proprio | Vision | Goal]<br/>128 + 256 + 128 = 512D")]
     end
 
     subgraph Backbone
-        TR[("AxisTransformer<br/>(Self-Attention layers)")]
+        TR[("AxisTransformer<br/>512D, RoPE, 4 layers")]
     end
 
     subgraph Decoders
-        READ[("Readout Selection<br/>Last Proprio Token")]
-        AD[("ActionDecoder<br/>(MLP)")]
-        RD[("RequeryDecoder<br/>(MLP)")]
-        LPROJ[("Latent Projection Out")]
+        AD[("ActionDecoder<br/>512D → 7D twist")]
+        RD[("RequeryDecoder<br/>Attention Pooling → 1D")]
     end
 
     subgraph Outputs
-        ACT[("Diff_Action<br/>(B, 8)")]
-        REQ[("Requery Logit<br/>(B, 1)")]
-        NL[("Next Latent<br/>(B, 256)")]
+        ACT[("Action Twists<br/>(B, W, 7)")]
+        REQ[("Confidence<br/>(B, 1)")]
     end
 
     %% Connections
-    GOAL --> GE -->|"(B, 256)"| COND[("Conditioning")]
+    IMG --> VE --> TL
+    TL -->|"(B, W, 256)"| VTOK[("Vision Tokens")]
     
-    IMG --> VE
-    COND -.-> VE
-    VE -->|"(B*W, 256, H, W)"| TL
-    TL -->|"(B, W, 8, 256)"| VTOK[("Vision Tokens")]
-
-    PROP --> PE -->|"(B, W, 1, 256)"| PTOK[("Proprio Tokens")]
-
+    PROP --> PE -->|"(B, W, 128)"| PTOK[("Proprio Tokens")]
+    
+    GOAL --> GE -->|"(B, 128)"| GTOK[("Goal Token")]
+    GTOK -->|"Repeat W times"| GEXP[("(B, W, 128)")]
+    
     PTOK --> CAT
     VTOK --> CAT
-    CAT -->|"(B, W*(1+8), 256)"| CTX[("Context Seq")]
-
-    LQ --> LP -->|"(B, T_mem, 256)"| MEM[("Memory Tokens")]
+    GEXP --> CAT
+    CAT -->|"(B, W, 512)"| TR
     
-    CTX --> MERGE[("Concat Input")]
-    MEM --> MERGE
-    MERGE --> TR
-    TR -->|"(B, SeqLen, 256)"| OUT[("Output Tokens")]
-
-    OUT --> READ -->|"(B, 256)"| LAST[("Last P Token")]
-
-    LAST --> AD --> ACT
-    LAST --> RD --> REQ
-    LAST --> LPROJ --> NL
-    NL -.->|Update| LQ
+    TR -->|"(B, W, 512)"| OUT[("Output Tokens")]
+    
+    OUT --> AD --> ACT
+    OUT --> RD --> REQ
 
     classDef tensor fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
     classDef component fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,rx:10,ry:10;
     classDef logic fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
 
-    class IMG,PROP,GOAL,COND,VTOK,PTOK,CTX,MEM,OUT,LAST,ACT,REQ,NL tensor;
-    class GE,VE,PE,TL,TR,AD,RD,LPROJ,LQ,LP component;
-    class CAT,READ,MERGE logic;
+    class IMG,PROP,GOAL,VTOK,PTOK,GTOK,GEXP,OUT,ACT,REQ tensor;
+    class VE,PE,GE,TL,TR,AD,RD component;
+    class CAT logic;
 ```
 
-## Detailed Block Diagrams
+## Key V2 Architecture Changes
 
-### 1. Vision Pipeline
+| Component | V1 | V2 |
+|-----------|----|----|
+| Proprioception | 10D (pos + 6D rot + grip) | **7D** (rotvec + pos + grip) |
+| Action Output | 10D delta pose | **7D twist** (ω, v, grip) |
+| Token Structure | Interleaved P, V tokens | **Concatenated** per frame |
+| Output Shape | (B, 1, 10) or (B, K, 10) | **(B, W, 7)** full window |
+| Requery | Binary logit | **Confidence** [0, 1] |
 
-`Images -> VisionEncoder -> TokenLearner -> Tokens`
+## Token Concatenation
 
-``` mermaid
+Each timestep produces a single 512D token:
+
+```
+┌──────────────────────────────────────────────┐
+│  Proprio (128D)  │  Vision (256D)  │  Goal (128D)  │
+└──────────────────────────────────────────────┘
+                    512D total
+```
+
+The transformer sees a sequence of W=8 such tokens.
+
+## Vision Pipeline
+
+```mermaid
 graph LR
-    I[("Images (B, W, 3, 128, 128)")] -->|Flatten B*W| VE[("Vision Encoder")]
-    C[("Goal Cond (B, 256)")] -.->|Tile & Concat| VE
+    I[("Images (B, W, 3, 128, 128)")] -->|Flatten B*W| VE[("ResNet-18")]
     VE -->|"(B*W, 256, H', W')"| FM[("Feature Map")]
     FM --> TL[("Token Learner")]
-    TL -->|"(B*W, K=8, 256)"| T[("Vision Tokens")]
+    TL -->|"(B*W, 1, 256)"| T[("Vision Tokens")]
+    T -->|Reshape| OUT[("(B, W, 256)")]
 ```
 
-### 2. Sequence Structure (The "Axis" of Time)
+## Action Chunking
 
-The Transformer sees a sequence constructed by interleaving Proprioception and Vision tokens for each timestep in the window.
+V2 predicts a **full window of actions** in one forward pass:
 
-If Window Size `W=2` and Vision Tokens `K=3`: Sequence: `[P_0, V_0^1, V_0^2, V_0^3, P_1, V_1^1, V_1^2, V_1^3]`
+```python
+pred_action, confidence = model(images, proprio, goal)
+# pred_action: (B, W, 7) - W twist actions
+# confidence: (B, 1) - model confidence
 
--   **P_t**: Proprioception Embedding at time t
--   **V_t\^k**: k-th Vision Token at time t
-
-### 3. Readout Logic
-
-We specifically extract the token corresponding to the **current timestep's proprioception**. Since the model predicts the *next* action based on the history up to *now*, we use the embedding of the most recent proprioception state (at index `(W-1) * stride`) effectively as the "query" for the transformer's attention mechanism to generate the next action.
-
-``` python
-# From src/models/axis_v1.py
-stride = 1 + K
-readout_idx = (W - 1) * stride
-last_token = output_tokens[:, readout_idx, :]
+# At inference, use temporal smoothing
+ensembler = ActionChunkEnsembler(chunk_size=W)
+action = ensembler.update(pred_action)  # Smoothed action
 ```
+
+## Decoder Details
+
+### Action Decoder
+
+Projects each output token independently:
+```python
+# For each timestep t in window W
+action[t] = MLP(output_tokens[:, t, :])  # 512D → 7D
+```
+
+Output is clamped by `SafeActionDecoder`:
+- Rotation: ±0.2 rad/step
+- Translation: ±0.05 m/step
+
+### Requery Decoder (Confidence)
+
+Uses attention pooling across all timesteps:
+```python
+# Attention weights over W timesteps
+attn = softmax(MLP(output_tokens))  # (B, W, 1)
+pooled = sum(attn * output_tokens, dim=1)  # (B, 512)
+confidence = sigmoid(Linear(pooled))  # (B, 1)
+```
+
+During training, target = `exp(-action_loss / temperature)`.
+
+## Dimension Summary
+
+| Tensor | Shape | Description |
+|--------|-------|-------------|
+| Input Images | `(B, W, 3, 128, 128)` | RGB images |
+| Input Proprio | `(B, W, 7)` | 7D SE(3) poses |
+| Input Goal | `(B, 64)` | Semantic goal |
+| Vision Tokens | `(B, W, 256)` | 1 token per frame |
+| Proprio Tokens | `(B, W, 128)` | Encoded proprio |
+| Goal Tokens | `(B, W, 128)` | Repeated goal |
+| Transformer Input | `(B, W, 512)` | Concatenated tokens |
+| Action Output | `(B, W, 7)` | 7D twists |
+| Confidence Output | `(B, 1)` | Single scalar |

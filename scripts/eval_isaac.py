@@ -7,12 +7,10 @@ import time
 import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
 from scipy.spatial.transform import Rotation as R
-from PIL import Image
-import json
 import numpy as np
 import matplotlib.pyplot as plt
-# Required for 3D plotting
 from mpl_toolkits.mplot3d import Axes3D
+import torch
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,7 +21,7 @@ try:
 except ImportError:
     pass 
 
-# 1. Path Setup for Isaac Lab (Legacy vs Standard)
+# 1. Path Setup for Isaac Lab
 cwd = os.getcwd()
 possible_extension_paths = [
     os.path.join(cwd, "source"), 
@@ -33,7 +31,6 @@ for p in possible_extension_paths:
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
 
-# 2. AppLauncher Import using Fallbacks
 try:
     from omni.isaac.lab.app import AppLauncher
 except ImportError:
@@ -43,32 +40,33 @@ except ImportError:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
 
+# Import V2 Components
+from src.inference import AxisInference
+from src.utils.rotation_utils import quaternion_to_rotation_6d
+from imitation.data.goal_oracle import GoalOracle
+
+def quaternion_to_rot6d_numpy(quat_xyzw):
+    """Helper to convert numpy quat [x,y,z,w] to 6D."""
+    # Using torch utility
+    q_tensor = torch.tensor(quat_xyzw, dtype=torch.float32)
+    r6 = quaternion_to_rotation_6d(q_tensor).numpy()
+    return r6
+
 def main():
-    # 3. Parse Args
-    parser = argparse.ArgumentParser(description="Evaluate Axis Model in Isaac Lab")
+    parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
     parser.add_argument('--checkpoint', type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument('--robot', type=str, default='franka', choices=['franka', 'google'], help="Robot to use")
-    parser.add_argument('--steps', type=int, default=1000, help="Number of steps to run")
-    parser.add_argument('--video', action='store_true', help="Record video of the evaluation")
-    parser.add_argument('--model_refresh', type=int, default=60, help="Hz for model updates")
+    parser.add_argument('--robot', type=str, default='franka', choices=['franka', 'google'], help="Robot type")
+    parser.add_argument('--steps', type=int, default=1000, help="Max steps")
+    parser.add_argument('--video', action='store_true', help="Record video")
+    parser.add_argument('--model_refresh', type=int, default=30, help="Control frequency Hz")
+    parser.add_argument('--chunk_size', type=int, default=1, help="Action chunk size used in model")
     
-    # AppLauncher Args
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
-    # 4. Launch App
+    # Launch App
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
-
-    # 5. Imports
-    import torch
-    
-    try:
-        from src.models.axis_v1 import AxisModel
-    except ImportError as e:
-         print(f"ERROR: Could not import AxisModel. {e}")
-         simulation_app.close()
-         sys.exit(1)
 
     try:
         from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
@@ -78,48 +76,34 @@ def main():
         print(f"ERROR: Failed to import my_robot_ext: {e}")
         simulation_app.close()
         sys.exit(1)
-        
-    try:
-        from imitation.data.goal_oracle import GoalOracle
-    except ImportError:
-        print("ERROR: Could not import GoalOracle.")
-        simulation_app.close()
-        sys.exit(1)
 
-    # 6. Run Evaluation
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # Load Model
-    print(f"Loading model from {args.checkpoint}...")
+    # --- Load Axis V2 Inference ---
+    print(f"Loading AxisInference from {args.checkpoint}...")
     config = {
         'device': device,
-        'goal_dim': 64, 
+        'proprio_dim': 10,
+        'action_dim': 7, # Twist=7 (used internally by model)
         'embed_dim': 256,
         'window_size': 8,
+        'chunk_size': args.chunk_size, # Passed to inference wrapper
+        'max_pos_delta': 0.05,
+        'max_rot_delta': 0.1
     }
     
     try:
-        model = AxisModel(config).to(device)
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-            keys_to_remove = [k for k in state_dict.keys() if 'latent_queue.queue' in k]
-            for k in keys_to_remove:
-                del state_dict[k]
-        
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        model.eval()
+        agent = AxisInference(args.checkpoint, config, device=device)
         print("Model loaded successfully.")
-        
-        oracle = GoalOracle(output_dim=64)
     except Exception as e:
-        print(f"Failed to load checkpoint: {e}")
+        print(f"Failed to load agent: {e}")
         simulation_app.close()
-        return
+        sys.exit(1)
 
-    # Setup Environment
+    oracle = GoalOracle(output_dim=64)
+
+    # --- Setup Environment ---
     try:
         env_cfg = AxisEvalEnvCfg()
         if args.robot == 'franka': env_cfg.robot = FrankaCfg()
@@ -130,218 +114,121 @@ def main():
         
         if args.video:
             video_folder = os.path.join(os.path.dirname(args.checkpoint), "videos")
+            env = RecordVideo(env, video_folder=video_folder, step_trigger=lambda step: step == 0, video_length=args.steps, name_prefix="eval_v2")
             
-            class CameraRenderWrapper(gym.Wrapper):
-                def render(self):
-                    try:
-                        cam_sensor = self.unwrapped.scene["camera"]
-                        rgb = cam_sensor.data.output["rgb"][0] # (H, W, 4)
-                        img = rgb.cpu().numpy()
-                        if img.shape[-1] == 4: img = img[..., :3]
-                        if img.dtype != np.uint8:
-                            if img.max() <= 1.05: img = (img * 255).astype(np.uint8)
-                            else: img = img.astype(np.uint8)
-                        return img
-                    except:
-                        return np.zeros((128, 128, 3), dtype=np.uint8)
-
-            env = CameraRenderWrapper(env)
-            env = RecordVideo(env, video_folder=video_folder, step_trigger=lambda step: step == 0, video_length=args.steps, name_prefix="eval_run")
-            
+        # Wrapper now returns 10D proprio
         env = AxisObservationWrapper(env, window_size=8, device=device)
     except Exception as e:
         print(f"Error initializing environment: {e}")
         simulation_app.close()
         return
 
-    # Loop
+    # --- Evaluation Loop ---
     try:
         obs, info = env.reset()
+        agent.reset() # Reset inference state (cache/ensembler)
         
         B = env.num_envs
-        goal_emb = torch.zeros(B, 64, device=device)
-        target_dt = 1.0 / args.model_refresh
-        last_command_time = 0
-        requery = 0.0
         
-        initial_pose_np = None
-        target_quat = None
-
-        # --- STUCK DETECTION ---
-        stuck_timer = time.time()
-        last_stuck_pos = None
-        STUCK_THRESHOLD = 0.01 # 1cm
-        STUCK_TIME = 3.0       # 3 seconds
-        # -----------------------
-
-        history_actual, history_pred, history_target = [], [], []
-        print("Starting Simulation Loop (Model Control)...")
+        # State
+        initial_pose_10d = None
+        target_pos_sim = None 
+        goal_vector = np.zeros((B, 64), dtype=np.float32)
+        requery_flag = True
         
-        env_actions = torch.zeros((B, 8), device=device)
-        pos_pred = np.zeros(3)
+        print("Starting Control Loop...")
         
         for i in range(args.steps):
-            with torch.no_grad():
-                images = obs['images'] # (B, W, C, H, W)
-                proprio = obs['proprio'] # (B, W, 8)
+            # 1. Get Observations (Torch -> Numpy)
+            # Images: (B, W, C, H, W)
+            images_np = obs['images'].cpu().numpy()
+            # Proprio: (B, W, 10) [pos3, rot6d, grip1] (already handled by wrapper)
+            proprio_10d_np = obs['proprio'].cpu().numpy()
+            
+            # Use last proprio in window as current state
+            current_pose_10d = proprio_10d_np[0, -1] # (10,)
+            
+            # 3. Goal Logic (Sim specific hacking)
+            if 'cube' in env.unwrapped.scene.keys():
+                cube_pos = env.unwrapped.scene['cube'].data.root_pos_w[0, :3].cpu().numpy()
+            else:
+                cube_pos = np.zeros(3)
                 
-                if i == 0:
-                    print("\n[Input Validation]")
-                    assert images.shape[1] == 8
-                    assert images.shape[-2:] == (128, 128)
-                    print("Input shapes validated: OK")
-                    print(f"INIT Proprio (Mirrored Y Tip): {proprio[0, -1].cpu().numpy()}")
+            if initial_pose_10d is None or requery_flag:
+                initial_pose_10d = current_pose_10d.copy()
+                
+                # Goal Target: Cube Pos (converted to Model Frame)
+                target_pos_model = cube_pos.copy()
+                target_pos_model[1] *= -1.0 # Mirror Y
+                
+                # Goal Pose: Target Pos + Fixed Downward Orientation
+                target_pose_10d = np.zeros(10, dtype=np.float32)
+                target_pose_10d[:3] = target_pos_model
+                
+                # Fixed Rotation: Downward [0,0,1,0] xyzw -> 6D
+                target_quat_xyzw = np.array([0.0, 0.0, 1.0, 0.0])
+                target_rot6d = quaternion_to_rot6d_numpy(target_quat_xyzw)
+                target_pose_10d[3:9] = target_rot6d
+                target_pose_10d[9] = 1.0 # Close gripper
+                
+                # Encode Goal
+                # Task 1: Pick
+                g_emb = oracle.encode_goal(1, initial_pose_10d, target_pose_10d)
+                goal_vector[0] = g_emb.numpy()
+                
+                print(f"Goal Updated! Target: {target_pos_model.round(3)}")
+                requery_flag = False
 
-                # --- Goal Logic ---
-                if initial_pose_np is None:
-                    initial_pose_np = proprio[0, -1, :7].cpu().numpy()
-                    target_quat = initial_pose_np[3:] 
-                    print("Goal Logic: Latched Start Pose & Target Quat")
+            # 4. Predict
+            # Call agent with single sample (remove batch dim)
+            batch_result = agent.predict(
+                images_np[0], # (W, C, H, W)
+                proprio_10d_np[0], # (W, 10)
+                goal_vector[0] # (64,)
+            )
+            
+            requery_flag = batch_result['requery']
+            
+            # 5. Execute
+            # Model Output: 'action_absolute' is 10D (pos3, rot6d, grip1)
+            act_pos = batch_result['position']
+            act_quat_xyzw = batch_result['quaternion']
+            act_grip = batch_result['gripper']
+            
+            # Flip Y for Sim (Model -> Sim)
+            act_pos_sim = act_pos.copy()
+            act_pos_sim[1] *= -1.0
+            
+            # Quat conversion xyzw -> wxyz for Isaac
+            act_quat_wxyz = np.array([act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]])
+            
+            # Gripper Cmd
+            act_grip_cmd = 1.0 if act_grip > 0.5 else -1.0
+            
+            # Compose
+            env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [act_grip_cmd]])
+            env_action_t = torch.tensor(env_action, device=device).unsqueeze(0) # (1, 8)
+            
+            # Step
+            obs, reward, terminated, truncated, info = env.step(env_action_t)
+            
+            if i % 10 == 0:
+                print(f"Step {i} | Pos:{current_pose_10d[:3].round(3)} | Grip:{current_pose_10d[9]:.2f}")
+                
+            if terminated.any() or truncated.any():
+                print("Reset triggered.")
+                obs, info = env.reset()
+                agent.reset() # Reset inference state
+                initial_pose_10d = None
+                requery_flag = True
 
-                # Get Cube Pos (Sim Frame)
-                if 'cube' in env.unwrapped.scene.keys():
-                    cube_pos = env.unwrapped.scene['cube'].data.root_pos_w[:, :3]
-                    cube_pos_np = cube_pos[0].cpu().numpy()
-                else:
-                    cube_pos_np = np.zeros(3)
-
-                # --- VISUALIZATION CALCS ---
-                # Proprio is Tip Frame (Mirrored Y)
-                pos_tip_mirrored = proprio[0, -1, :3].cpu().numpy()
-                quat_xyzw = proprio[0, -1, 3:7].cpu().numpy()
-                
-                # UN-MIRROR for plotting (Sim Frame)
-                pos_tip_sim = pos_tip_mirrored.copy()
-                pos_tip_sim[1] *= -1.0
-                
-                # Append TIP for Plotting (Sim Frame)
-                history_actual.append(pos_tip_sim)
-                
-                # Command Plotting:
-                # Command is Model Frame (Mirrored Y).
-                # Flip to visualize in Sim Frame.
-                pos_pred_sim = pos_pred.copy()
-                pos_pred_sim[1] *= -1.0
-                history_pred.append(pos_pred_sim)
-                
-                history_target.append(cube_pos_np)
-
-                # --- STUCK CHECK ---
-                stuck_trigger = False
-                current_time_sim = time.time()
-                
-                if last_stuck_pos is None:
-                     last_stuck_pos = pos_tip_sim
-                     stuck_timer = current_time_sim
-                else:
-                    dist = np.linalg.norm(pos_tip_sim - last_stuck_pos)
-                    if dist > STUCK_THRESHOLD:
-                        last_stuck_pos = pos_tip_sim
-                        stuck_timer = current_time_sim
-                    elif (current_time_sim - stuck_timer) > STUCK_TIME:
-                        print(f"[Warn] Stuck Detected! (No mov > {STUCK_THRESHOLD}m for {STUCK_TIME}s). Requerying...", flush=True)
-                        stuck_trigger = True
-                        stuck_timer = current_time_sim 
-                # -------------------
-
-                # Construct Goal
-                end_p = np.zeros(7, dtype=np.float32)
-                end_p[:3] = cube_pos_np
-                
-                # --- GOAL Y INVERSION ---
-                # To match Mirrored Proprio.
-                end_p[1] *= -1.0 
-                # ------------------------
-                
-                # Force Downward Orientation for Goal
-                end_p[3:] = np.array([0.0, 0.0, 1.0, 0.0]) 
-                
-                if i == 0 or float(requery) > 0.6 or stuck_trigger:
-                    # Update Start Pose to Current Pose (Tip Frame) for Requery
-                    initial_pose_np = proprio[0, -1, :7].cpu().numpy()
-
-                    task_type = 1 
-                    g_emb = oracle.encode_goal(task_type, initial_pose_np, end_p).to(device)
-                    goal_emb[0] = g_emb
-                    print(f"Goal Re-generated! Start: {initial_pose_np[:3].round(3)}", flush=True)
-
-                # Model Forward Pass
-                current_time = time.time()
-                model_ran = False
-                if current_time - last_command_time >= target_dt:
-                    t0 = time.time()
-                    with torch.inference_mode():
-                        actions, _, requery_logit = model(images, proprio, goal_embedding=goal_emb, update_queue=False, use_memory=False)
-                        requery = torch.sigmoid(requery_logit)
-                    dt = (time.time() - t0) * 1000
-                    last_command_time = current_time
-                    pos_pred = actions[0, :3].cpu().numpy()
-                    model_ran = True
-
-                # --- LOGGING ---
-                if i % 10 == 0:
-                    delta = pos_tip_sim - cube_pos_np
-                    print(f"S:{i} | Tip:{pos_tip_sim.round(3)} | Cube:{cube_pos_np.round(3)} | D:{np.linalg.norm(delta):.3f} | dZ:{delta[2]:.3f}")
-                
-                 # Step
-                
-                if model_ran:
-                    act_pos = actions[:, :3]
-                    act_quat_xyzw = actions[:, 3:7]
-                    act_grip = actions[:, 7:]
-                    
-                    # --- ACTION INVERSION ---
-                    # Model commands Mirrored Y. Flip to Sim Y.
-                    act_pos_sim = act_pos.clone()
-                    act_pos_sim[:, 1] *= -1.0 
-                    # ------------------------
-                    
-                    act_quat_wxyz = torch.cat([act_quat_xyzw[:, 3:4], act_quat_xyzw[:, :3]], dim=1)
-                    
-                    act_grip_prob = torch.sigmoid(act_grip)
-                    act_grip_cmd = torch.where(act_grip_prob > 0.5, 
-                                            torch.tensor(1.0, device=device), 
-                                            torch.tensor(-1.0, device=device))
-                    
-                    env_actions = torch.cat([act_pos_sim, act_quat_wxyz, act_grip_cmd], dim=1)
-                
-                obs, reward, terminated, truncated, info = env.step(env_actions)
-                        
-                if terminated.any() or truncated.any():
-                    print(f"!!! RESET triggered at step {i} !!!")
-                    obs, info = env.reset()
-                    initial_pose_np = None 
-                    
-        # Plotting
-        print("Generating 3D Trajectory Plot...")
-        traj_actual = np.array(history_actual)
-        traj_pred = np.array(history_pred)
-        traj_target = np.array(history_target)
-
-        fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection='3d')
-
-        ax.plot(traj_actual[:, 0], traj_actual[:, 1], traj_actual[:, 2], label='Actual TIP Path', color='blue')
-        ax.scatter(traj_actual[0,0], traj_actual[0,1], traj_actual[0,2], color='blue', marker='o')
-        
-        # Plot commands in Red. Note these are PRE-FLIP (Model Output).
-        ax.plot(traj_pred[:, 0], traj_pred[:, 1], traj_pred[:, 2], label='Model Commands (Flipped)', color='red', linestyle='--')
-        
-        ax.plot(traj_target[:, 0], traj_target[:, 1], traj_target[:, 2], label='Cube Path', color='green', alpha=0.6)
-        ax.scatter(traj_target[-1,0], traj_target[-1,1], traj_target[-1,2], color='green', marker='*', s=200, label='Cube End')
-
-        ax.set_title(f'Sim-to-Real Debug: Trajectory Analysis\nSteps: {len(traj_actual)}')
-        ax.legend()
-        plt.savefig(os.path.join(os.path.dirname(args.checkpoint), "debug_trajectory_3d.png"))
-        plt.close()
-        
         print("Evaluation Complete.")
+        
     except Exception as e:
-        print(f"Runtime error: {e}")
+        print(f"Runtime Error: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        if 'env' in locals(): env.close()
         simulation_app.close()
 
 if __name__ == "__main__":

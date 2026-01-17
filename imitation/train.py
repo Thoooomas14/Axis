@@ -1,6 +1,8 @@
 import os
 import sys
 import gc
+import logging
+import platform
 
 # Suppress TF INFO/WARNING logs to reduce noise (e.g. OUT_OF_RANGE)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
@@ -17,10 +19,11 @@ from datetime import datetime
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.models.axis_v1 import AxisModel
+from src.models.axis import AxisModel
 from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
+from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
 from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 import tensorflow_datasets as tfds
@@ -31,122 +34,28 @@ tf.config.set_visible_devices([], 'GPU')
 import numpy as np
 import torchvision.transforms as T
 
-def generate_episode_gif(model, args, step, visualizer):
-    """Loads one episode and generates a GIF."""
-    try:
-        # Clear cache to free up VRAM for visualization
-        torch.cuda.empty_cache()
-        
-        # Load one episode
-        # Use RTXStreamLoader to load one episode safely
-        from imitation.data.rtx_stream_loader import RTXStreamLoader
-        
-        # Manually iterate to get one episode
-        if args.data_dir and args.data_dir.startswith('gs://'):
-            full_path = f"{args.data_dir}/{args.dataset}/0.1.0"
-            builder = tfds.builder_from_directory(builder_dir=full_path)
-            ds = builder.as_dataset(split='train', shuffle_files=True)
-        else:
-            ds = tfds.load(args.dataset, split='train', shuffle_files=True, data_dir=args.data_dir)
-            
-        # Take one episode
-        images_np, proprio_np = None, None
-        
-        iterator = iter(ds)
-        episode = next(iterator)
-        
-        steps = list(episode['steps'])
-        imgs = []
-        props = []
-        for s in steps:
-            img = s['observation']['image']
-            img = tf.image.resize(img, (128, 128))
-            img = tf.cast(img, tf.float32) / 255.0
-            imgs.append(tf.transpose(img, [2, 0, 1]).numpy())
-            
-            # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
-            obs = s['observation']
-            p = np.zeros(7, dtype=np.float32)
-            if 'base_pose_tool_reached' in obs:
-                p = obs['base_pose_tool_reached'].numpy()
-            elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
-            elif 'pose' in obs: p = obs['pose'].numpy()
-            
-            g = 0.0
-            if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
-            elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
-            if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
-            
-            p8 = np.zeros(8, dtype=np.float32)
-            if p.shape[0] == 7: p8[:7] = p
-            elif p.shape[0] == 6: p8[:6] = p
-            p8[7] = g
-            props.append(p8)
-            
-        images_np = np.array(imgs)
-        proprio_np = np.array(props)
-        
-        if images_np is None: return
+# --- Logging Setup ---
+def setup_logging(verbose: int = 1):
+    """Configure logging with verbosity levels. 0=WARNING, 1=INFO, 2=DEBUG."""
+    level = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}.get(verbose, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    return logging.getLogger(__name__)
 
-        # Prepare Inputs
-        device = next(model.parameters()).device
-        T = images_np.shape[0]
-        images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0)
-        proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0)
-        
-        # Mock Goal (using start/end)
-        from imitation.data.goal_oracle import GoalOracle
-        oracle = GoalOracle(output_dim=64)
-        start_grip = proprio_np[0][7]
-        end_grip = proprio_np[-1][7]
-        task_type = 0
-        if start_grip < 0.5 and end_grip > 0.5: task_type = 1
-        elif start_grip > 0.5 and end_grip < 0.5: task_type = 2
-        goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1]).to(device).unsqueeze(0)
+log = logging.getLogger(__name__)
 
-        # Inference
-        pred_actions = []
-        requery_preds = []
-        model.reset_memory(1)
-        W = 8 # window size
-        
-        with torch.no_grad():
-            for t in range(T):
-                if t < W:
-                    pad_len = W - 1 - t
-                    curr_imgs = images[:, :t+1]
-                    curr_props = proprio[:, :t+1]
-                    pad_imgs = curr_imgs[:, 0:1].repeat(1, pad_len, 1, 1, 1)
-                    pad_props = curr_props[:, 0:1].repeat(1, pad_len, 1)
-                    win_imgs = torch.cat([pad_imgs, curr_imgs], dim=1)
-                    win_props = torch.cat([pad_props, curr_props], dim=1)
-                else:
-                    win_imgs = images[:, t-W+1 : t+1]
-                    win_props = proprio[:, t-W+1 : t+1]
-                
-                pred_act, _, req_logit = model(win_imgs, win_props, goal_emb, update_queue=True, use_memory=True)
-                pred_actions.append(pred_act.cpu())
-                requery_preds.append(torch.sigmoid(req_logit).cpu())
-
-        pred_actions = torch.stack(pred_actions, dim=1).squeeze(0)
-        requery_preds = torch.stack(requery_preds, dim=1).squeeze(0)
-        
-        targets = np.zeros_like(proprio_np)
-        targets[:-1] = proprio_np[1:]
-        targets[-1] = proprio_np[-1]
-        targets = torch.tensor(targets, dtype=torch.float32)
-
-        visualizer.create_gif(step, images[0], targets, pred_actions, requery_preds)
-        print(f"Generated episode GIF for step {step}", flush=True)
-    except Exception as e:
-        print(f"Error generating episode GIF: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
 
 def train(args):
+    # Setup logging based on verbosity
+    global log
+    log = setup_logging(args.verbose)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}", flush=True)
-    print("DEBUG: Script started. Initializing...", flush=True)
+    log.info(f"Using device: {device}")
+    log.debug("Script started. Initializing...")
 
     # --- Configuration ---
     config = {
@@ -155,23 +64,106 @@ def train(args):
         'cond_dim': 256,
         'vision_feature_dim': 256,
         'num_vision_tokens': 8,
-        'window_size': 8,
-        'latent_dim': 256,
-        'queue_size': args.queue_size, 
+        'window_size': args.window_size,
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'proprio_dim': 8, # 3 Pos + 4 Quat + 1 Gripper
-        'action_dim': 8
+        'proprio_dim': 7, # 3 RotVec + 3 Trans + 1 Gripper (SE(3) minimal + gripper)
+        'action_dim': 7   # 3 AngularVel + 3 LinearVel + 1 Gripper (twist + gripper)
     }
+    
+    # --- Endpoint Loss Function (task-oriented) ---
+    def endpoint_geodesic_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
+        """
+        Compute full SE(3) Geodesic loss on the manifold for the endpoint.
+        
+        Uses se3_log on the relative transform T_rel = T_pred^(-1) @ T_target
+        to properly capture the geodesic distance on SE(3).
+        
+        Args:
+            pred_twists: (B, W, 7) predicted twists [ω, v, gripper_delta] per step
+                        Only the first `horizon` twists are used.
+            start_poses: (B, 7) starting pose [rotvec, pos, gripper] - last frame of input window
+            target_poses: (B, 7) target pose at step t+horizon (from data loader)
+            horizon: Number of twist steps to apply (1 <= horizon <= W)
+            omega_rot: Weight for rotational component of twist
+            omega_trans: Weight for translational component of twist
+            
+        Returns:
+            Scalar loss: geodesic distance on SE(3) (weighted) + gripper loss
+        """
+        B = pred_twists.shape[0]
+        device = pred_twists.device
+        dtype = pred_twists.dtype
+        
+        # 1. Build Predicted SE(3) Transform by rollout
+        R_start = so3_exp(start_poses[:, :3])  # (B, 3, 3)
+        p_start = start_poses[:, 3:6]  # (B, 3)
+        
+        T_pred = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
+        T_pred[:, :3, :3] = R_start
+        T_pred[:, :3, 3] = p_start
+        
+        gripper_curr = start_poses[:, 6:7]  # (B, 1)
+        
+        # Rollout: Apply predicted twists sequentially
+        for t in range(horizon):
+            twist_6d = pred_twists[:, t, :6]  # (B, 6) - [ω, v]
+            gripper_delta = pred_twists[:, t, 6:7]  # (B, 1)
+            
+            T_delta = se3_exp(twist_6d)  # (B, 4, 4)
+            
+            # Twists are in BODY frame (local gripper coordinates)
+            T_pred = torch.bmm(T_pred, T_delta)
+            
+            gripper_curr = gripper_curr + gripper_delta
+        
+        # 2. Build Target SE(3) Transform
+        R_target = so3_exp(target_poses[:, :3])  # (B, 3, 3)
+        p_target = target_poses[:, 3:6]  # (B, 3)
+        
+        T_target = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
+        T_target[:, :3, :3] = R_target
+        T_target[:, :3, 3] = p_target
+        
+        # 3. Compute Relative Transform: T_rel = T_pred^(-1) @ T_target
+        # For SE(3): T^(-1) = [R^T, -R^T @ p; 0, 1]
+        R_pred = T_pred[:, :3, :3]
+        p_pred = T_pred[:, :3, 3]
+        
+        R_pred_inv = R_pred.transpose(1, 2)  # R^T
+        p_pred_inv = -torch.bmm(R_pred_inv, p_pred.unsqueeze(-1)).squeeze(-1)  # -R^T @ p
+        
+        T_pred_inv = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
+        T_pred_inv[:, :3, :3] = R_pred_inv
+        T_pred_inv[:, :3, 3] = p_pred_inv
+        
+        T_rel = torch.bmm(T_pred_inv, T_target)  # (B, 4, 4)
+        
+        # 4. Map to Lie Algebra using se3_log
+        twist_rel = se3_log(T_rel)  # (B, 6) - [ω_x, ω_y, ω_z, v_x, v_y, v_z]
+        
+        # 5. Weighted L2 Norm on Lie Algebra
+        rot_component = twist_rel[:, :3]   # ω
+        trans_component = twist_rel[:, 3:6]  # v
+        
+        rot_loss = torch.mean(torch.sum(rot_component**2, dim=1))
+        trans_loss = torch.mean(torch.sum(trans_component**2, dim=1))
+        
+        # 6. Gripper Loss (separate, not part of SE(3))
+        gripper_pred = torch.clamp(gripper_curr, 0.0, 1.0)
+        gripper_target = target_poses[:, 6:7]
+        grip_loss = torch.mean((gripper_pred - gripper_target)**2)
+        
+        return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
 
     # --- Utilities ---
-    logger = TrainingLogger(args.checkpoint_dir)
+    training_logger = TrainingLogger(args.checkpoint_dir)
     visualizer = Visualizer(args.checkpoint_dir)
 
     # --- Model ---
     model = AxisModel(config).to(device)
-    print("Model initialized.")
+    log.info("Model initialized.")
 
     # Dataset
     # If epochs > 0, we do NOT repeat the dataset (finite epoch).
@@ -189,17 +181,17 @@ def train(args):
         # Note: shuffle_buffer only applies to training
         is_train = '[:' in split or split == 'train'
         
-        print(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
+        log.info(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
         stream = RTXStreamLoader(
             dataset_name=args.dataset, 
             split=split, 
             batch_size=1,
             window_size=config['window_size'],
+            loss_horizon=args.loss_horizon,  # How many future steps for endpoint loss
             image_size=(128, 128),
             data_dir=args.data_dir,
             shuffle_buffer_size=shuffle_buffer if is_train else 0,
             repeat=repeat_dataset if is_train else False, # Only repeat train
-            max_ar_steps=args.autoregressive_steps
         )
         
         # Handle num_workers=0 case (no prefetch_factor or persistent_workers)
@@ -219,18 +211,23 @@ def train(args):
                 prefetch_factor=2, # Reduce to 2 to save RAM (default 4 was too aggressive with large episodes)
                 persistent_workers=True
             )
-        return loader
+        return loader, stream  # Return both for progress estimation
     
     # Create initial dataloader
     train_split = f'train[:{int(args.train_split_pct*100)}%]'
     val_split = f'train[{int(args.train_split_pct*100)}%:]'
     
-    dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
+    dataloader, train_stream = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
     
-    # Validation Dataloader (smaller batch size to save memory if needed, or same)
-    # We use 0 workers for val to save overhead unless it's huge
-    # LIMIT VAL BATCH SIZE TO 32 to prevent OOM spikes during validation
-    val_dataloader = create_dataloader(32, 0, 0, split=val_split)
+    # Estimate total windows for progress tracking
+    estimated_windows = train_stream.estimate_total_windows(avg_episode_length=100)
+    estimated_batches = estimated_windows // effective_batch_size if estimated_windows else None
+    if estimated_batches:
+        log.info(f"Estimated ~{estimated_windows:,} windows ({estimated_batches:,} batches) per epoch")
+    
+    # Validation Dataloader (smaller batch size to save memory if needed)
+    # We use 0 workers for val to save overhead
+    val_dataloader, _ = create_dataloader(args.val_batch_size, 0, 0, split=val_split)
     
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
     
@@ -249,7 +246,7 @@ def train(args):
     
     # --- EMA ---
     ema = EMA(model, decay=0.9999)
-    print("EMA initialized.")
+    log.info("EMA initialized.")
     
     # --- Augmentation ---
     # Applied on GPU
@@ -260,10 +257,10 @@ def train(args):
         T.RandomApply([T.GaussianBlur(kernel_size=3)], p=0.1)
     ).to(device)
     
-    # Requery Loss Function
-    # pos_weight allows us to penalize False Negatives (missing help signal) more than False Positives.
-    pos_weight = torch.tensor([args.pos_weight]).to(device)
-    requery_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Requery Loss Function (Option C: MSELoss with soft labels)
+    # Using MSE allows the model to output confidence values [0, 1] directly
+    # while avoiding the double-sigmoid issue of BCEWithLogitsLoss + Sigmoid layer
+    requery_criterion = nn.MSELoss()
 
     # --- Training Loop ---
     model.train()
@@ -274,7 +271,7 @@ def train(args):
     checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
     
     if args.resume and os.path.exists(checkpoint_path):
-        print(f"Resuming from latest checkpoint: {checkpoint_path}")
+        log.info(f"Resuming from latest checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
         
         # Filter state dict
@@ -287,20 +284,20 @@ def train(args):
         start_step = checkpoint['step']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch']
-        print(f"Resumed at step {start_step}, epoch {start_epoch}")
+        log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
     elif os.path.exists(checkpoint_path):
-        print(f"WARNING: Checkpoint found at {checkpoint_path} but --resume was not provided.")
-        print("Starting from scratch. Use --resume to continue training.")
+        log.warning(f"Checkpoint found at {checkpoint_path} but --resume was not provided.")
+        log.warning("Starting from scratch. Use --resume to continue training.")
     else:
-        print("No checkpoint found. Starting from scratch.")
+        log.info("No checkpoint found. Starting from scratch.")
 
     # Determine total steps/epochs
     if args.epochs > 0:
         total_steps = args.steps # Fallback
-        print(f"Training for {args.epochs} epochs.")
+        log.info(f"Training for {args.epochs} epochs.")
     else:
         total_steps = args.steps
-        print(f"Training for {args.steps} steps.")
+        log.info(f"Training for {args.steps} steps.")
 
     # Calculate target step (relative to start)
     if args.epochs == 0:
@@ -308,7 +305,7 @@ def train(args):
     else:
         target_step = float('inf')
     
-    print("Starting training...")
+    log.info("Starting training...")
     
     import time
     import psutil  # For system RAM monitoring
@@ -327,7 +324,7 @@ def train(args):
     MIN_NUM_WORKERS = 0 
     
     try:
-        print("DEBUG: Entering training loop...", flush=True)
+        log.debug("Entering training loop...")
         
         # Loop structure
         num_epochs = args.epochs if args.epochs > 0 else 1
@@ -347,15 +344,14 @@ def train(args):
             steps_in_current_epoch = 0  # Initialize for both modes
             
             if args.epochs > 0:
-                print(f"--- Epoch {epoch + 1}/{num_epochs} ---")
+                log.info(f"--- Epoch {epoch + 1}/{num_epochs} ---")
                 
-                # Dynamic Progress Bar
-                # For the first epoch, we don't know the size, so we use total=None (counter only).
-                # For subsequent epochs, we use the number of steps from the previous epoch.
+                # Dynamic Progress Bar with estimation
+                # Use estimated_batches for first epoch, then actual count from previous epochs
                 if epoch == 0:
-                    epoch_total = None
+                    epoch_total = estimated_batches  # Use estimate for ETA (may be None)
                 else:
-                    epoch_total = steps_per_epoch_actual
+                    epoch_total = steps_per_epoch_actual  # Actual count from previous epoch
                 
                 pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}")
             
@@ -367,7 +363,7 @@ def train(args):
                 if args.time_limit_min > 0:
                     elapsed_min = (time.time() - start_time) / 60.0
                     if elapsed_min >= args.time_limit_min:
-                        print(f"\nTime limit of {args.time_limit_min} minutes reached. Stopping.")
+                        log.info(f"Time limit of {args.time_limit_min} minutes reached. Stopping.")
                         break
                 
                 # === OOM Protection: Wrap batch processing in try/except ===
@@ -378,12 +374,12 @@ def train(args):
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                     
-                    # Unpack Batch
-                    images = batch['images'].to(device)   # (B, 8, 3, 128, 128)
-                    proprio = batch['proprio'].to(device) # (B, 8, 8)
+                    # Unpack Batch (requery is NOT in data - computed from action loss)
+                    images = batch['images'].to(device)   # (B, W, 3, 128, 128)
+                    proprio = batch['proprio'].to(device) # (B, W, 7)
                     goal_embs = batch['goal'].to(device)  # (B, 64)
-                    target_actions = batch['actions'].to(device) # (B, N, 8) - N sequential targets
-                    target_requery = batch['requery'].to(device) # (B, 1)
+                    target_actions = batch['actions'].to(device) # (B, H, 7) - future twists (H=loss_horizon)
+                    target_poses = batch['target_poses'].to(device)  # (B, H, 7) - direct future poses
 
                     B = images.shape[0]
                     W = images.shape[1]  # Window size
@@ -396,54 +392,44 @@ def train(args):
                         images = aug_imgs.view(B, W, 3, 128, 128)
 
                     optimizer.zero_grad()
-                    model.reset_memory(B) 
                     
                     # === Forward Pass with AMP ===
                     with torch.cuda.amp.autocast():
-                        current_images = images.clone()
-                        current_proprio = proprio.clone()
+                        # Forward Pass - model outputs chunked predictions
+                        pred_action, requery_pred = model(
+                            images, 
+                            proprio, 
+                            goal_embs
+                        )
                         
-                        total_action_loss = 0.0
-                        total_requery_loss = 0.0
+                        # pred_action: (B, W, 7) - chunked twist predictions
+                        # requery_pred: (B, 1) - model confidence [0, 1]
                         
-                        for ar_step in range(args.autoregressive_steps):
-                            # Forward Pass
-                            pred_action, next_latent, requery_logit = model(
-                                current_images, 
-                                current_proprio, 
-                                goal_embs, 
-                                update_queue=args.use_latent_memory,
-                                use_memory=args.use_latent_memory
-                            )
-                            
-                            # Compute Loss for this step
-                            # Each AR step uses its temporally-aligned target
-                            target_action = target_actions[:, ar_step, :]  # (B, 8)
-                            step_action_loss = torch.mean((pred_action - target_action)**2)
-                            
-                            if ar_step == 0:
-                                step_requery_loss = requery_criterion(requery_logit, target_requery)
-                                total_action_loss = step_action_loss
-                                total_requery_loss = step_requery_loss
-                            else:
-                                # Later steps contribute with decay
-                                total_action_loss = total_action_loss + step_action_loss * (args.ar_loss_decay ** ar_step)
-                            
-                            # Prepare next iteration: shift window and inject prediction
-                            if ar_step < args.autoregressive_steps - 1:
-                                current_images = torch.cat([
-                                    current_images[:, 1:, :, :, :],
-                                    images[:, -1:, :, :, :]  # Use original GT for last frame
-                                ], dim=1)
-                                
-                                current_proprio = torch.cat([
-                                    current_proprio[:, 1:, :],
-                                    pred_action.unsqueeze(1)  # (B, 1, 8)
-                                ], dim=1)
+                        # === Endpoint Loss (Task-Oriented) ===
+                        # Starting pose: last frame of proprio window
+                        start_poses = proprio[:, -1, :]  # (B, 7)
                         
-                        # Final losses (average over steps if > 1)
-                        action_loss = total_action_loss / args.autoregressive_steps
-                        requery_loss = total_requery_loss  # Only computed once
+                        # Target endpoint: directly from data loader at the horizon step
+                        # target_poses[:, horizon-1, :] is the pose at step t+horizon
+                        horizon = args.loss_horizon
+                        target_endpoint = target_poses[:, horizon - 1, :]  # (B, 7) - direct from data
+                        
+                        # Compute endpoint loss
+                        action_loss = endpoint_geodesic_loss(
+                            pred_action, start_poses, target_endpoint, 
+                            horizon, args.omega_rot, args.omega_trans
+                        )
+                        
+                        # Compute per-sample loss for confidence (using endpoint error)
+                        per_sample_loss = action_loss.detach()  # Scalar, broadcast to all samples
+                        
+                        # === Confidence Target (Self-Supervised) ===
+                        # Requery represents model confidence: high when predictions are accurate
+                        confidence_target = torch.exp(-per_sample_loss / args.confidence_temperature).expand(B, 1)
+                        confidence_target = confidence_target.detach()
+                        
+                        # Compute requery loss (MSE between predicted confidence and loss-derived target)
+                        requery_loss = requery_criterion(requery_pred, confidence_target)
                         
                         # Weighted Loss
                         loss = action_loss + (requery_loss * args.requery_weight)
@@ -461,21 +447,44 @@ def train(args):
                     scheduler.step()
                     
                     # Logging
-                    logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
+                    training_logger.log_step(step, epoch, loss.item(), action_loss.item(), requery_loss.item())
                     
                     step += 1
                     steps_in_current_epoch += 1
                     pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
                     
+                    # === Time Estimation Logging ===
+                    if step % 1000 == 0 and step > start_step:
+                        elapsed = time.time() - start_time
+                        steps_done = step - start_step
+                        steps_per_sec = steps_done / elapsed
+                        
+                        if args.epochs == 0:
+                            # Step-based: estimate time to target
+                            remaining_steps = target_step - step
+                            eta_seconds = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
+                            eta_min = eta_seconds / 60
+                            log.info(f"Step {step:,}/{target_step:,} | {steps_per_sec:.1f} steps/s | ETA: {eta_min:.1f} min")
+                        else:
+                            # Epoch-based: estimate epoch completion
+                            if estimated_batches:
+                                remaining_in_epoch = estimated_batches - steps_in_current_epoch
+                                epoch_eta = remaining_in_epoch / steps_per_sec if steps_per_sec > 0 else 0
+                                log.info(f"Epoch {epoch+1} | {steps_per_sec:.1f} steps/s | ~{remaining_in_epoch:,} steps remaining (~{epoch_eta/60:.1f} min)")
+                    
                     # === Persistent Memory Fix ===
                     # Python doesn't always release memory to OS. We force it periodically.
                     if step % 1000 == 0:
-                        try:
-                            import ctypes
-                            libc = ctypes.CDLL("libc.so.6")
-                            libc.malloc_trim(0)
-                        except Exception:
-                            pass # Ignored on Windows/Non-Linux
+                        if platform.system() == 'Linux':
+                            try:
+                                import ctypes
+                                libc = ctypes.CDLL("libc.so.6")
+                                libc.malloc_trim(0)
+                            except Exception as e:
+                                log.debug(f"malloc_trim failed: {e}")
+                        elif platform.system() == 'Windows':
+                            # Windows does not support malloc_trim; use gc.collect() as fallback
+                            gc.collect()
 
                     
                     # === Validation Loop ===
@@ -487,7 +496,7 @@ def train(args):
                         model.eval()
                         val_loss_total = 0.0
                         val_batches = 0
-                        print("\nRunning Validation...", flush=True)
+                        log.info("Running Validation...")
                         with torch.no_grad():
                             for val_batch in val_dataloader:
                                 if val_batches >= args.val_batches: break # Limit val batches
@@ -495,26 +504,32 @@ def train(args):
                                 v_imgs = val_batch['images'].to(device)
                                 v_props = val_batch['proprio'].to(device)
                                 v_goals = val_batch['goal'].to(device)
-                                v_actions = val_batch['actions'].to(device)
-                                v_requery = val_batch['requery'].to(device)
+                                v_target_poses = val_batch['target_poses'].to(device)
                                 
                                 B_val = v_imgs.shape[0]
-                                model.reset_memory(B_val)
                                 
                                 with torch.cuda.amp.autocast():
-                                    # Non-AR validation for speed/standard metric (or should it be AR?)
-                                    # Let's do AR=1 for standard validation
-                                    v_pred, _, v_req_logit = model(v_imgs, v_props, v_goals, update_queue=False, use_memory=True)
+                                    # Validation forward pass
+                                    v_pred, v_requery_pred = model(v_imgs, v_props, v_goals)
                                     
-                                    v_target_act = v_actions[:, 0, :]
-                                    v_a_loss = torch.mean((v_pred - v_target_act)**2)
-                                    v_r_loss = requery_criterion(v_req_logit, v_requery)
+                                    # Endpoint loss (matching training)
+                                    v_start_poses = v_props[:, -1, :]
+                                    horizon = args.loss_horizon
+                                    v_target_endpoint = v_target_poses[:, horizon - 1, :]  # Direct from data
+                                    
+                                    v_a_loss = endpoint_geodesic_loss(
+                                        v_pred, v_start_poses, v_target_endpoint,
+                                        horizon, args.omega_rot, args.omega_trans
+                                    )
+                                    
+                                    v_confidence_target = torch.exp(-v_a_loss.detach() / args.confidence_temperature).expand(B_val, 1)
+                                    v_r_loss = requery_criterion(v_requery_pred, v_confidence_target)
                                     v_loss = v_a_loss + (v_r_loss * args.requery_weight)
                                     val_loss_total += v_loss.item()
                                     val_batches += 1
                         
                         avg_val_loss = val_loss_total / max(1, val_batches)
-                        print(f"Validation Loss: {avg_val_loss:.4f}", flush=True)
+                        log.info(f"Validation Loss: {avg_val_loss:.4f}")
                         # Log validation loss (You might need to update Logger to handle 'val_loss' key or just print)
                         # Assuming Logger has a generic log_scalar or we just print for now.
                         # logger.writer.add_scalar("Loss/val", avg_val_loss, step) 
@@ -536,20 +551,18 @@ def train(args):
                             'scaler_state_dict': scaler.state_dict(), # Save Scaler
                             'loss': loss.item(),
                         }, checkpoint_path)
-                        logger.plot_progress()
+                        training_logger.plot_progress()
                         
                     # Visualization (Step-based)
                     if args.epochs == 0 and args.viz and step % args.viz_interval == 0:
                         visualizer.visualize_batch(step, batch, pred_action)
-                        if args.save_gif:
-                            generate_episode_gif(model, args, step, visualizer)
                 
                 except torch.cuda.OutOfMemoryError:
                     # CUDA OOM: Reduce batch size
                     consecutive_cuda_oom += 1
                     successful_batches_since_oom = 0
                     
-                    print(f"\n[CUDA OOM] Out of memory at step {step}. (OOM #{consecutive_cuda_oom})")
+                    log.warning(f"[CUDA OOM] Out of memory at step {step}. (OOM #{consecutive_cuda_oom})")
                     gc.collect()
                     torch.cuda.empty_cache()
                     optimizer.zero_grad(set_to_none=True)
@@ -559,11 +572,11 @@ def train(args):
                             effective_batch_size = max(MIN_BATCH_SIZE, effective_batch_size // 2)
                             consecutive_cuda_oom = 0
                             need_dataloader_rebuild = True
-                            print(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
+                            log.warning(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
                             break  # Exit batch loop to rebuild dataloader
                         else:
-                            print(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
-                            print("[CUDA OOM] Saving checkpoint and exiting gracefully...")
+                            log.error(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
+                            log.error("[CUDA OOM] Saving checkpoint and exiting gracefully...")
                             raise SystemExit("CUDA OOM: Cannot reduce batch size further")
                     
                     continue
@@ -574,7 +587,7 @@ def train(args):
                         consecutive_cuda_oom += 1
                         successful_batches_since_oom = 0
                         
-                        print(f"\n[CUDA OOM] Runtime memory error at step {step}. (OOM #{consecutive_cuda_oom})")
+                        log.warning(f"[CUDA OOM] Runtime memory error at step {step}. (OOM #{consecutive_cuda_oom})")
                         gc.collect()
                         torch.cuda.empty_cache()
                         optimizer.zero_grad(set_to_none=True)
@@ -584,10 +597,10 @@ def train(args):
                                 effective_batch_size = max(MIN_BATCH_SIZE, effective_batch_size // 2)
                                 consecutive_cuda_oom = 0
                                 need_dataloader_rebuild = True
-                                print(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
+                                log.warning(f"[CUDA OOM] Reducing batch size to {effective_batch_size}")
                                 break
                             else:
-                                print(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
+                                log.error(f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further.")
                                 raise SystemExit("CUDA OOM: Cannot reduce batch size further")
                         
                         continue
@@ -599,7 +612,7 @@ def train(args):
                     consecutive_ram_oom += 1
                     successful_batches_since_oom = 0
                     
-                    print(f"\n[RAM OOM] System memory exhausted at step {step}. (OOM #{consecutive_ram_oom})")
+                    log.warning(f"[RAM OOM] System memory exhausted at step {step}. (OOM #{consecutive_ram_oom})")
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
@@ -611,18 +624,18 @@ def train(args):
                             effective_shuffle_buffer = max(MIN_SHUFFLE_BUFFER, effective_shuffle_buffer // 2)
                             consecutive_ram_oom = 0
                             need_dataloader_rebuild = True
-                            print(f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}")
+                            log.warning(f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}")
                             break
                         # Then try reducing workers
                         elif effective_num_workers > MIN_NUM_WORKERS:
                             effective_num_workers = max(MIN_NUM_WORKERS, effective_num_workers - 1)
                             consecutive_ram_oom = 0
                             need_dataloader_rebuild = True
-                            print(f"[RAM OOM] Reducing num_workers to {effective_num_workers}")
+                            log.warning(f"[RAM OOM] Reducing num_workers to {effective_num_workers}")
                             break
                         else:
-                            print(f"[RAM OOM] All parameters at minimum. Cannot reduce further.")
-                            print("[RAM OOM] Saving checkpoint and exiting gracefully...")
+                            log.error(f"[RAM OOM] All parameters at minimum. Cannot reduce further.")
+                            log.error("[RAM OOM] Saving checkpoint and exiting gracefully...")
                             raise SystemExit("RAM OOM: Cannot reduce memory parameters further")
                     
                     continue
@@ -638,7 +651,7 @@ def train(args):
             
             # Check if we need to rebuild dataloader (from OOM reduction)
             if need_dataloader_rebuild:
-                print(f"[Memory] Rebuilding dataloader with new parameters...")
+                log.info(f"[Memory] Rebuilding dataloader with new parameters...")
                 dataloader = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers)
                 need_dataloader_rebuild = False
                 continue  # Restart epoch loop with new dataloader
@@ -650,7 +663,7 @@ def train(args):
 
             # End of Epoch Actions (Epoch-based)
             if args.epochs > 0:
-                print(f"Saving checkpoint at end of epoch {epoch + 1}")
+                log.info(f"Saving checkpoint at end of epoch {epoch + 1}")
                 torch.save({
                     'step': step,
                     'epoch': epoch + 1, # Save as next epoch start
@@ -658,14 +671,12 @@ def train(args):
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': loss.item(),
                 }, checkpoint_path)
-                logger.plot_progress()
+                training_logger.plot_progress()
                 
                 if args.viz:
-                    print(f"Visualizing at end of epoch {epoch + 1}")
+                    log.info(f"Visualizing at end of epoch {epoch + 1}")
                     # Use the last batch for visualization
                     visualizer.visualize_batch(step, batch, pred_action)
-                    if args.save_gif:
-                        generate_episode_gif(model, args, step, visualizer)
 
             # End of inner loop
             if args.epochs == 0 and step >= target_step:
@@ -678,9 +689,9 @@ def train(args):
                     break
 
     except KeyboardInterrupt:
-        print("\nTraining interrupted by user.")
+        log.info("Training interrupted by user.")
     except Exception as e:
-        print(f"\nTraining failed with error: {e}")
+        log.error(f"Training failed with error: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -690,9 +701,9 @@ def train(args):
             run_name = f"run_{timestamp}_{args.dataset}_steps{step}.pt"
             run_path = os.path.join(args.checkpoint_dir, run_name)
             shutil.copy(checkpoint_path, run_path)
-            print(f"\nRun saved to: {run_path}")
-            logger.plot_progress()
-            print("Training complete.")
+            log.info(f"Run saved to: {run_path}")
+            training_logger.plot_progress()
+            log.info("Training complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -708,10 +719,7 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help="Checkpoint directory")
     parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
     parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
-    
-    # New Arguments
-    parser.add_argument('--use_latent_memory', action='store_true', help="Enable recurrent latent memory updates")
-    parser.add_argument('--queue_size', type=int, default=10, help="Size of the latent memory queue")
+    parser.add_argument('--window_size', type=int, default=8, help="Sliding window size for temporal context")
     
     # Visualization Args
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
@@ -719,18 +727,28 @@ if __name__ == "__main__":
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
     parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
     parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
-    parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss (increase to 10.0+ to prioritize asking for help)")
-    parser.add_argument('--pos_weight', type=float, default=1.0, help="Asymmetric loss weight for positive class (increase to >1.0 to penalize missing 'help needed' signals)")
-    
-    # Autoregressive Training Args
-    parser.add_argument('--autoregressive_steps', type=int, default=1, help="Number of autoregressive rollout steps during training. 1=standard, >1=predict and feed back before backprop")
-    parser.add_argument('--ar_loss_decay', type=float, default=0.5, help="Decay factor for loss on subsequent autoregressive steps (0.5 = each step contributes half as much)")
+    parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss")
+    parser.add_argument('--confidence_temperature', type=float, default=1.0, help="Temperature for confidence target: confidence = exp(-loss/temp). Lower = more sensitive to errors.")
 
     # Validation Args
     parser.add_argument('--train_split_pct', type=float, default=0.95, help="Percentage of data to use for training (remainder for validation)")
     parser.add_argument('--val_interval', type=int, default=5000, help="Step interval for validation")
+    parser.add_argument('--val_batch_size', type=int, default=32, help="Batch size for validation")
     parser.add_argument('--val_batches', type=int, default=50, help="Number of batches to run during validation")
+    
+    # SE(3) Geodesic Loss Weights
+    parser.add_argument('--omega_rot', type=float, default=1.0, help="Weight for rotational error in geodesic loss")
+    parser.add_argument('--omega_trans', type=float, default=1.0, help="Weight for translational error in geodesic loss")
+    parser.add_argument('--loss_horizon', type=int, default=1, help="Number of twist steps to apply before computing loss (1=immediate, W=full chunk). Must be 1 <= loss_horizon <= window_size.")
+    
+    # Logging
+    parser.add_argument('--verbose', type=int, default=2, help="Logging verbosity: 0=WARNING, 1=INFO, 2=DEBUG")
 
     args = parser.parse_args()
-    print(f"DEBUG: Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}", flush=True)
+    
+    # Validate loss_horizon
+    if args.loss_horizon < 1 or args.loss_horizon > args.window_size:
+        parser.error(f"--loss_horizon must be between 1 and window_size ({args.window_size}), got {args.loss_horizon}")
+    
+    log.debug(f"Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}")
     train(args)
