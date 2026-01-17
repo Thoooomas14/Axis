@@ -226,8 +226,8 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
     
     # Compute rotation angle from trace: trace(R) = 1 + 2*cos(theta)
     trace = R_flat[:, 0, 0] + R_flat[:, 1, 1] + R_flat[:, 2, 2]
-    cos_angle = (trace - 1.0) / 2.0
-    cos_angle = torch.clamp(cos_angle, -1.0, 1.0)  # Numerical stability
+    cos_angle = (trace - 1) / 2  # Avoid float literal, use integer
+    cos_angle = torch.clamp(cos_angle, -1 + 1e-7, 1 - 1e-7)  # Numerical stability
     angle = torch.acos(cos_angle)  # (n,)
     
     # Initialize output
@@ -237,16 +237,17 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
     small_mask = angle.abs() < 1e-6
     if small_mask.any():
         # For small angles: omega ≈ [R32-R23, R13-R31, R21-R12] / 2
-        omega[small_mask, 0] = (R_flat[small_mask, 2, 1] - R_flat[small_mask, 1, 2]) / 2.0
-        omega[small_mask, 1] = (R_flat[small_mask, 0, 2] - R_flat[small_mask, 2, 0]) / 2.0
-        omega[small_mask, 2] = (R_flat[small_mask, 1, 0] - R_flat[small_mask, 0, 1]) / 2.0
+        # Use integer 2 to preserve dtype
+        omega[small_mask, 0] = (R_flat[small_mask, 2, 1] - R_flat[small_mask, 1, 2]) / 2
+        omega[small_mask, 1] = (R_flat[small_mask, 0, 2] - R_flat[small_mask, 2, 0]) / 2
+        omega[small_mask, 2] = (R_flat[small_mask, 1, 0] - R_flat[small_mask, 0, 1]) / 2
     
     # Case 2: Normal case
     normal_mask = ~small_mask & (angle < (3.14159 - 1e-6))
     if normal_mask.any():
         # omega = (theta / (2*sin(theta))) * [R32-R23, R13-R31, R21-R12]
         sin_angle = torch.sin(angle[normal_mask])
-        factor = angle[normal_mask] / (2.0 * sin_angle + 1e-8)
+        factor = angle[normal_mask] / (2 * sin_angle + 1e-8)
         omega[normal_mask, 0] = factor * (R_flat[normal_mask, 2, 1] - R_flat[normal_mask, 1, 2])
         omega[normal_mask, 1] = factor * (R_flat[normal_mask, 0, 2] - R_flat[normal_mask, 2, 0])
         omega[normal_mask, 2] = factor * (R_flat[normal_mask, 1, 0] - R_flat[normal_mask, 0, 1])
@@ -265,11 +266,11 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
             j = (i + 1) % 3
             l = (i + 2) % 3
             R_i = R_flat[large_mask][idx]
-            s = torch.sqrt(R_i[i, i] - R_i[j, j] - R_i[l, l] + 1.0) + 1e-8
+            s = torch.sqrt(R_i[i, i] - R_i[j, j] - R_i[l, l] + 1) + 1e-8
             w = torch.zeros(3, device=R.device, dtype=R.dtype)
-            w[i] = s / 2.0
-            w[j] = (R_i[i, j] + R_i[j, i]) / (2.0 * s)
-            w[l] = (R_i[i, l] + R_i[l, i]) / (2.0 * s)
+            w[i] = s / 2
+            w[j] = (R_i[i, j] + R_i[j, i]) / (2 * s)
+            w[l] = (R_i[i, l] + R_i[l, i]) / (2 * s)
             omega[large_mask][idx] = w * angle[large_mask][idx]
     
     return omega.reshape(*batch_shape, 3)
@@ -321,7 +322,9 @@ def so3_exp(omega: torch.Tensor) -> torch.Tensor:
         cos_t = torch.cos(theta).unsqueeze(-1).unsqueeze(-1)
         I = torch.eye(3, device=omega.device, dtype=omega.dtype).unsqueeze(0)
         K2 = torch.bmm(K, K)
-        R[normal_mask] = I + sin_t * K + (1.0 - cos_t) * K2
+        # Use (1 - cos_t) instead of (1.0 - cos_t) to preserve dtype
+        one = torch.ones_like(cos_t)
+        R[normal_mask] = I + sin_t * K + (one - cos_t) * K2
     
     # Small angle: R ≈ I + K (first order Taylor)
     if small_mask.any():
@@ -399,10 +402,14 @@ def se3_log(T: torch.Tensor) -> torch.Tensor:
         cos_t = torch.cos(theta_n)
         
         # Coefficient for K²: (1/θ² - (1+cos(θ))/(2θ*sin(θ)))
-        c2 = (1.0 / (theta_n**2 + 1e-8) - (1.0 + cos_t) / (2.0 * theta_n * sin_t + 1e-8))
+        # Use tensor operations to preserve dtype for AMP
+        one = torch.ones_like(cos_t)
+        two = one + one
+        c2 = (one / (theta_n**2 + 1e-8) - (one + cos_t) / (two * theta_n * sin_t + 1e-8))
         
         I = torch.eye(3, device=T.device, dtype=T.dtype).unsqueeze(0)
-        V_inv = I - 0.5 * K + c2.unsqueeze(-1).unsqueeze(-1) * K2
+        half = one * 0.5  # Preserve dtype
+        V_inv = I - half.unsqueeze(-1).unsqueeze(-1) * K + c2.unsqueeze(-1).unsqueeze(-1) * K2
         
         v[normal_mask] = torch.bmm(V_inv, p_n.unsqueeze(-1)).squeeze(-1)
     
@@ -464,7 +471,9 @@ def se3_exp(xi: torch.Tensor) -> torch.Tensor:
         cos_t = torch.cos(theta_n)
         
         # V = I + (1-cos)/θ² * K + (θ-sin)/θ³ * K²
-        c1 = ((1.0 - cos_t) / (theta_n**2 + 1e-8)).unsqueeze(-1).unsqueeze(-1)
+        # Use tensor operations to preserve dtype for AMP
+        one = torch.ones_like(cos_t)
+        c1 = ((one - cos_t) / (theta_n**2 + 1e-8)).unsqueeze(-1).unsqueeze(-1)
         c2 = ((theta_n - sin_t) / (theta_n**3 + 1e-8)).unsqueeze(-1).unsqueeze(-1)
         
         I = torch.eye(3, device=xi.device, dtype=xi.dtype).unsqueeze(0)

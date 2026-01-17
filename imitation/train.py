@@ -407,19 +407,21 @@ def train(args):
                         # requery_pred: (B, 1) - model confidence [0, 1]
                         
                         # === Endpoint Loss (Task-Oriented) ===
-                        # Starting pose: last frame of proprio window
-                        start_poses = proprio[:, -1, :]  # (B, 7)
-                        
-                        # Target endpoint: directly from data loader at the horizon step
-                        # target_poses[:, horizon-1, :] is the pose at step t+horizon
-                        horizon = args.loss_horizon
-                        target_endpoint = target_poses[:, horizon - 1, :]  # (B, 7) - direct from data
-                        
-                        # Compute endpoint loss
-                        action_loss = endpoint_geodesic_loss(
-                            pred_action, start_poses, target_endpoint, 
-                            horizon, args.omega_rot, args.omega_trans
-                        )
+                        # Disable AMP for geodesic loss - SE(3) operations need float32 precision
+                        with torch.cuda.amp.autocast(enabled=False):
+                            # Cast to float32 for numerical precision in rotation ops
+                            pred_action_f32 = pred_action.float()
+                            start_poses_f32 = proprio[:, -1, :].float()  # (B, 7)
+                            
+                            # Target endpoint: directly from data loader at the horizon step
+                            horizon = args.loss_horizon
+                            target_endpoint_f32 = target_poses[:, horizon - 1, :].float()  # (B, 7)
+                            
+                            # Compute endpoint loss in float32
+                            action_loss = endpoint_geodesic_loss(
+                                pred_action_f32, start_poses_f32, target_endpoint_f32, 
+                                horizon, args.omega_rot, args.omega_trans
+                            )
                         
                         # Compute per-sample loss for confidence (using endpoint error)
                         per_sample_loss = action_loss.detach()  # Scalar, broadcast to all samples
@@ -513,18 +515,20 @@ def train(args):
                                     # Validation forward pass
                                     v_pred, v_requery_pred = model(v_imgs, v_props, v_goals)
                                     
-                                    # Endpoint loss (matching training)
-                                    v_start_poses = v_props[:, -1, :]
+                                # Endpoint loss in float32 (SE(3) ops need precision)
+                                with torch.cuda.amp.autocast(enabled=False):
+                                    v_pred_f32 = v_pred.float()
+                                    v_start_poses_f32 = v_props[:, -1, :].float()
                                     horizon = args.loss_horizon
-                                    v_target_endpoint = v_target_poses[:, horizon - 1, :]  # Direct from data
+                                    v_target_endpoint_f32 = v_target_poses[:, horizon - 1, :].float()
                                     
                                     v_a_loss = endpoint_geodesic_loss(
-                                        v_pred, v_start_poses, v_target_endpoint,
+                                        v_pred_f32, v_start_poses_f32, v_target_endpoint_f32,
                                         horizon, args.omega_rot, args.omega_trans
                                     )
                                     
                                     v_confidence_target = torch.exp(-v_a_loss.detach() / args.confidence_temperature).expand(B_val, 1)
-                                    v_r_loss = requery_criterion(v_requery_pred, v_confidence_target)
+                                    v_r_loss = requery_criterion(v_requery_pred.float(), v_confidence_target)
                                     v_loss = v_a_loss + (v_r_loss * args.requery_weight)
                                     val_loss_total += v_loss.item()
                                     val_batches += 1
