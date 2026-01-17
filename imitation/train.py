@@ -455,6 +455,7 @@ def train(args):
                     step += 1
                     steps_in_current_epoch += 1
                     pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
+                    pbar.update(1)  # Increment progress bar counter
                     
                     # === Time Estimation Logging ===
                     if step % 1000 == 0 and step > start_step:
