@@ -188,6 +188,7 @@ def train(args):
             batch_size=1,
             window_size=config['window_size'],
             loss_horizon=args.loss_horizon,  # How many future steps for endpoint loss
+            image_key=args.image_key,  # Explicit image key (e.g., 'exterior_image_1_left')
             image_size=(128, 128),
             data_dir=args.data_dir,
             shuffle_buffer_size=shuffle_buffer if is_train else 0,
@@ -720,6 +721,7 @@ if __name__ == "__main__":
     parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
     parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
     parser.add_argument('--window_size', type=int, default=8, help="Sliding window size for temporal context")
+    parser.add_argument('--image_key', type=str, default=None, help="Explicit image key (e.g., 'exterior_image_1_left' for DROID). If not set, uses fallback order.")
     
     # Visualization Args
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")

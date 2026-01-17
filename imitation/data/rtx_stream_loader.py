@@ -32,13 +32,14 @@ class RTXStreamLoader(IterableDataset):
     Supports 'fractal20220817_data' and 'droid' datasets.
     """
     def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
-                 loss_horizon=1, image_size=(128, 128), shuffle_buffer_size=1000, 
+                 loss_horizon=1, image_key=None, image_size=(128, 128), shuffle_buffer_size=1000, 
                  data_dir=None, repeat=True):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
         self.window_size = window_size
         self.loss_horizon = loss_horizon  # How many future steps to output
+        self.image_key = image_key  # Explicit image key (e.g., 'exterior_image_1_left')
         self.image_size = image_size
         self.shuffle_buffer_size = shuffle_buffer_size
         self.data_dir = data_dir
@@ -225,7 +226,9 @@ class RTXStreamLoader(IterableDataset):
         imgs = []
         props = []
         
-        image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+        # Fallback image keys if explicit key not specified
+        fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+        image_keys = [self.image_key] if self.image_key else fallback_keys
         
         for s in episode['steps']:
             obs = s['observation']
