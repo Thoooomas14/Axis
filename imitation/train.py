@@ -422,6 +422,16 @@ def train(args):
                                 pred_action_f32, start_poses_f32, target_endpoint_f32, 
                                 horizon, args.omega_rot, args.omega_trans
                             )
+                            
+                            if step == 0:
+                                # Debug magnitudes
+                                with torch.no_grad():
+                                    start_p = start_poses_f32[:, 3:6]
+                                    target_p = target_endpoint_f32[:, 3:6]
+                                    delta_p = torch.norm(target_p - start_p, dim=1).mean()
+                                    pred_mag = torch.norm(pred_action_f32, dim=2).mean()
+                                    log.info(f"DEBUG: Mean Target Delta Position: {delta_p.item():.6f} m")
+                                    log.info(f"DEBUG: Mean Pred Twist Magnitude: {pred_mag.item():.6f}")
                         
                         # Compute per-sample loss for confidence (using endpoint error)
                         per_sample_loss = action_loss.detach()  # Scalar, broadcast to all samples
