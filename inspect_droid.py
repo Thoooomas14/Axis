@@ -15,8 +15,8 @@ def inspect_data():
     loader = RTXStreamLoader(
         dataset_name='droid',
         data_dir='gs://gresearch/robotics',
-        batch_size=16,
-        window_size=2, # Reduced to minimize RAM 
+        batch_size=1, # Minimal batch size to save RAM
+        window_size=2,
         loss_horizon=1,
         image_key='exterior_image_1_left',
         shuffle_buffer_size=1
