@@ -218,13 +218,8 @@ class SubprocessDROIDLoader(IterableDataset):
         from .goal_oracle import GoalOracle
         self.oracle = GoalOracle(output_dim=64)
     
-    def __iter__(self):
-        # Create queue and event for communication
-        ctx = mp.get_context('spawn')  # spawn for clean TF isolation
-        result_queue = ctx.Queue(maxsize=self.queue_size)
-        stop_event = ctx.Event()
-        
-        # Start worker process
+    def _start_worker(self, ctx, result_queue, stop_event):
+        """Start a new worker process."""
         worker = ctx.Process(
             target=_episode_worker,
             args=(
@@ -235,19 +230,42 @@ class SubprocessDROIDLoader(IterableDataset):
             )
         )
         worker.start()
+        return worker
+    
+    def __iter__(self):
+        # Create queue and event for communication
+        ctx = mp.get_context('spawn')  # spawn for clean TF isolation
+        result_queue = ctx.Queue(maxsize=self.queue_size)
+        stop_event = ctx.Event()
+        
+        # Start worker process
+        worker = self._start_worker(ctx, result_queue, stop_event)
+        restart_count = 0
+        max_restarts = 100  # Allow many restarts for long training
         
         try:
             while True:
                 try:
-                    data = result_queue.get(timeout=60.0)  # 60s timeout
+                    data = result_queue.get(timeout=10.0)  # 10s timeout
                 except queue.Empty:
                     # Check if worker is still alive
                     if not worker.is_alive():
-                        break
+                        print(f"[SubprocessLoader] Worker died. Restarting... (attempt {restart_count + 1})")
+                        restart_count += 1
+                        if restart_count > max_restarts:
+                            print("[SubprocessLoader] Max restarts reached. Stopping.")
+                            break
+                        # Restart worker
+                        worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
                 if 'error' in data:
-                    raise RuntimeError(f"Worker error: {data['error']}")
+                    print(f"[SubprocessLoader] Worker error: {data['error']}. Restarting...")
+                    restart_count += 1
+                    if restart_count > max_restarts:
+                        raise RuntimeError(f"Worker error after max restarts: {data['error']}")
+                    worker = self._start_worker(ctx, result_queue, stop_event)
+                    continue
                 
                 # Add goal (computed in main process to keep oracle state)
                 start_pose = data['proprio'][0]
