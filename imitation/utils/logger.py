@@ -10,8 +10,21 @@ class TrainingLogger:
         self.log_path = os.path.join(log_dir, 'training_log.csv')
         self.plot_path = os.path.join(log_dir, 'training_plot.png')
         
-        # Initialize CSV if not exists
-        if not os.path.exists(self.log_path):
+        # Initialize CSV with fallback for permission errors
+        try:
+            if not os.path.exists(self.log_path):
+                with open(self.log_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss'])
+            # Verify writable
+            with open(self.log_path, 'a', newline='') as f:
+                pass
+        except PermissionError:
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_path = os.path.join(log_dir, f'training_log_{ts}.csv')
+            print(f"[Logger] Permission denied on main log. Falling back to: {self.log_path}")
+            # Create fallback
             with open(self.log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss'])
