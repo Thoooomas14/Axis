@@ -184,17 +184,19 @@ def train(args):
         
         log.info(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
         
-        # Use subprocess loader for ALL datasets to isolate TensorFlow memory
-        log.info("Using SubprocessDROIDLoader for TF memory isolation")
-        stream = SubprocessDROIDLoader(
-            data_dir=args.data_dir,
-            dataset_name=args.dataset,
-            split=split,
-            image_key=args.image_key,
-            image_size=(128, 128),
+        # Use RTXStreamLoader with tf.data debug mode (fixes memory leak root cause)
+        log.info("Using RTXStreamLoader with tf.data debug mode enabled")
+        stream = RTXStreamLoader(
+            dataset_name=args.dataset, 
+            split=split, 
+            batch_size=1,
             window_size=config['window_size'],
             loss_horizon=args.loss_horizon,
-            queue_size=64,  # Buffer 64 samples
+            image_key=args.image_key,
+            image_size=(128, 128),
+            data_dir=args.data_dir,
+            shuffle_buffer_size=shuffle_buffer if is_train else 0,
+            repeat=repeat_dataset if is_train else False,
         )
         
         # Handle num_workers=0 case (no prefetch_factor or persistent_workers)

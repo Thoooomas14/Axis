@@ -22,6 +22,10 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
     import tensorflow as tf
     tf.config.set_visible_devices([], 'GPU')
     
+    # CRITICAL: Force tf.data to run in debug mode (true eager, no graph caching)
+    # This addresses the warning about tf.data ignoring run_functions_eagerly
+    tf.data.experimental.enable_debug_mode()
+    
     import tensorflow_datasets as tfds
     import cv2
     from scipy.spatial.transform import Rotation as R
@@ -131,7 +135,8 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         
         buffer_size = window_size + loss_horizon
         MAX_STEPS_PER_EPISODE = 200  # Limit to prevent OOM from huge episodes
-        MAX_EPISODES_BEFORE_REFRESH = 50  # Restart worker every 50 episodes to prevent TF/GCS state issues
+        MAX_EPISODES_BEFORE_REFRESH = 100  # Refresh every 100 episodes
+        PRESTART_AT = 50  # Start warming at 50 (50 eps ahead of refresh)
         episode_count = 0
         
         for episode in ds:
@@ -203,7 +208,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             gc.collect()
             
             # Signal main process to start warming up next worker
-            PRESTART_AT = MAX_EPISODES_BEFORE_REFRESH - 10  # 10 eps ahead
             if episode_count == PRESTART_AT:
                 result_queue.put({'prestart': True})
             

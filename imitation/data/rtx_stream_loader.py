@@ -17,6 +17,10 @@ except Exception:
 # Force TF to run in eager mode without caching
 tf.config.run_functions_eagerly(True)
 
+# CRITICAL: Force tf.data to run in debug mode (true eager, no graph caching)
+# This addresses the tf.data internal caching that causes memory leaks
+tf.data.experimental.enable_debug_mode()
+
 import tensorflow_datasets as tfds
 import numpy as np
 from scipy.spatial.transform import Rotation as R
