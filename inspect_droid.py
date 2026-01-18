@@ -39,8 +39,8 @@ def inspect_data():
             
         # Props: (B, W, 7)
         # We want the stats between last prop frame and target (horizon=1)
-        proprio = torch.from_numpy(batch['proprio'])
-        target_poses = torch.from_numpy(batch['target_poses'])
+        proprio = batch['proprio']
+        target_poses = batch['target_poses']
         
         start_pose = proprio[:, -1, :] # (B, 7)
         end_pose = target_poses[:, 0, :] # (B, 7) -> horizon=1
