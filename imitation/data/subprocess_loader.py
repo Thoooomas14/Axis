@@ -131,7 +131,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         
         buffer_size = window_size + loss_horizon
         MAX_STEPS_PER_EPISODE = 200  # Limit to prevent OOM from huge episodes
-        MAX_EPISODES_BEFORE_REFRESH = 10  # Restart worker every 10 episodes to prevent TF/GCS state issues
+        MAX_EPISODES_BEFORE_REFRESH = 50  # Restart worker every 50 episodes to prevent TF/GCS state issues
         episode_count = 0
         
         for episode in ds:
@@ -202,6 +202,11 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             tf.keras.backend.clear_session()
             gc.collect()
             
+            # Signal main process to start warming up next worker
+            PRESTART_AT = MAX_EPISODES_BEFORE_REFRESH - 10  # 10 eps ahead
+            if episode_count == PRESTART_AT:
+                result_queue.put({'prestart': True})
+            
             # Proactive refresh - exit and let main process restart us
             if episode_count >= MAX_EPISODES_BEFORE_REFRESH:
                 print(f"[Worker] Processed {episode_count} episodes. Requesting refresh...")
@@ -264,6 +269,10 @@ class SubprocessDROIDLoader(IterableDataset):
         
         # Start worker process
         worker = self._start_worker(ctx, result_queue, stop_event)
+        next_worker = None  # Pre-warmed worker for seamless transition
+        next_queue = None
+        next_stop_event = None
+        
         restart_count = 0
         max_restarts = 100  # Allow many restarts for long training
         consecutive_timeouts = 0
@@ -309,14 +318,37 @@ class SubprocessDROIDLoader(IterableDataset):
                         raise RuntimeError(f"Worker error after max restarts: {data['error']}")
                     worker.terminate()
                     worker.join(timeout=2.0)
+                    # Kill pre-warmed worker if exists
+                    if next_worker is not None:
+                        next_stop_event.set()
+                        next_worker.terminate()
+                        next_worker = None
                     worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
-                # Handle refresh request (proactive restart)
+                # Handle prestart request (start warming next worker)
+                if 'prestart' in data:
+                    if next_worker is None:
+                        print(f"[SubprocessLoader] Pre-warming next worker...", flush=True)
+                        next_queue = ctx.Queue(maxsize=self.queue_size)
+                        next_stop_event = ctx.Event()
+                        next_worker = self._start_worker(ctx, next_queue, next_stop_event)
+                    continue  # This is just a signal, not data
+                
+                # Handle refresh request (switch to pre-warmed worker)
                 if 'refresh' in data:
-                    print(f"[SubprocessLoader] Worker requested refresh. Restarting...", flush=True)
                     worker.join(timeout=2.0)  # Wait for clean exit
-                    worker = self._start_worker(ctx, result_queue, stop_event)
+                    if next_worker is not None:
+                        print(f"[SubprocessLoader] Switching to pre-warmed worker", flush=True)
+                        worker = next_worker
+                        result_queue = next_queue
+                        stop_event = next_stop_event
+                        next_worker = None
+                        next_queue = None
+                        next_stop_event = None
+                    else:
+                        print(f"[SubprocessLoader] No pre-warmed worker, cold starting...", flush=True)
+                        worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
                 # Add goal (computed in main process to keep oracle state)
