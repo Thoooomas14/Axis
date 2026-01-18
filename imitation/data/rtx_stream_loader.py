@@ -407,6 +407,8 @@ class RTXStreamLoader(IterableDataset):
                 # Force clear TF session and dataset
                 tf.keras.backend.clear_session()
                 del episode
+                # CRITICAL: Reset self.ds to force fresh dataset creation
+                self.ds = None
                 gc.collect()
                 # Break out to restart iteration from __iter__
                 # This forces a fresh dataset load
