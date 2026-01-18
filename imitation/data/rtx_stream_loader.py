@@ -59,9 +59,12 @@ class RTXStreamLoader(IterableDataset):
         
         self.oracle = GoalOracle(output_dim=64)
         
+        # Memory management for huge DROID episodes
+        self._max_episode_steps = 200  # Cap episode length to prevent OOM
+        
         # Episode counter for periodic dataset reset
         self._episode_count = 0
-        self._max_episodes_before_reset = 50  # Reset every 50 episodes to reclaim memory
+        self._max_episodes_before_reset = 10  # Reset every 10 episodes for aggressive memory reclamation
         
         # Initialize dataset builder to get info
         self.builder = None
@@ -240,21 +243,34 @@ class RTXStreamLoader(IterableDataset):
         
         return img
 
-    def _extract_episode_data(self, episode):
+    def _stream_episode_windows(self, episode):
         """
-        Extract all data from TF episode into pure numpy arrays.
-        Returns None if episode is too short, otherwise returns dict with numpy arrays.
+        Stream windows from episode with O(window_size) memory.
+        
+        Uses a sliding buffer to avoid loading entire episode into memory.
+        This processes the ENTIRE episode including task completion frames.
+        
+        Yields:
+            dict: Window samples with PyTorch tensors
         """
-        imgs = []
-        props = []
+        buffer_size = self.window_size + self.loss_horizon
+        
+        # Circular buffer for images and props
+        img_buffer = []
+        prop_buffer = []
         
         # Fallback image keys if explicit key not specified
         fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
         image_keys = [self.image_key] if self.image_key else fallback_keys
         
+        # Track gripper for goal computation
+        all_grippers = []  # Keep just gripper values for goal computation
+        
+        step_count = 0
         for s in episode['steps']:
             obs = s['observation']
             
+            # Process image
             img = None
             for key in image_keys:
                 if key in obs:
@@ -263,19 +279,57 @@ class RTXStreamLoader(IterableDataset):
             
             if img is not None:
                 processed_img = self._process_image(img)
-                imgs.append(processed_img)
             else:
-                imgs.append(np.zeros((3, 128, 128), dtype=np.float32))
+                processed_img = np.zeros((3, 128, 128), dtype=np.float32)
+            
+            # Process pose
+            pose = self._get_pose(obs)
+            
+            # Add to buffer
+            img_buffer.append(processed_img)
+            prop_buffer.append(pose)
+            all_grippers.append(pose[6])
+            step_count += 1
+            
+            # Once buffer is full, start yielding windows
+            if len(img_buffer) >= buffer_size:
+                # Extract window from buffer
+                w_imgs = np.array(img_buffer[:self.window_size], dtype=np.float32)
+                w_props = np.array(prop_buffer[:self.window_size], dtype=np.float32)
                 
-            props.append(self._get_pose(obs))
-        
-        if not imgs or len(imgs) < self.window_size + self.loss_horizon:
-            return None  # Episode too short
-        
-        return {
-            'imgs': np.array(imgs, dtype=np.float32),
-            'props': np.array(props, dtype=np.float32)
-        }
+                # Compute goal based on current gripper state (simplified)
+                start_pose = prop_buffer[0]
+                end_pose = prop_buffer[self.window_size - 1]
+                task_type = 0  # Move
+                if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+                    task_type = 1  # Pick
+                elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+                    task_type = 2  # Place
+                goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
+                
+                # Compute twists and target poses for horizon
+                target_twists = []
+                target_poses = []
+                start_idx = self.window_size - 1
+                
+                for h in range(self.loss_horizon):
+                    curr_idx = start_idx + h
+                    next_idx = curr_idx + 1
+                    twist = self._compute_twist(prop_buffer[curr_idx], prop_buffer[next_idx])
+                    target_twists.append(twist)
+                    target_poses.append(prop_buffer[next_idx])
+                
+                yield {
+                    'images': torch.tensor(w_imgs, dtype=torch.float32),
+                    'proprio': torch.tensor(w_props, dtype=torch.float32),
+                    'goal': goal_emb,
+                    'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
+                    'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
+                }
+                
+                # Slide buffer forward: remove oldest frame
+                img_buffer.pop(0)
+                prop_buffer.pop(0)
     
     def _yield_windows(self, imgs, props):
         """
@@ -416,23 +470,13 @@ class RTXStreamLoader(IterableDataset):
                 # This forces a fresh dataset load
                 return
             
-            # CRITICAL: Extract data to numpy FIRST, then delete TF episode
-            episode_data = self._extract_episode_data(episode)
+            # STREAMING APPROACH: Yields windows with O(window_size) memory
+            # Processes ENTIRE episode (including task completion at end)
+            yield from self._stream_episode_windows(episode)
             
-            # Immediately delete TF episode to release memory BEFORE yielding
+            # Cleanup after episode
             del episode
             tf.keras.backend.clear_session()
-            gc.collect()
-            
-            # Skip if episode was too short
-            if episode_data is None:
-                continue
-            
-            # Now yield from pure numpy - no TF references held during yield
-            yield from self._yield_windows(episode_data['imgs'], episode_data['props'])
-            
-            # Cleanup numpy data
-            del episode_data
             gc.collect()
             
             # Anti-Fragmentation for Persistent Workers (Linux only)
