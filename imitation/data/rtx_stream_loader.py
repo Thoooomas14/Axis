@@ -245,32 +245,28 @@ class RTXStreamLoader(IterableDataset):
 
     def _stream_episode_windows(self, episode):
         """
-        Stream windows from episode with O(window_size) memory.
+        Process episode and yield windows.
         
-        Uses a sliding buffer to avoid loading entire episode into memory.
-        This processes the ENTIRE episode including task completion frames.
-        
-        Yields:
-            dict: Window samples with PyTorch tensors
+        CRITICAL: Extracts ALL numpy data first, deletes TF episode, THEN yields.
+        This ensures no TF references are held during yield statements.
         """
         buffer_size = self.window_size + self.loss_horizon
-        
-        # Circular buffer for images and props
-        img_buffer = []
-        prop_buffer = []
         
         # Fallback image keys if explicit key not specified
         fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
         image_keys = [self.image_key] if self.image_key else fallback_keys
         
-        # Track gripper for goal computation
-        all_grippers = []  # Keep just gripper values for goal computation
+        # PHASE 1: Extract ALL data to numpy (no yielding yet)
+        imgs = []
+        props = []
         
-        step_count = 0
-        for s in episode['steps']:
+        # Convert steps to list to fully materialize and allow cleanup
+        steps_list = list(episode['steps'])
+        
+        for s in steps_list:
             obs = s['observation']
             
-            # Process image
+            # Process image - convert to numpy immediately
             img = None
             for key in image_keys:
                 if key in obs:
@@ -282,54 +278,63 @@ class RTXStreamLoader(IterableDataset):
             else:
                 processed_img = np.zeros((3, 128, 128), dtype=np.float32)
             
-            # Process pose
-            pose = self._get_pose(obs)
+            imgs.append(processed_img)
+            props.append(self._get_pose(obs))
+        
+        # PHASE 2: Delete TF references BEFORE yielding
+        del steps_list
+        del episode
+        tf.keras.backend.clear_session()
+        gc.collect()
+        
+        # PHASE 3: Now yield windows from pure numpy (no TF refs held)
+        if len(imgs) < buffer_size:
+            return  # Episode too short
+        
+        imgs = np.array(imgs, dtype=np.float32)
+        props = np.array(props, dtype=np.float32)
+        total_steps = len(imgs)
+        
+        num_windows = total_steps - self.window_size - self.loss_horizon + 1
+        
+        for w in range(num_windows):
+            w_imgs = imgs[w : w + self.window_size]
+            w_props = props[w : w + self.window_size]
             
-            # Add to buffer
-            img_buffer.append(processed_img)
-            prop_buffer.append(pose)
-            all_grippers.append(pose[6])
-            step_count += 1
+            # Simplified goal computation
+            start_pose = props[w]
+            end_pose = props[w + self.window_size - 1]
+            task_type = 0
+            if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+                task_type = 1
+            elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+                task_type = 2
+            goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
             
-            # Once buffer is full, start yielding windows
-            if len(img_buffer) >= buffer_size:
-                # Extract window from buffer
-                w_imgs = np.array(img_buffer[:self.window_size], dtype=np.float32)
-                w_props = np.array(prop_buffer[:self.window_size], dtype=np.float32)
-                
-                # Compute goal based on current gripper state (simplified)
-                start_pose = prop_buffer[0]
-                end_pose = prop_buffer[self.window_size - 1]
-                task_type = 0  # Move
-                if start_pose[6] < 0.5 and end_pose[6] > 0.5:
-                    task_type = 1  # Pick
-                elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
-                    task_type = 2  # Place
-                goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
-                
-                # Compute twists and target poses for horizon
-                target_twists = []
-                target_poses = []
-                start_idx = self.window_size - 1
-                
-                for h in range(self.loss_horizon):
-                    curr_idx = start_idx + h
-                    next_idx = curr_idx + 1
-                    twist = self._compute_twist(prop_buffer[curr_idx], prop_buffer[next_idx])
-                    target_twists.append(twist)
-                    target_poses.append(prop_buffer[next_idx])
-                
-                yield {
-                    'images': torch.tensor(w_imgs, dtype=torch.float32),
-                    'proprio': torch.tensor(w_props, dtype=torch.float32),
-                    'goal': goal_emb,
-                    'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
-                    'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
-                }
-                
-                # Slide buffer forward: remove oldest frame
-                img_buffer.pop(0)
-                prop_buffer.pop(0)
+            # Compute twists
+            target_twists = []
+            target_poses = []
+            start_idx = w + self.window_size - 1
+            
+            for h in range(self.loss_horizon):
+                curr_idx = start_idx + h
+                next_idx = curr_idx + 1
+                twist = self._compute_twist(props[curr_idx], props[next_idx])
+                target_twists.append(twist)
+                target_poses.append(props[next_idx])
+            
+            yield {
+                'images': torch.tensor(w_imgs, dtype=torch.float32),
+                'proprio': torch.tensor(w_props, dtype=torch.float32),
+                'goal': goal_emb,
+                'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
+                'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
+            }
+        
+        # Cleanup numpy
+        del imgs
+        del props
+        gc.collect()
     
     def _yield_windows(self, imgs, props):
         """
