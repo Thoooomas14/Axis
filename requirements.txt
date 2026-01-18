@@ -13,6 +13,7 @@ pytest
 flake8
 pyyaml
 pillow
+opencv-python-headless
 psutil
 toml
 gymnasium
