@@ -222,11 +222,15 @@ def train(args):
     
     dataloader, train_stream = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
     
-    # Estimate total windows for progress tracking
-    estimated_windows = train_stream.estimate_total_windows(avg_episode_length=100)
-    estimated_batches = estimated_windows // effective_batch_size if estimated_windows else None
-    if estimated_batches:
-        log.info(f"Estimated ~{estimated_windows:,} windows ({estimated_batches:,} batches) per epoch")
+    # Estimate total windows for progress tracking (if method exists)
+    if hasattr(train_stream, 'estimate_total_windows'):
+        estimated_windows = train_stream.estimate_total_windows(avg_episode_length=100)
+        estimated_batches = estimated_windows // effective_batch_size if estimated_windows else None
+        if estimated_batches:
+            log.info(f"Estimated ~{estimated_windows:,} windows ({estimated_batches:,} batches) per epoch")
+    else:
+        estimated_batches = None
+        log.info("Progress estimation not available for subprocess loader")
     
     # Validation Dataloader (smaller batch size to save memory if needed)
     # We use 0 workers for val to save overhead
