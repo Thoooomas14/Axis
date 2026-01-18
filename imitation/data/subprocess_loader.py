@@ -288,7 +288,7 @@ class SubprocessDROIDLoader(IterableDataset):
         restart_count = 0
         max_restarts = 100  # Allow many restarts for long training
         consecutive_timeouts = 0
-        max_consecutive_timeouts = 6  # Force restart after 60s of no data
+        max_consecutive_timeouts = 30  # Force restart after 300s (5 mins) of no data
         
         try:
             while True:
