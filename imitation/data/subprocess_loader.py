@@ -22,10 +22,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
     import tensorflow as tf
     tf.config.set_visible_devices([], 'GPU')
     
-    # CRITICAL: Force tf.data to run in debug mode (true eager, no graph caching)
-    # This addresses the warning about tf.data ignoring run_functions_eagerly
-    tf.data.experimental.enable_debug_mode()
-    
     import tensorflow_datasets as tfds
     import cv2
     from scipy.spatial.transform import Rotation as R
