@@ -19,7 +19,16 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
     
     This runs in a SEPARATE PROCESS, so when it exits, all TensorFlow memory is released.
     """
+    # Suppress TensorFlow logging BEFORE importing
+    import os
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress all TF logs
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''   # No GPU for worker
+    
+    import warnings
+    warnings.filterwarnings('ignore')  # Suppress Python warnings
+    
     import tensorflow as tf
+    tf.get_logger().setLevel('ERROR')  # Only show errors
     tf.config.set_visible_devices([], 'GPU')
     
     import tensorflow_datasets as tfds
@@ -140,7 +149,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
                 break
             
             episode_count += 1
-            print(f"[Worker] Processing episode {episode_count}...")
             
             # Extract episode data to numpy
             imgs = []
@@ -209,7 +217,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             
             # Proactive refresh - exit and let main process restart us
             if episode_count >= MAX_EPISODES_BEFORE_REFRESH:
-                print(f"[Worker] Processed {episode_count} episodes. Requesting refresh...")
                 result_queue.put({'refresh': True})
                 return  # Exit cleanly
             
@@ -329,7 +336,13 @@ class SubprocessDROIDLoader(IterableDataset):
                 # Handle prestart request (start warming next worker)
                 if 'prestart' in data:
                     if next_worker is None:
-                        print(f"[SubprocessLoader] Pre-warming next worker...", flush=True)
+                        # Pre-warming next worker in background
+                        try:
+                            from tqdm import tqdm
+                            tqdm.write(f"[SubprocessLoader] Pre-warming next worker...")
+                        except ImportError:
+                            print(f"[SubprocessLoader] Pre-warming next worker...")
+                            
                         next_queue = ctx.Queue(maxsize=self.queue_size)
                         next_stop_event = ctx.Event()
                         next_worker = self._start_worker(ctx, next_queue, next_stop_event)
@@ -339,7 +352,13 @@ class SubprocessDROIDLoader(IterableDataset):
                 if 'refresh' in data:
                     worker.join(timeout=2.0)  # Wait for clean exit
                     if next_worker is not None:
-                        print(f"[SubprocessLoader] Switching to pre-warmed worker", flush=True)
+                        # Switching to pre-warmed worker
+                        try:
+                            from tqdm import tqdm
+                            tqdm.write(f"[SubprocessLoader] Switching to pre-warmed worker")
+                        except ImportError:
+                            print(f"[SubprocessLoader] Switching to pre-warmed worker")
+                            
                         worker = next_worker
                         result_queue = next_queue
                         stop_event = next_stop_event
@@ -347,7 +366,13 @@ class SubprocessDROIDLoader(IterableDataset):
                         next_queue = None
                         next_stop_event = None
                     else:
-                        print(f"[SubprocessLoader] No pre-warmed worker, cold starting...", flush=True)
+                        # Cold start fallback
+                        try:
+                            from tqdm import tqdm
+                            tqdm.write(f"[SubprocessLoader] No pre-warmed worker, cold starting...")
+                        except ImportError:
+                            print(f"[SubprocessLoader] No pre-warmed worker, cold starting...")
+                            
                         worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
