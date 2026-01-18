@@ -12,10 +12,10 @@ COMMON_ARGS="--dataset fractal20220817_data \
     --resume \
     --num_workers 1 \
     --shuffle_buffer_size 5 \
-    --window_size 8 \
-    --omega_rot 1.0 \
-    --omega_trans 1.0 \
-    --confidence_temperature 1.0 \
+    --window_size 10 \
+    --omega_rot 50.0 \
+    --omega_trans 50.0 \
+    --confidence_temperature 0.2 \
     --viz \
     --viz_interval 10000"
 

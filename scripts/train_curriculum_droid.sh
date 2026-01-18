@@ -8,14 +8,14 @@ set -e  # Exit on error
 # Common args (lower shuffle_buffer for DROID's larger episodes)
 COMMON_ARGS="--dataset droid \
     --data_dir gs://gresearch/robotics \
-    --batch_size 128 \
+    --batch_size 48 \
     --resume \
-    --num_workers 1 \
-    --shuffle_buffer_size 2 \
-    --window_size 8 \
-    --omega_rot 1.0 \
-    --omega_trans 1.0 \
-    --confidence_temperature 1.0"
+    --num_workers 0 \
+    --shuffle_buffer_size 1 \
+    --window_size 10 \
+    --omega_rot 100.0 \
+    --omega_trans 100.0 \
+    --confidence_temperature 0.1"
 
 echo "=========================================="
 echo "Phase 1: Immediate Loss (loss_horizon=1)"
