@@ -5,6 +5,11 @@ Isolates TensorFlow in a child process to guarantee memory release.
 When the child process dies, ALL its memory is released by the OS.
 """
 
+import os
+# Suppress TF logs globally for this module and its subprocesses
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
 import multiprocessing as mp
 import numpy as np
 import torch
@@ -47,11 +52,11 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
     
     def process_image(img, size):
         if img is None:
-            return np.zeros((3, size[0], size[1]), dtype=np.float32)
+            return np.zeros((3, size[0], size[1]), dtype=np.uint8)
         if hasattr(img, 'numpy'):
             img = img.numpy()
         img = cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
-        img = img.astype(np.float32) / 255.0
+        # Keep as uint8 [0, 255] for memory efficiency
         return np.transpose(img, (2, 0, 1))
     
     def get_pose(obs):
@@ -387,7 +392,7 @@ class SubprocessDROIDLoader(IterableDataset):
                 goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
                 
                 yield {
-                    'images': torch.tensor(data['images'], dtype=torch.float32),
+                    'images': torch.tensor(data['images'], dtype=torch.float32) / 255.0,
                     'proprio': torch.tensor(data['proprio'], dtype=torch.float32),
                     'goal': goal_emb,
                     'actions': torch.tensor(data['actions'], dtype=torch.float32),
