@@ -197,8 +197,15 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             tf.keras.backend.clear_session()
             gc.collect()
             
+        # This should never happen with ds.repeat()
+        print("[Worker] WARNING: Episode loop ended unexpectedly!")
+        result_queue.put({'error': 'Worker episode loop ended unexpectedly (repeat() failed?)'})
+            
     except Exception as e:
-        result_queue.put({'error': str(e)})
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[Worker] Exception: {error_msg}")
+        result_queue.put({'error': error_msg})
 
 
 class SubprocessDROIDLoader(IterableDataset):
@@ -248,20 +255,39 @@ class SubprocessDROIDLoader(IterableDataset):
         worker = self._start_worker(ctx, result_queue, stop_event)
         restart_count = 0
         max_restarts = 100  # Allow many restarts for long training
+        consecutive_timeouts = 0
+        max_consecutive_timeouts = 6  # Force restart after 60s of no data
         
         try:
             while True:
                 try:
                     data = result_queue.get(timeout=10.0)  # 10s timeout
+                    consecutive_timeouts = 0  # Reset on success
                 except queue.Empty:
-                    # Check if worker is still alive
+                    consecutive_timeouts += 1
+                    
+                    # Force restart if too many consecutive timeouts (stuck on I/O)
+                    if consecutive_timeouts >= max_consecutive_timeouts:
+                        print(f"[SubprocessLoader] Worker stuck ({consecutive_timeouts * 10}s). Force restarting...")
+                        worker.terminate()
+                        worker.join(timeout=2.0)
+                        if worker.is_alive():
+                            worker.kill()
+                        consecutive_timeouts = 0
+                        restart_count += 1
+                        if restart_count > max_restarts:
+                            print("[SubprocessLoader] Max restarts reached. Stopping.")
+                            break
+                        worker = self._start_worker(ctx, result_queue, stop_event)
+                        continue
+                    
+                    # Check if worker died
                     if not worker.is_alive():
                         print(f"[SubprocessLoader] Worker died. Restarting... (attempt {restart_count + 1})")
                         restart_count += 1
                         if restart_count > max_restarts:
                             print("[SubprocessLoader] Max restarts reached. Stopping.")
                             break
-                        # Restart worker
                         worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
