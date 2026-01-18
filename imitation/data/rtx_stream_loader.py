@@ -129,6 +129,8 @@ class RTXStreamLoader(IterableDataset):
         pos = np.zeros(3, dtype=np.float32)
         quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # Identity
         
+        rotvec = None
+        
         # 1. Try to get Pose
         if 'base_pose_tool_reached' in obs:
             # Fractal: 7D [x, y, z, qx, qy, qz, qw]
@@ -141,7 +143,8 @@ class RTXStreamLoader(IterableDataset):
             if p6.shape[0] == 6:
                 pos = p6[:3]
                 euler = p6[3:]
-                quat = R.from_euler('xyz', euler).as_quat()  # [qx, qy, qz, qw]
+                # Optimization: Convert directly to rotvec
+                rotvec = R.from_euler('xyz', euler).as_rotvec().astype(np.float32)
         elif 'ee_pose' in obs:
             p7 = obs['ee_pose'].numpy()
             pos = p7[:3]
@@ -154,7 +157,8 @@ class RTXStreamLoader(IterableDataset):
                 quat = p7[3:7]
         
         # Convert quaternion to rotation vector
-        rotvec = self._quat_to_rotvec(quat)
+        if rotvec is None:
+            rotvec = self._quat_to_rotvec(quat)
         
         # 2. Try to get Gripper
         g = 0.0

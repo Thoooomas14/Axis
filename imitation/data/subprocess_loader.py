@@ -63,6 +63,8 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         pos = np.zeros(3, dtype=np.float32)
         quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         
+        rotvec = None
+        
         if 'base_pose_tool_reached' in obs:
             p7 = obs['base_pose_tool_reached'].numpy()
             pos = p7[:3]
@@ -72,14 +74,15 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             if p6.shape[0] == 6:
                 pos = p6[:3]
                 euler = p6[3:]
-                quat = R.from_euler('xyz', euler).as_quat()
+                rotvec = R.from_euler('xyz', euler).as_rotvec().astype(np.float32)
         elif 'ee_pose' in obs:
             p7 = obs['ee_pose'].numpy()
             pos = p7[:3]
             if p7.shape[0] >= 7:
                 quat = p7[3:7]
         
-        rotvec = quat_to_rotvec(quat)
+        if rotvec is None:
+            rotvec = quat_to_rotvec(quat)
         
         g = 0.0
         if 'gripper_closed' in obs:
