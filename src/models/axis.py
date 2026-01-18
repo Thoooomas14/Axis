@@ -147,7 +147,7 @@ class AxisModel(nn.Module):
         # 6. Decode all tokens (action chunk of length W)
         # output_tokens: (B, W, 512)
         
-        pred_action = self.action_decoder(output_tokens) # (B, W, 10)
+        pred_action = self.action_decoder(output_tokens) # (B, W, 7)
         requery_logit = self.requery_decoder(output_tokens) # (B, W, 1)
         
         if return_tokens:
