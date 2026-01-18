@@ -17,10 +17,6 @@ except Exception:
 # Force TF to run in eager mode without caching
 tf.config.run_functions_eagerly(True)
 
-# CRITICAL: Force tf.data to run in debug mode (true eager, no graph caching)
-# This addresses the tf.data internal caching that causes memory leaks
-tf.data.experimental.enable_debug_mode()
-
 import tensorflow_datasets as tfds
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -484,29 +480,38 @@ class RTXStreamLoader(IterableDataset):
         if self.shuffle_buffer_size > 1:
             ds = ds.shuffle(self.shuffle_buffer_size)
         
-        for episode in ds:
-            # Increment episode counter
-            self._episode_count += 1
+        MAX_EPISODES_PER_ITERATOR = 50  # Recreate iterator every 50 episodes
+        episode_count = 0
+        
+        while True:
+            # Create fresh iterator
+            episode_iterator = iter(ds)
             
-            # Periodic dataset reset to break TF's internal buffers
-            if self._episode_count >= self._max_episodes_before_reset:
-                self._episode_count = 0
-                # Force clear TF session and dataset
-                tf.keras.backend.clear_session()
-                del episode
-                # CRITICAL: Reset self.ds to force fresh dataset creation
-                self.ds = None
-                gc.collect()
-                # Break out to restart iteration from __iter__
-                # This forces a fresh dataset load
-                return
+            try:
+                while episode_count < MAX_EPISODES_PER_ITERATOR:
+                    try:
+                        episode = next(episode_iterator)
+                    except StopIteration:
+                        if not self.repeat:
+                            return  # Dataset exhausted
+                        break  # Should not happen with repeat, recreate iterator
+                    
+                    episode_count += 1
+                    
+                    # STREAMING APPROACH: Yields windows with O(window_size) memory
+                    yield from self._stream_episode_windows(episode)
+                    
+                    # Cleanup after episode
+                    del episode
+                    gc.collect()
+            finally:
+                # Release iterator to free TF internal buffers
+                del episode_iterator
             
-            # STREAMING APPROACH: Yields windows with O(window_size) memory
-            # Processes ENTIRE episode (including task completion at end)
-            yield from self._stream_episode_windows(episode)
+            # Reset for next batch of episodes
+            episode_count = 0
             
-            # Cleanup after episode
-            del episode
+            # Clear TF session to release internal caches
             tf.keras.backend.clear_session()
             gc.collect()
             
@@ -519,4 +524,3 @@ class RTXStreamLoader(IterableDataset):
                     libc.malloc_trim(0)
                 except Exception:
                     pass
-
