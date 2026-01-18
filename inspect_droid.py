@@ -19,7 +19,11 @@ def inspect_data():
         shuffle_buffer_size=1
     )
     
-    ds = loader.build_dataset()
+    
+    # RTXStreamLoader is an IterableDataset, so we can iterate it directly
+    # However, it expects to be wrapped in a DataLoader for multi-worker support usually,
+    # but for single process inspection we can iterate directly or wrap it.
+    ds = loader # It *is* the dataset
     iterator = iter(ds)
     
     print("\n=== Sampling DROID Data (Loss Horizon = 1) ===")
