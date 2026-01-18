@@ -460,9 +460,7 @@ class RTXStreamLoader(IterableDataset):
         # This prevents TF from accumulating internal buffers
         options = tf.data.Options()
         options.experimental_optimization.apply_default_optimizations = False
-        options.experimental_optimization.autotune = False
-        options.threading.private_threadpool_size = 1
-        options.threading.max_intra_op_parallelism = 1
+        options.autotune.enabled = False
         ds = ds.with_options(options)
             
         # Sharding for PyTorch DataLoader Workers
