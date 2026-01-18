@@ -6,6 +6,17 @@ import tensorflow as tf
 # This prevents VRAM OOM and CUDA initialization errors in forked processes.
 tf.config.set_visible_devices([], 'GPU')
 
+# Limit TensorFlow memory growth to prevent unbounded RAM usage
+try:
+    # Disable TF's aggressive memory allocation
+    from tensorflow.python.framework import config as tf_config
+    tf_config.set_soft_device_placement(True)
+except Exception:
+    pass
+
+# Force TF to run in eager mode without caching
+tf.config.run_functions_eagerly(True)
+
 import tensorflow_datasets as tfds
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -46,6 +57,10 @@ class RTXStreamLoader(IterableDataset):
         self.repeat = repeat
         
         self.oracle = GoalOracle(output_dim=64)
+        
+        # Episode counter for periodic dataset reset
+        self._episode_count = 0
+        self._max_episodes_before_reset = 50  # Reset every 50 episodes to reclaim memory
         
         # Initialize dataset builder to get info
         self.builder = None
@@ -383,12 +398,24 @@ class RTXStreamLoader(IterableDataset):
             ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
-            # Clear TF session to prevent graph leak
-            tf.keras.backend.clear_session()
-            gc.collect()
+            # Increment episode counter
+            self._episode_count += 1
+            
+            # Periodic dataset reset to break TF's internal buffers
+            if self._episode_count >= self._max_episodes_before_reset:
+                self._episode_count = 0
+                # Force clear TF session and dataset
+                tf.keras.backend.clear_session()
+                del episode
+                gc.collect()
+                # Break out to restart iteration from __iter__
+                # This forces a fresh dataset load
+                return
             
             yield from self._process_episode(episode)
+            
             # Active GC after each episode to prevent leaks
+            del episode
             gc.collect()
             
             # Anti-Fragmentation for Persistent Workers
