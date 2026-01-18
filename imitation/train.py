@@ -556,7 +556,8 @@ def train(args):
 
                     # Checkpointing (Step-based)
                     if args.epochs == 0 and step % args.save_interval == 0:
-                        torch.save({
+                        # Define checkpoint data
+                        ckpt_data = {
                             'step': step,
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
@@ -564,7 +565,25 @@ def train(args):
                             'optimizer_state_dict': optimizer.state_dict(),
                             'scaler_state_dict': scaler.state_dict(), # Save Scaler
                             'loss': loss.item(),
-                        }, checkpoint_path)
+                        }
+                        
+                        try:
+                            # Try primary save (latest)
+                            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                            torch.save(ckpt_data, checkpoint_path)
+                        except Exception as e:
+                            log.error(f"Failed to save primary checkpoint '{checkpoint_path}': {e}")
+                            
+                            # Fallback save (timestamped/step-based)
+                            try:
+                                fallback_name = f"checkpoint_step_{step}.pt"
+                                fallback_path = os.path.join(args.checkpoint_dir, fallback_name)
+                                log.info(f"Attempting fallback save to '{fallback_path}'...")
+                                torch.save(ckpt_data, fallback_path)
+                                log.info(f"Fallback save successful!")
+                            except Exception as e2:
+                                log.error(f"CRITICAL: Fallback save also failed: {e2}")
+                        
                         training_logger.plot_progress()
                         
                     # Visualization (Step-based)
@@ -709,15 +728,30 @@ def train(args):
         import traceback
         traceback.print_exc()
     finally:
-        # Archival
-        if os.path.exists(checkpoint_path):
+        # Archival: Always save a fresh checkpoint to avoid losing data if 'latest' is locked
+        try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = f"run_{timestamp}_{args.dataset}_steps{step}.pt"
             run_path = os.path.join(args.checkpoint_dir, run_name)
-            shutil.copy(checkpoint_path, run_path)
+            
+            # Save fresh - do NOT rely on copying 'checkpoint_latest.pt'
+            os.makedirs(args.checkpoint_dir, exist_ok=True)
+            torch.save({
+                'step': step,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'ema_state_dict': ema.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'loss': loss.item(),
+            }, run_path)
+            
             log.info(f"Run saved to: {run_path}")
             training_logger.plot_progress()
-            log.info("Training complete.")
+        except Exception as e:
+            log.error(f"Failed to save final checkpoint: {e}")
+        
+        log.info("Training complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
