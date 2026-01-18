@@ -138,7 +138,7 @@ class AxisModel(nn.Module):
             proprio_tokens = self.proprio_encoder(proprio_flat)  # (B*W, 128)
             proprio_tokens = proprio_tokens.reshape(B, W, 128)   # (B, W, 128)
             
-            # 4. Concatenate: [Vision, Proprio, Goal]
+            # 4. Concatenate: [Proprio, Vision, Goal]
             input_tokens = torch.cat([proprio_tokens, vision_tokens, goal_tokens], dim=-1) # (B, W, 512)
         
         # 5. Transformer backbone

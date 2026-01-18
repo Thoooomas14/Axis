@@ -343,6 +343,12 @@ class RTXStreamLoader(IterableDataset):
                 'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),  # (H, 7) twists
                 'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),  # (H, 7) future poses
             }
+            
+        # Explicit cleanup to break reference cycles immediately
+        del imgs
+        del props
+        del episode
+        gc.collect()
 
     def __iter__(self):
         # Load dataset in streaming mode
@@ -377,6 +383,10 @@ class RTXStreamLoader(IterableDataset):
             ds = ds.shuffle(self.shuffle_buffer_size)
         
         for episode in ds:
+            # Clear TF session to prevent graph leak
+            tf.keras.backend.clear_session()
+            gc.collect()
+            
             yield from self._process_episode(episode)
             # Active GC after each episode to prevent leaks
             gc.collect()

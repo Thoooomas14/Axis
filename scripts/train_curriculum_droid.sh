@@ -8,7 +8,7 @@ set -e  # Exit on error
 # Common args (lower shuffle_buffer for DROID's larger episodes)
 COMMON_ARGS="--dataset droid \
     --data_dir gs://gresearch/robotics \
-    --batch_size 48 \
+    --batch_size 16 \
     --resume \
     --num_workers 0 \
     --shuffle_buffer_size 1 \
