@@ -131,10 +131,15 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         
         buffer_size = window_size + loss_horizon
         MAX_STEPS_PER_EPISODE = 200  # Limit to prevent OOM from huge episodes
+        MAX_EPISODES_BEFORE_REFRESH = 10  # Restart worker every 10 episodes to prevent TF/GCS state issues
+        episode_count = 0
         
         for episode in ds:
             if stop_event.is_set():
                 break
+            
+            episode_count += 1
+            print(f"[Worker] Processing episode {episode_count}...")
             
             # Extract episode data to numpy
             imgs = []
@@ -196,6 +201,12 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             # Clear TF after each episode
             tf.keras.backend.clear_session()
             gc.collect()
+            
+            # Proactive refresh - exit and let main process restart us
+            if episode_count >= MAX_EPISODES_BEFORE_REFRESH:
+                print(f"[Worker] Processed {episode_count} episodes. Requesting refresh...")
+                result_queue.put({'refresh': True})
+                return  # Exit cleanly
             
         # This should never happen with ds.repeat()
         print("[Worker] WARNING: Episode loop ended unexpectedly!")
@@ -292,10 +303,19 @@ class SubprocessDROIDLoader(IterableDataset):
                     continue
                 
                 if 'error' in data:
-                    print(f"[SubprocessLoader] Worker error: {data['error']}. Restarting...")
+                    print(f"[SubprocessLoader] Worker error: {data['error']}. Restarting...", flush=True)
                     restart_count += 1
                     if restart_count > max_restarts:
                         raise RuntimeError(f"Worker error after max restarts: {data['error']}")
+                    worker.terminate()
+                    worker.join(timeout=2.0)
+                    worker = self._start_worker(ctx, result_queue, stop_event)
+                    continue
+                
+                # Handle refresh request (proactive restart)
+                if 'refresh' in data:
+                    print(f"[SubprocessLoader] Worker requested refresh. Restarting...", flush=True)
+                    worker.join(timeout=2.0)  # Wait for clean exit
                     worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
