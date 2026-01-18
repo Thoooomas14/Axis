@@ -1,10 +1,13 @@
 
+import sys
 import os
+sys.path.append(os.getcwd()) # Ensure src is importable
+
 import torch
 import numpy as np
 import tensorflow as tf
 from imitation.data.rtx_stream_loader import RTXStreamLoader
-from src.utils.rotation_utils import se3_log
+from src.utils.rotation_utils import se3_log, se3_exp
 
 def inspect_data():
     print("Initializing DROID dataloader...")
@@ -13,7 +16,7 @@ def inspect_data():
         dataset_name='droid',
         data_dir='gs://gresearch/robotics',
         batch_size=16,
-        window_size=2,
+        window_size=2, # Reduced to minimize RAM 
         loss_horizon=1,
         image_key='exterior_image_1_left',
         shuffle_buffer_size=1
@@ -24,7 +27,8 @@ def inspect_data():
     # However, it expects to be wrapped in a DataLoader for multi-worker support usually,
     # but for single process inspection we can iterate directly or wrap it.
     ds = loader # It *is* the dataset
-    iterator = iter(ds)
+    dl = torch.utils.data.DataLoader(ds, batch_size=1) # Wrap to get batch dim
+    iterator = iter(dl)
     
     print("\n=== Sampling DROID Data (Loss Horizon = 1) ===")
     
@@ -34,6 +38,10 @@ def inspect_data():
     for i in range(10):  # Check 10 batches
         try:
             batch = next(iterator)
+            if i == 0:
+                print(f"DEBUG: Batch keys: {batch.keys()}")
+                print(f"DEBUG: Proprio shape: {batch['proprio'].shape}")
+                print(f"DEBUG: Target shape: {batch['target_poses'].shape}")
         except StopIteration:
             break
             
