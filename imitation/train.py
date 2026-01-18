@@ -767,7 +767,7 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help="Checkpoint directory")
     parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
     parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
-    parser.add_argument('--window_size', type=int, default=8, help="Sliding window size for temporal context")
+    parser.add_argument('--window_size', type=int, default=10, help="Sliding window size for temporal context")
     parser.add_argument('--image_key', type=str, default=None, help="Explicit image key (e.g., 'exterior_image_1_left' for DROID). If not set, uses fallback order.")
     
     # Visualization Args
@@ -782,7 +782,7 @@ if __name__ == "__main__":
     # Validation Args
     parser.add_argument('--train_split_pct', type=float, default=0.95, help="Percentage of data to use for training (remainder for validation)")
     parser.add_argument('--val_interval', type=int, default=5000, help="Step interval for validation")
-    parser.add_argument('--val_batch_size', type=int, default=32, help="Batch size for validation")
+    parser.add_argument('--val_batch_size', type=int, default=1, help="Batch size for validation")
     parser.add_argument('--val_batches', type=int, default=50, help="Number of batches to run during validation")
     
     # SE(3) Geodesic Loss Weights
