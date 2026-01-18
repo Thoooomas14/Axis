@@ -225,19 +225,11 @@ class RTXStreamLoader(IterableDataset):
         img = tf.cast(img, tf.float32) / 255.0
         return tf.transpose(img, [2, 0, 1]).numpy() # CHW
 
-    def _process_episode(self, episode):
+    def _extract_episode_data(self, episode):
         """
-        Generates windows from a single episode (continuous, no subtask splitting).
-        
-        Goal vector updates dynamically when gripper state changes (subtask transitions).
-        Requery is NOT yielded since it's now trained as model confidence from action loss.
-        
-        Args:
-            episode: dict containing 'steps' and optionally 'language_instruction'
-        Yields:
-            dict: Windowed sample with dynamically updated goal
+        Extract all data from TF episode into pure numpy arrays.
+        Returns None if episode is too short, otherwise returns dict with numpy arrays.
         """
-        # 1. Extract Full Episode Data
         imgs = []
         props = []
         
@@ -262,11 +254,18 @@ class RTXStreamLoader(IterableDataset):
                 
             props.append(self._get_pose(obs))
         
-        if not imgs or len(imgs) < self.window_size + 1:
-            return  # Episode too short
+        if not imgs or len(imgs) < self.window_size + self.loss_horizon:
+            return None  # Episode too short
         
-        imgs = np.array(imgs)
-        props = np.array(props)
+        return {
+            'imgs': np.array(imgs, dtype=np.float32),
+            'props': np.array(props, dtype=np.float32)
+        }
+    
+    def _yield_windows(self, imgs, props):
+        """
+        Yield windows from pure numpy arrays. No TF references here.
+        """
         total_steps = len(imgs)
         
         # 2. Identify Subtask Boundaries (gripper changes) for goal updates
@@ -316,7 +315,6 @@ class RTXStreamLoader(IterableDataset):
         
         # 4. Sliding Window over entire episode
         # Ensure we have enough future frames for loss_horizon steps after the window
-        # Window ends at w + window_size - 1, we need data up to w + window_size - 1 + loss_horizon
         num_windows = total_steps - self.window_size - self.loss_horizon + 1
         
         if num_windows <= 0:
@@ -335,35 +333,24 @@ class RTXStreamLoader(IterableDataset):
             start_idx = w + self.window_size - 1
             
             # Compute twist targets for FUTURE steps (after the window)
-            # These are the twists the model should predict to reach future poses
             target_twists = []
-            target_poses = []  # Direct target poses for endpoint loss
+            target_poses = []
             
             for h in range(self.loss_horizon):
-                # Current and next indices for this future step
                 curr_idx = start_idx + h
                 next_idx = curr_idx + 1
                 
-                # Compute twist from current to next (guaranteed to exist due to windowing)
                 twist = self._compute_twist(props[curr_idx], props[next_idx])
                 target_twists.append(twist)
-                
-                # Target pose at this horizon step
                 target_poses.append(props[next_idx])
             
             yield {
                 'images': torch.tensor(w_imgs, dtype=torch.float32),
                 'proprio': torch.tensor(w_props, dtype=torch.float32),
                 'goal': goal_emb,
-                'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),  # (H, 7) twists
-                'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),  # (H, 7) future poses
+                'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
+                'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
             }
-            
-        # Explicit cleanup to break reference cycles immediately
-        del imgs
-        del props
-        del episode
-        gc.collect()
 
     def __iter__(self):
         # Load dataset in streaming mode
@@ -414,14 +401,26 @@ class RTXStreamLoader(IterableDataset):
                 # This forces a fresh dataset load
                 return
             
-            yield from self._process_episode(episode)
+            # CRITICAL: Extract data to numpy FIRST, then delete TF episode
+            episode_data = self._extract_episode_data(episode)
             
-            # Active GC after each episode to prevent leaks
+            # Immediately delete TF episode to release memory BEFORE yielding
             del episode
+            tf.keras.backend.clear_session()
             gc.collect()
             
-            # Anti-Fragmentation for Persistent Workers
-            # Force glibc to release free memory back to OS (Linux only)
+            # Skip if episode was too short
+            if episode_data is None:
+                continue
+            
+            # Now yield from pure numpy - no TF references held during yield
+            yield from self._yield_windows(episode_data['imgs'], episode_data['props'])
+            
+            # Cleanup numpy data
+            del episode_data
+            gc.collect()
+            
+            # Anti-Fragmentation for Persistent Workers (Linux only)
             import platform
             if platform.system() == 'Linux':
                 try:
@@ -429,6 +428,5 @@ class RTXStreamLoader(IterableDataset):
                     libc = ctypes.CDLL("libc.so.6")
                     libc.malloc_trim(0)
                 except Exception:
-                    pass  # Silently ignore if malloc_trim fails
-            # On Windows, gc.collect() above is the best we can do
+                    pass
 
