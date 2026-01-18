@@ -130,6 +130,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         img_keys = [image_key] if image_key else fallback_keys
         
         buffer_size = window_size + loss_horizon
+        MAX_STEPS_PER_EPISODE = 200  # Limit to prevent OOM from huge episodes
         
         for episode in ds:
             if stop_event.is_set():
@@ -153,6 +154,11 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
             
             if len(imgs) < buffer_size:
                 continue
+            
+            # If episode is too long, keep only the LAST N steps (task completion is at end)
+            if len(imgs) > MAX_STEPS_PER_EPISODE:
+                imgs = imgs[-MAX_STEPS_PER_EPISODE:]
+                props = props[-MAX_STEPS_PER_EPISODE:]
             
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
