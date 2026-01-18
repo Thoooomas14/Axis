@@ -22,6 +22,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 from .goal_oracle import GoalOracle
 import gc
+import cv2  # For pure-numpy image processing (no TF memory leaks)
 
 # Import SE(3) utilities for Lie group operations
 import sys
@@ -220,10 +221,24 @@ class RTXStreamLoader(IterableDataset):
         return twist7
 
     def _process_image(self, img):
-        if img is None: return np.zeros((3, 128, 128), dtype=np.float32)
-        img = tf.image.resize(img, self.image_size)
-        img = tf.cast(img, tf.float32) / 255.0
-        return tf.transpose(img, [2, 0, 1]).numpy() # CHW
+        """Process image using pure numpy/cv2 - NO TensorFlow ops."""
+        if img is None: 
+            return np.zeros((3, 128, 128), dtype=np.float32)
+        
+        # Convert TF tensor to numpy immediately
+        if hasattr(img, 'numpy'):
+            img = img.numpy()
+        
+        # Resize using cv2 (pure numpy, no TF)
+        img = cv2.resize(img, self.image_size, interpolation=cv2.INTER_LINEAR)
+        
+        # Normalize to [0, 1]
+        img = img.astype(np.float32) / 255.0
+        
+        # Transpose to CHW format
+        img = np.transpose(img, (2, 0, 1))
+        
+        return img
 
     def _extract_episode_data(self, episode):
         """
