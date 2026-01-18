@@ -21,6 +21,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.axis import AxisModel
 from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.subprocess_loader import SubprocessDROIDLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
@@ -182,17 +183,18 @@ def train(args):
         is_train = '[:' in split or split == 'train'
         
         log.info(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
-        stream = RTXStreamLoader(
-            dataset_name=args.dataset, 
-            split=split, 
-            batch_size=1,
-            window_size=config['window_size'],
-            loss_horizon=args.loss_horizon,  # How many future steps for endpoint loss
-            image_key=args.image_key,  # Explicit image key (e.g., 'exterior_image_1_left')
-            image_size=(128, 128),
+        
+        # Use subprocess loader for ALL datasets to isolate TensorFlow memory
+        log.info("Using SubprocessDROIDLoader for TF memory isolation")
+        stream = SubprocessDROIDLoader(
             data_dir=args.data_dir,
-            shuffle_buffer_size=shuffle_buffer if is_train else 0,
-            repeat=repeat_dataset if is_train else False, # Only repeat train
+            dataset_name=args.dataset,
+            split=split,
+            image_key=args.image_key,
+            image_size=(128, 128),
+            window_size=config['window_size'],
+            loss_horizon=args.loss_horizon,
+            queue_size=64,  # Buffer 64 samples
         )
         
         # Handle num_workers=0 case (no prefetch_factor or persistent_workers)
@@ -208,11 +210,11 @@ def train(args):
                 stream, 
                 batch_size=batch_size,
                 num_workers=num_workers,
-                pin_memory=False, # Disable to save RAM
-                prefetch_factor=2, # Reduce to 2 to save RAM (default 4 was too aggressive with large episodes)
+                pin_memory=False,
+                prefetch_factor=2,
                 persistent_workers=True
             )
-        return loader, stream  # Return both for progress estimation
+        return loader, stream
     
     # Create initial dataloader
     train_split = f'train[:{int(args.train_split_pct*100)}%]'

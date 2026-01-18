@@ -1,0 +1,276 @@
+"""
+Subprocess-based DROID data loader.
+
+Isolates TensorFlow in a child process to guarantee memory release.
+When the child process dies, ALL its memory is released by the OS.
+"""
+
+import multiprocessing as mp
+import numpy as np
+import torch
+from torch.utils.data import IterableDataset
+import queue
+import gc
+
+
+def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window_size, loss_horizon, result_queue, stop_event):
+    """
+    Worker process that loads episodes and sends numpy data back via queue.
+    
+    This runs in a SEPARATE PROCESS, so when it exits, all TensorFlow memory is released.
+    """
+    import tensorflow as tf
+    tf.config.set_visible_devices([], 'GPU')
+    
+    import tensorflow_datasets as tfds
+    import cv2
+    from scipy.spatial.transform import Rotation as R
+    
+    # Import rotation utils
+    import sys
+    import os
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+    from src.utils.rotation_utils import se3_log
+    
+    def quat_to_rotvec(quat):
+        quat = quat / (np.linalg.norm(quat) + 1e-8)
+        return R.from_quat(quat).as_rotvec().astype(np.float32)
+    
+    def process_image(img, size):
+        if img is None:
+            return np.zeros((3, size[0], size[1]), dtype=np.float32)
+        if hasattr(img, 'numpy'):
+            img = img.numpy()
+        img = cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
+        img = img.astype(np.float32) / 255.0
+        return np.transpose(img, (2, 0, 1))
+    
+    def get_pose(obs):
+        pos = np.zeros(3, dtype=np.float32)
+        quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        
+        if 'base_pose_tool_reached' in obs:
+            p7 = obs['base_pose_tool_reached'].numpy()
+            pos = p7[:3]
+            quat = p7[3:7]
+        elif 'cartesian_position' in obs:
+            p6 = obs['cartesian_position'].numpy()
+            if p6.shape[0] == 6:
+                pos = p6[:3]
+                euler = p6[3:]
+                quat = R.from_euler('xyz', euler).as_quat()
+        elif 'ee_pose' in obs:
+            p7 = obs['ee_pose'].numpy()
+            pos = p7[:3]
+            if p7.shape[0] >= 7:
+                quat = p7[3:7]
+        
+        rotvec = quat_to_rotvec(quat)
+        
+        g = 0.0
+        if 'gripper_closed' in obs:
+            g = obs['gripper_closed'].numpy()
+        elif 'gripper_position' in obs:
+            g = obs['gripper_position'].numpy()
+        elif 'gripper_state' in obs:
+            g = obs['gripper_state'].numpy()
+        
+        if not np.isscalar(g):
+            g = g.item() if g.size == 1 else g[0]
+        
+        pose7 = np.zeros(7, dtype=np.float32)
+        pose7[:3] = rotvec
+        pose7[3:6] = pos
+        pose7[6] = g
+        return pose7
+    
+    def compute_twist(pose_curr, pose_next):
+        R_curr = R.from_rotvec(pose_curr[:3]).as_matrix()
+        p_curr = pose_curr[3:6]
+        T_curr = np.eye(4, dtype=np.float32)
+        T_curr[:3, :3] = R_curr
+        T_curr[:3, 3] = p_curr
+        
+        R_next = R.from_rotvec(pose_next[:3]).as_matrix()
+        p_next = pose_next[3:6]
+        T_next = np.eye(4, dtype=np.float32)
+        T_next[:3, :3] = R_next
+        T_next[:3, 3] = p_next
+        
+        T_curr_inv = np.eye(4, dtype=np.float32)
+        T_curr_inv[:3, :3] = R_curr.T
+        T_curr_inv[:3, 3] = -R_curr.T @ p_curr
+        
+        T_rel = T_curr_inv @ T_next
+        
+        T_rel_torch = torch.tensor(T_rel, dtype=torch.float32).unsqueeze(0)
+        xi = se3_log(T_rel_torch).squeeze(0).numpy()
+        
+        gripper_delta = pose_next[6] - pose_curr[6]
+        
+        twist7 = np.zeros(7, dtype=np.float32)
+        twist7[:6] = xi
+        twist7[6] = gripper_delta
+        return twist7
+    
+    # Build dataset
+    try:
+        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        
+        if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
+            full_path = f"{data_dir}/{dataset_name}/0.1.0"
+            builder = tfds.builder_from_directory(builder_dir=full_path)
+        else:
+            builder = tfds.builder(dataset_name, data_dir=data_dir, try_gcs=True)
+        
+        ds = builder.as_dataset(split=split, shuffle_files=True, read_config=read_config)
+        ds = ds.repeat()
+        
+        fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+        img_keys = [image_key] if image_key else fallback_keys
+        
+        buffer_size = window_size + loss_horizon
+        
+        for episode in ds:
+            if stop_event.is_set():
+                break
+            
+            # Extract episode data to numpy
+            imgs = []
+            props = []
+            
+            for s in episode['steps']:
+                obs = s['observation']
+                
+                img = None
+                for key in img_keys:
+                    if key in obs:
+                        img = obs[key]
+                        break
+                
+                imgs.append(process_image(img, image_size))
+                props.append(get_pose(obs))
+            
+            if len(imgs) < buffer_size:
+                continue
+            
+            imgs = np.array(imgs, dtype=np.float32)
+            props = np.array(props, dtype=np.float32)
+            
+            # Generate windows
+            num_windows = len(imgs) - window_size - loss_horizon + 1
+            
+            for w in range(num_windows):
+                if stop_event.is_set():
+                    break
+                
+                w_imgs = imgs[w : w + window_size]
+                w_props = props[w : w + window_size]
+                
+                # Compute twists
+                target_twists = []
+                target_poses = []
+                start_idx = w + window_size - 1
+                
+                for h in range(loss_horizon):
+                    curr_idx = start_idx + h
+                    next_idx = curr_idx + 1
+                    twist = compute_twist(props[curr_idx], props[next_idx])
+                    target_twists.append(twist)
+                    target_poses.append(props[next_idx])
+                
+                # Send window via queue (blocks if queue full)
+                result_queue.put({
+                    'images': w_imgs,
+                    'proprio': w_props,
+                    'actions': np.array(target_twists, dtype=np.float32),
+                    'target_poses': np.array(target_poses, dtype=np.float32),
+                })
+            
+            # Clear TF after each episode
+            tf.keras.backend.clear_session()
+            gc.collect()
+            
+    except Exception as e:
+        result_queue.put({'error': str(e)})
+
+
+class SubprocessDROIDLoader(IterableDataset):
+    """
+    Data loader that runs TensorFlow in a subprocess.
+    
+    When the subprocess is killed, ALL TensorFlow memory is released by the OS.
+    """
+    
+    def __init__(self, data_dir, dataset_name='droid', split='train', 
+                 image_key=None, image_size=(128, 128),
+                 window_size=10, loss_horizon=1, queue_size=32):
+        self.data_dir = data_dir
+        self.dataset_name = dataset_name
+        self.split = split
+        self.image_key = image_key
+        self.image_size = image_size
+        self.window_size = window_size
+        self.loss_horizon = loss_horizon
+        self.queue_size = queue_size
+        
+        # Goal oracle (runs in main process)
+        from .goal_oracle import GoalOracle
+        self.oracle = GoalOracle(output_dim=64)
+    
+    def __iter__(self):
+        # Create queue and event for communication
+        ctx = mp.get_context('spawn')  # spawn for clean TF isolation
+        result_queue = ctx.Queue(maxsize=self.queue_size)
+        stop_event = ctx.Event()
+        
+        # Start worker process
+        worker = ctx.Process(
+            target=_episode_worker,
+            args=(
+                self.data_dir, self.dataset_name, self.split,
+                self.image_key, self.image_size,
+                self.window_size, self.loss_horizon,
+                result_queue, stop_event
+            )
+        )
+        worker.start()
+        
+        try:
+            while True:
+                try:
+                    data = result_queue.get(timeout=60.0)  # 60s timeout
+                except queue.Empty:
+                    # Check if worker is still alive
+                    if not worker.is_alive():
+                        break
+                    continue
+                
+                if 'error' in data:
+                    raise RuntimeError(f"Worker error: {data['error']}")
+                
+                # Add goal (computed in main process to keep oracle state)
+                start_pose = data['proprio'][0]
+                end_pose = data['proprio'][-1]
+                task_type = 0
+                if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+                    task_type = 1
+                elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+                    task_type = 2
+                goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
+                
+                yield {
+                    'images': torch.tensor(data['images'], dtype=torch.float32),
+                    'proprio': torch.tensor(data['proprio'], dtype=torch.float32),
+                    'goal': goal_emb,
+                    'actions': torch.tensor(data['actions'], dtype=torch.float32),
+                    'target_poses': torch.tensor(data['target_poses'], dtype=torch.float32),
+                }
+                
+        finally:
+            # Cleanup: signal worker to stop and kill it
+            stop_event.set()
+            worker.terminate()
+            worker.join(timeout=5.0)
+            if worker.is_alive():
+                worker.kill()
