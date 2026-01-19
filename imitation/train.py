@@ -210,10 +210,13 @@ def train(args):
     val_split = f'train[{int(args.train_split_pct*100)}%:]'
     
     dataloader, train_stream = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
-    
+    if args.dataset == 'droid':
+        avg_episode_length = 400
+    else:
+        avg_episode_length = 100
     # Estimate total windows for progress tracking (if method exists)
     if hasattr(train_stream, 'estimate_total_windows'):
-        estimated_windows = train_stream.estimate_total_windows(avg_episode_length=100)
+        estimated_windows = train_stream.estimate_total_windows(avg_episode_length=avg_episode_length)
         estimated_batches = estimated_windows // effective_batch_size if estimated_windows else None
         if estimated_batches:
             log.info(f"Estimated ~{estimated_windows:,} windows ({estimated_batches:,} batches) per epoch")
@@ -452,25 +455,6 @@ def train(args):
                     steps_in_current_epoch += 1
                     pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
                     pbar.update(1)  # Increment progress bar counter
-                    
-                    # === Time Estimation Logging ===
-                    if step % 1000 == 0 and step > start_step:
-                        elapsed = time.time() - start_time
-                        steps_done = step - start_step
-                        steps_per_sec = steps_done / elapsed
-                        
-                        if args.epochs == 0:
-                            # Step-based: estimate time to target
-                            remaining_steps = target_step - step
-                            eta_seconds = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
-                            eta_min = eta_seconds / 60
-                            log.info(f"Step {step:,}/{target_step:,} | {steps_per_sec:.1f} steps/s | ETA: {eta_min:.1f} min")
-                        else:
-                            # Epoch-based: estimate epoch completion
-                            if estimated_batches:
-                                remaining_in_epoch = estimated_batches - steps_in_current_epoch
-                                epoch_eta = remaining_in_epoch / steps_per_sec if steps_per_sec > 0 else 0
-                                log.info(f"Epoch {epoch+1} | {steps_per_sec:.1f} steps/s | ~{remaining_in_epoch:,} steps remaining (~{epoch_eta/60:.1f} min)")
                     
                     # === Persistent Memory Fix ===
                     # Python doesn't always release memory to OS. We force it periodically.
