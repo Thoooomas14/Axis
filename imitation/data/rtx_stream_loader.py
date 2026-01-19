@@ -1,199 +1,107 @@
+"""
+Unified RTX Dataset Loader with Subtask-Based Goals.
+
+Supports both in-process and subprocess TensorFlow loading modes.
+Subprocess mode isolates TF memory - when the child process dies, ALL its memory is released.
+"""
+
+import os
+# Suppress TF logs globally
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 import torch
 from torch.utils.data import IterableDataset
-import tensorflow as tf
-
-# Force TensorFlow to use CPU only in all workers
-# This prevents VRAM OOM and CUDA initialization errors in forked processes.
-tf.config.set_visible_devices([], 'GPU')
-
-# Limit TensorFlow memory growth to prevent unbounded RAM usage
-try:
-    # Disable TF's aggressive memory allocation
-    from tensorflow.python.framework import config as tf_config
-    tf_config.set_soft_device_placement(True)
-except Exception:
-    pass
-
-# Force TF to run in eager mode without caching
-tf.config.run_functions_eagerly(True)
-
-import tensorflow_datasets as tfds
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from .goal_oracle import GoalOracle
 import gc
-import cv2  # For pure-numpy image processing (no TF memory leaks)
+import multiprocessing as mp
+import queue
 
-# Import SE(3) utilities for Lie group operations
+# Import SE(3) utilities
 import sys
-import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.utils.rotation_utils import so3_log, so3_exp, se3_log, quaternion_to_matrix
+from src.utils.rotation_utils import se3_log
+from .goal_oracle import GoalOracle
 
-class RTXStreamLoader(IterableDataset):
-    """
-    Streams RT-X datasets from GCS and yields sliding windows with dynamic goals.
-    
-    Episodes are processed continuously (no subtask splitting).
-    Goal vector updates dynamically when gripper state changes.
-    
-    Args:
-        loss_horizon: Number of future steps to predict (for endpoint loss).
-                     Ensures windows end early enough to have GT for horizon steps.
-    
-    Supports 'fractal20220817_data' and 'droid' datasets.
-    """
-    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
-                 loss_horizon=1, image_key=None, image_size=(128, 128), shuffle_buffer_size=1000, 
-                 data_dir=None, repeat=True):
-        self.dataset_name = dataset_name
-        self.split = split
-        self.batch_size = batch_size
-        self.window_size = window_size
-        self.loss_horizon = loss_horizon  # How many future steps to output
-        self.image_key = image_key  # Explicit image key (e.g., 'exterior_image_1_left')
-        self.image_size = image_size
-        self.shuffle_buffer_size = shuffle_buffer_size
-        self.data_dir = data_dir
-        self.repeat = repeat
-        
-        self.oracle = GoalOracle(output_dim=64)
-        
-        # Memory management for huge DROID episodes
-        self._max_episode_steps = 200  # Cap episode length to prevent OOM
-        
-        # Episode counter for periodic dataset reset
-        self._episode_count = 0
-        self._max_episodes_before_reset = 10  # Reset every 10 episodes for aggressive memory reclamation
-        
-        # Initialize dataset builder to get info
-        self.builder = None
-        self.ds = None
-        
-        if self.data_dir and self.data_dir.startswith('gs://'):
-            try:
-                import tensorflow_io as tfio
-            except ImportError:
-                print("Warning: tensorflow_io not found, GCS access might fail.")
-            
-        if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
-            full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
-            self.builder = tfds.builder_from_directory(builder_dir=full_path)
-        else:
-            # Only try GCS if explicitly requested or if data_dir is None (default TFDS behavior)
-            use_gcs = (self.data_dir is None) 
-            self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=use_gcs)
-            
-    def __len__(self):
-        """Returns the number of episodes in the dataset."""
-        if self.builder:
-            return self.builder.info.splits[self.split].num_examples
-        return 0
-    
-    def estimate_total_windows(self, avg_episode_length=100):
-        """
-        Estimate total windows in the dataset for progress tracking.
-        
-        Args:
-            avg_episode_length: Assumed average steps per episode (default 100 for RTX)
-            
-        Returns:
-            Estimated number of windows (samples) in the dataset
-        """
-        num_episodes = len(self)
-        if num_episodes == 0:
-            return None
-        
-        # Windows per episode = episode_length - window_size - loss_horizon + 1
-        # (or 0 if episode too short)
-        usable_steps = max(0, avg_episode_length - self.window_size - self.loss_horizon + 1)
-        return num_episodes * usable_steps
 
-    def _quat_to_rotvec(self, quat: np.ndarray) -> np.ndarray:
-        """
-        Convert quaternion [qx, qy, qz, qw] to rotation vector (axis-angle).
-        Uses scipy for numpy arrays (GPU-free data loading).
-        """
-        # Normalize quaternion
+def _episode_worker(data_dir, dataset_name, split, image_key, image_size, 
+                    window_size, loss_horizon, result_queue, stop_event):
+    """
+    Worker process that loads episodes and sends numpy data back via queue.
+    Runs in a SEPARATE PROCESS - when it exits, all TensorFlow memory is released.
+    """
+    import os
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    
+    import warnings
+    warnings.filterwarnings('ignore')
+    
+    import tensorflow as tf
+    tf.get_logger().setLevel('ERROR')
+    tf.config.set_visible_devices([], 'GPU')
+    
+    import tensorflow_datasets as tfds
+    import cv2
+    from scipy.spatial.transform import Rotation as R
+    
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+    from src.utils.rotation_utils import se3_log
+    
+    def quat_to_rotvec(quat):
         quat = quat / (np.linalg.norm(quat) + 1e-8)
-        # scipy expects [x, y, z, w] format - same as ours
         return R.from_quat(quat).as_rotvec().astype(np.float32)
     
-    def _get_pose(self, obs):
-        """
-        Extracts 7D minimal SE(3) pose: [φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper].
-        
-        φ is the rotation vector (log map of SO(3)) - axis-angle representation.
-        p is the translation vector.
-        """
+    def process_image(img, size):
+        if img is None:
+            return np.zeros((3, size[0], size[1]), dtype=np.uint8)
+        if hasattr(img, 'numpy'):
+            img = img.numpy()
+        img = cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
+        return np.transpose(img, (2, 0, 1))
+    
+    def get_pose(obs):
         pos = np.zeros(3, dtype=np.float32)
-        quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # Identity
-        
+        quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         rotvec = None
         
-        # 1. Try to get Pose
         if 'base_pose_tool_reached' in obs:
-            # Fractal: 7D [x, y, z, qx, qy, qz, qw]
             p7 = obs['base_pose_tool_reached'].numpy()
             pos = p7[:3]
             quat = p7[3:7]
         elif 'cartesian_position' in obs:
-            # Droid: 6D [x, y, z, rx, ry, rz] (Euler XYZ)
             p6 = obs['cartesian_position'].numpy()
             if p6.shape[0] == 6:
                 pos = p6[:3]
                 euler = p6[3:]
-                # Optimization: Convert directly to rotvec
                 rotvec = R.from_euler('xyz', euler).as_rotvec().astype(np.float32)
         elif 'ee_pose' in obs:
             p7 = obs['ee_pose'].numpy()
             pos = p7[:3]
             if p7.shape[0] >= 7:
                 quat = p7[3:7]
-        elif 'pose' in obs:
-            p7 = obs['pose'].numpy()
-            pos = p7[:3]
-            if p7.shape[0] >= 7:
-                quat = p7[3:7]
         
-        # Convert quaternion to rotation vector
         if rotvec is None:
-            rotvec = self._quat_to_rotvec(quat)
+            rotvec = quat_to_rotvec(quat)
         
-        # 2. Try to get Gripper
         g = 0.0
-        if 'gripper_closed' in obs: 
+        if 'gripper_closed' in obs:
             g = obs['gripper_closed'].numpy()
         elif 'gripper_position' in obs:
             g = obs['gripper_position'].numpy()
-        elif 'gripper_state' in obs: 
+        elif 'gripper_state' in obs:
             g = obs['gripper_state'].numpy()
-            
-        if not np.isscalar(g): 
+        
+        if not np.isscalar(g):
             g = g.item() if g.size == 1 else g[0]
         
-        # 3. Construct 7D minimal representation: [φ, p, gripper]
         pose7 = np.zeros(7, dtype=np.float32)
-        pose7[:3] = rotvec    # Rotation vector
-        pose7[3:6] = pos      # Translation
-        pose7[6] = g          # Gripper
+        pose7[:3] = rotvec
+        pose7[3:6] = pos
+        pose7[6] = g
         return pose7
     
-    def _compute_twist(self, pose_curr: np.ndarray, pose_next: np.ndarray) -> np.ndarray:
-        """
-        Compute ground truth twist: ξ = log(T_curr⁻¹ · T_next).
-        
-        The twist is the relative motion from pose_curr to pose_next
-        expressed in the Lie algebra se(3).
-        
-        Args:
-            pose_curr: 7D [φ, p, gripper] current pose
-            pose_next: 7D [φ, p, gripper] next pose
-            
-        Returns:
-            7D twist [ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]
-        """
-        # Build SE(3) matrices from poses
+    def compute_twist(pose_curr, pose_next):
         R_curr = R.from_rotvec(pose_curr[:3]).as_matrix()
         p_curr = pose_curr[3:6]
         T_curr = np.eye(4, dtype=np.float32)
@@ -206,137 +114,580 @@ class RTXStreamLoader(IterableDataset):
         T_next[:3, :3] = R_next
         T_next[:3, 3] = p_next
         
-        # Compute relative transform: T_rel = T_curr⁻¹ · T_next
         T_curr_inv = np.eye(4, dtype=np.float32)
         T_curr_inv[:3, :3] = R_curr.T
         T_curr_inv[:3, 3] = -R_curr.T @ p_curr
         
         T_rel = T_curr_inv @ T_next
         
-        # Extract twist using logarithmic map
-        # Use PyTorch utilities via numpy conversion
         T_rel_torch = torch.tensor(T_rel, dtype=torch.float32).unsqueeze(0)
-        xi = se3_log(T_rel_torch).squeeze(0).numpy()  # 6D twist
+        xi = se3_log(T_rel_torch).squeeze(0).numpy()
         
-        # Gripper delta (or just use next gripper state)
         gripper_delta = pose_next[6] - pose_curr[6]
         
-        # Combine to 7D
         twist7 = np.zeros(7, dtype=np.float32)
         twist7[:6] = xi
         twist7[6] = gripper_delta
         return twist7
+    
+    def segment_subtasks(props):
+        """Segment episode into subtasks based on gripper changes."""
+        grippers = props[:, 6]
+        is_closed = grippers > 0.5
+        changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
+        boundaries = np.concatenate([[0], changes, [len(props)]])
+        
+        segments = []
+        for i in range(len(boundaries) - 1):
+            start = boundaries[i]
+            end = boundaries[i + 1] - 1  # Inclusive end
+            if end < start:
+                end = start
+            
+            start_pose = props[start]
+            end_pose = props[end]
+            
+            # Determine task type from gripper change
+            if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+                task_type = 1  # Pick (gripper closing)
+            elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+                task_type = 2  # Place (gripper opening)
+            else:
+                task_type = 0  # Move (no change)
+            
+            segments.append({
+                'start_idx': start,
+                'end_idx': boundaries[i + 1],  # Exclusive for range ops
+                'start_pose': start_pose,
+                'end_pose': end_pose,
+                'task_type': task_type,
+            })
+        return segments
+    
+    def get_segment_for_frame(segments, frame_idx):
+        """Find which segment a frame belongs to."""
+        for seg in segments:
+            if seg['start_idx'] <= frame_idx < seg['end_idx']:
+                return seg
+        return segments[-1] if segments else None
+    
+    # Build dataset
+    try:
+        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        
+        if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
+            full_path = f"{data_dir}/{dataset_name}/0.1.0"
+            builder = tfds.builder_from_directory(builder_dir=full_path)
+        else:
+            builder = tfds.builder(dataset_name, data_dir=data_dir, try_gcs=True)
+        
+        ds = builder.as_dataset(split=split, shuffle_files=True, read_config=read_config)
+        ds = ds.repeat()
+        
+        fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
+        img_keys = [image_key] if image_key else fallback_keys
+        
+        buffer_size = window_size + loss_horizon
+        MAX_STEPS_PER_EPISODE = 200
+        MAX_EPISODES_BEFORE_REFRESH = 100
+        PRESTART_AT = 50
+        episode_count = 0
+        
+        for episode in ds:
+            if stop_event.is_set():
+                break
+            
+            episode_count += 1
+            
+            # Extract episode data to numpy
+            imgs = []
+            props = []
+            
+            for s in episode['steps']:
+                obs = s['observation']
+                
+                img = None
+                for key in img_keys:
+                    if key in obs:
+                        img = obs[key]
+                        break
+                
+                imgs.append(process_image(img, image_size))
+                props.append(get_pose(obs))
+            
+            if len(imgs) < buffer_size:
+                continue
+            
+            # Truncate very long episodes (keep last N steps)
+            if len(imgs) > MAX_STEPS_PER_EPISODE:
+                imgs = imgs[-MAX_STEPS_PER_EPISODE:]
+                props = props[-MAX_STEPS_PER_EPISODE:]
+            
+            imgs = np.array(imgs, dtype=np.float32)
+            props = np.array(props, dtype=np.float32)
+            
+            # Segment into subtasks BEFORE generating windows
+            segments = segment_subtasks(props)
+            
+            # Generate windows
+            num_windows = len(imgs) - window_size - loss_horizon + 1
+            
+            for w in range(num_windows):
+                if stop_event.is_set():
+                    break
+                
+                w_imgs = imgs[w : w + window_size]
+                w_props = props[w : w + window_size]
+                
+                # Find subtask for current window's last frame
+                current_frame = w + window_size - 1
+                seg = get_segment_for_frame(segments, current_frame)
+                
+                # Compute twists
+                target_twists = []
+                target_poses = []
+                start_idx = w + window_size - 1
+                
+                for h in range(loss_horizon):
+                    curr_idx = start_idx + h
+                    next_idx = curr_idx + 1
+                    twist = compute_twist(props[curr_idx], props[next_idx])
+                    target_twists.append(twist)
+                    target_poses.append(props[next_idx])
+                
+                # Send window via queue (blocks if queue full)
+                result_queue.put({
+                    'images': w_imgs,
+                    'proprio': w_props,
+                    'actions': np.array(target_twists, dtype=np.float32),
+                    'target_poses': np.array(target_poses, dtype=np.float32),
+                    # Subtask info for goal computation in main process
+                    'subtask_start_pose': seg['start_pose'] if seg else props[0],
+                    'subtask_end_pose': seg['end_pose'] if seg else props[-1],
+                    'subtask_type': seg['task_type'] if seg else 0,
+                })
+            
+            # Clear TF after each episode
+            tf.keras.backend.clear_session()
+            gc.collect()
+            
+            # Signal main process to start warming up next worker
+            if episode_count == PRESTART_AT:
+                result_queue.put({'prestart': True})
+            
+            # Proactive refresh - exit and let main process restart us
+            if episode_count >= MAX_EPISODES_BEFORE_REFRESH:
+                result_queue.put({'refresh': True})
+                return
+        
+        result_queue.put({'error': 'Worker episode loop ended unexpectedly'})
+            
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        result_queue.put({'error': error_msg})
 
+
+class RTXStreamLoader(IterableDataset):
+    """
+    Unified RTX Dataset Loader with Subtask-Based Goals.
+    
+    Goals are computed based on subtask boundaries (gripper changes), not window boundaries.
+    This means all windows within a pick/place/move segment share the same goal vector.
+    
+    Args:
+        use_subprocess: If True, run TensorFlow in a child process for memory isolation.
+                       Recommended for large datasets like DROID.
+                       If False, run TF in-process (may leak memory over time).
+    """
+    
+    def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
+                 loss_horizon=1, image_key=None, image_size=(128, 128), 
+                 shuffle_buffer_size=1000, data_dir=None, repeat=True,
+                 use_subprocess=True, queue_size=32):
+        self.dataset_name = dataset_name
+        self.split = split
+        self.batch_size = batch_size
+        self.window_size = window_size
+        self.loss_horizon = loss_horizon
+        self.image_key = image_key
+        self.image_size = image_size
+        self.shuffle_buffer_size = shuffle_buffer_size
+        self.data_dir = data_dir
+        self.repeat = repeat
+        self.use_subprocess = use_subprocess
+        self.queue_size = queue_size
+        
+        self.oracle = GoalOracle(output_dim=64)
+        
+        # Lazy-initialized for in-process mode
+        self.builder = None
+        self.ds = None
+        
+    def __len__(self):
+        """Returns the number of episodes in the dataset."""
+        if self.builder is None:
+            self._init_builder()
+        if self.builder:
+            return self.builder.info.splits[self.split].num_examples
+        return 0
+    
+    def _init_builder(self):
+        """Initialize TFDS builder (only for in-process mode or length queries)."""
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
+        import tensorflow_datasets as tfds
+        
+        if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
+            full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
+            self.builder = tfds.builder_from_directory(builder_dir=full_path)
+        else:
+            use_gcs = (self.data_dir is None)
+            self.builder = tfds.builder(self.dataset_name, data_dir=self.data_dir, try_gcs=use_gcs)
+    
+    def estimate_total_windows(self, avg_episode_length=100):
+        """Estimate total windows for progress tracking."""
+        num_episodes = len(self)
+        if num_episodes == 0:
+            return None
+        usable_steps = max(0, avg_episode_length - self.window_size - self.loss_horizon + 1)
+        return num_episodes * usable_steps
+    
+    def _start_worker(self, ctx, result_queue, stop_event):
+        """Start a new subprocess worker."""
+        worker = ctx.Process(
+            target=_episode_worker,
+            args=(
+                self.data_dir, self.dataset_name, self.split,
+                self.image_key, self.image_size,
+                self.window_size, self.loss_horizon,
+                result_queue, stop_event
+            )
+        )
+        worker.start()
+        return worker
+    
+    def _iter_subprocess(self):
+        """Iterator using subprocess for TF memory isolation."""
+        ctx = mp.get_context('spawn')
+        result_queue = ctx.Queue(maxsize=self.queue_size)
+        stop_event = ctx.Event()
+        
+        worker = self._start_worker(ctx, result_queue, stop_event)
+        next_worker = None
+        next_queue = None
+        next_stop_event = None
+        
+        restart_count = 0
+        max_restarts = 100
+        consecutive_timeouts = 0
+        max_consecutive_timeouts = 90
+        
+        try:
+            while True:
+                try:
+                    data = result_queue.get(timeout=10.0)
+                    consecutive_timeouts = 0
+                except queue.Empty:
+                    consecutive_timeouts += 1
+                    
+                    if consecutive_timeouts >= max_consecutive_timeouts:
+                        worker.terminate()
+                        worker.join(timeout=2.0)
+                        if worker.is_alive():
+                            worker.kill()
+                        consecutive_timeouts = 0
+                        restart_count += 1
+                        if restart_count > max_restarts:
+                            break
+                        worker = self._start_worker(ctx, result_queue, stop_event)
+                        continue
+                    
+                    if not worker.is_alive():
+                        restart_count += 1
+                        if restart_count > max_restarts:
+                            break
+                        worker = self._start_worker(ctx, result_queue, stop_event)
+                    continue
+                
+                if 'error' in data:
+                    restart_count += 1
+                    if restart_count > max_restarts:
+                        raise RuntimeError(f"Worker error after max restarts: {data['error']}")
+                    worker.terminate()
+                    worker.join(timeout=2.0)
+                    if next_worker is not None:
+                        next_stop_event.set()
+                        next_worker.terminate()
+                        next_worker = None
+                    worker = self._start_worker(ctx, result_queue, stop_event)
+                    continue
+                
+                if 'prestart' in data:
+                    if next_worker is None:
+                        next_queue = ctx.Queue(maxsize=self.queue_size)
+                        next_stop_event = ctx.Event()
+                        next_worker = self._start_worker(ctx, next_queue, next_stop_event)
+                    continue
+                
+                if 'refresh' in data:
+                    worker.join(timeout=2.0)
+                    if next_worker is not None:
+                        worker = next_worker
+                        result_queue = next_queue
+                        stop_event = next_stop_event
+                        next_worker = None
+                        next_queue = None
+                        next_stop_event = None
+                    else:
+                        worker = self._start_worker(ctx, result_queue, stop_event)
+                    continue
+                
+                # Compute goal using subtask poses (from worker)
+                goal_emb = self.oracle.encode_goal(
+                    data['subtask_type'],
+                    data['subtask_start_pose'],
+                    data['subtask_end_pose']
+                )
+                
+                yield {
+                    'images': torch.tensor(data['images'], dtype=torch.float32) / 255.0,
+                    'proprio': torch.tensor(data['proprio'], dtype=torch.float32),
+                    'goal': goal_emb,
+                    'actions': torch.tensor(data['actions'], dtype=torch.float32),
+                    'target_poses': torch.tensor(data['target_poses'], dtype=torch.float32),
+                }
+                
+        finally:
+            stop_event.set()
+            worker.terminate()
+            worker.join(timeout=5.0)
+            if worker.is_alive():
+                worker.kill()
+    
+    def _quat_to_rotvec(self, quat: np.ndarray) -> np.ndarray:
+        """Convert quaternion [qx, qy, qz, qw] to rotation vector."""
+        quat = quat / (np.linalg.norm(quat) + 1e-8)
+        return R.from_quat(quat).as_rotvec().astype(np.float32)
+    
+    def _get_pose(self, obs):
+        """Extract 7D minimal SE(3) pose: [φ, p, gripper]."""
+        pos = np.zeros(3, dtype=np.float32)
+        quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        rotvec = None
+        
+        if 'base_pose_tool_reached' in obs:
+            p7 = obs['base_pose_tool_reached'].numpy()
+            pos = p7[:3]
+            quat = p7[3:7]
+        elif 'cartesian_position' in obs:
+            p6 = obs['cartesian_position'].numpy()
+            if p6.shape[0] == 6:
+                pos = p6[:3]
+                euler = p6[3:]
+                rotvec = R.from_euler('xyz', euler).as_rotvec().astype(np.float32)
+        elif 'ee_pose' in obs:
+            p7 = obs['ee_pose'].numpy()
+            pos = p7[:3]
+            if p7.shape[0] >= 7:
+                quat = p7[3:7]
+        elif 'pose' in obs:
+            p7 = obs['pose'].numpy()
+            pos = p7[:3]
+            if p7.shape[0] >= 7:
+                quat = p7[3:7]
+        
+        if rotvec is None:
+            rotvec = self._quat_to_rotvec(quat)
+        
+        g = 0.0
+        if 'gripper_closed' in obs:
+            g = obs['gripper_closed'].numpy()
+        elif 'gripper_position' in obs:
+            g = obs['gripper_position'].numpy()
+        elif 'gripper_state' in obs:
+            g = obs['gripper_state'].numpy()
+        
+        if not np.isscalar(g):
+            g = g.item() if g.size == 1 else g[0]
+        
+        pose7 = np.zeros(7, dtype=np.float32)
+        pose7[:3] = rotvec
+        pose7[3:6] = pos
+        pose7[6] = g
+        return pose7
+    
+    def _compute_twist(self, pose_curr: np.ndarray, pose_next: np.ndarray) -> np.ndarray:
+        """Compute ground truth twist: ξ = log(T_curr⁻¹ · T_next)."""
+        R_curr = R.from_rotvec(pose_curr[:3]).as_matrix()
+        p_curr = pose_curr[3:6]
+        T_curr = np.eye(4, dtype=np.float32)
+        T_curr[:3, :3] = R_curr
+        T_curr[:3, 3] = p_curr
+        
+        R_next = R.from_rotvec(pose_next[:3]).as_matrix()
+        p_next = pose_next[3:6]
+        T_next = np.eye(4, dtype=np.float32)
+        T_next[:3, :3] = R_next
+        T_next[:3, 3] = p_next
+        
+        T_curr_inv = np.eye(4, dtype=np.float32)
+        T_curr_inv[:3, :3] = R_curr.T
+        T_curr_inv[:3, 3] = -R_curr.T @ p_curr
+        
+        T_rel = T_curr_inv @ T_next
+        
+        T_rel_torch = torch.tensor(T_rel, dtype=torch.float32).unsqueeze(0)
+        xi = se3_log(T_rel_torch).squeeze(0).numpy()
+        
+        gripper_delta = pose_next[6] - pose_curr[6]
+        
+        twist7 = np.zeros(7, dtype=np.float32)
+        twist7[:6] = xi
+        twist7[6] = gripper_delta
+        return twist7
+    
     def _process_image(self, img):
-        """Process image using pure numpy/cv2 - NO TensorFlow ops."""
-        if img is None: 
+        """Process image using cv2."""
+        import cv2
+        
+        if img is None:
             return np.zeros((3, 128, 128), dtype=np.float32)
         
-        # Convert TF tensor to numpy immediately
         if hasattr(img, 'numpy'):
             img = img.numpy()
         
-        # Resize using cv2 (pure numpy, no TF)
         img = cv2.resize(img, self.image_size, interpolation=cv2.INTER_LINEAR)
-        
-        # Normalize to [0, 1]
         img = img.astype(np.float32) / 255.0
-        
-        # Transpose to CHW format
         img = np.transpose(img, (2, 0, 1))
-        
         return img
-
-    def _stream_episode_windows(self, episode):
-        """
-        Process episode in CHUNKS to handle huge DROID episodes.
+    
+    def _segment_subtasks(self, props: np.ndarray):
+        """Segment episode into subtasks based on gripper changes."""
+        grippers = props[:, 6]
+        is_closed = grippers > 0.5
+        changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
+        boundaries = np.concatenate([[0], changes, [len(props)]])
         
-        DROID episodes can have 500+ high-res images = gigabytes.
-        We process in chunks of ~50 steps to limit memory.
-        """
-        CHUNK_SIZE = 50  # Process 50 steps at a time
-        buffer_size = self.window_size + self.loss_horizon
+        segments = []
+        for i in range(len(boundaries) - 1):
+            start = boundaries[i]
+            end = boundaries[i + 1] - 1
+            if end < start:
+                end = start
+            
+            start_pose = props[start]
+            end_pose = props[end]
+            
+            if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+                task_type = 1  # Pick
+            elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+                task_type = 2  # Place
+            else:
+                task_type = 0  # Move
+            
+            goal = self.oracle.encode_goal(task_type, start_pose, end_pose)
+            segments.append({
+                'start': start,
+                'end': boundaries[i + 1],
+                'goal': goal
+            })
+        return segments
+    
+    def _get_goal_for_frame(self, segments, frame_idx):
+        """Get goal for a given frame index."""
+        for seg in segments:
+            if seg['start'] <= frame_idx < seg['end']:
+                return seg['goal']
+        return segments[-1]['goal'] if segments else None
+    
+    def _iter_inprocess(self):
+        """Iterator using in-process TensorFlow (may leak memory)."""
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
+        tf.config.run_functions_eagerly(True)
+        import tensorflow_datasets as tfds
+        import cv2
         
-        # Fallback image keys
+        if self.builder is None:
+            self._init_builder()
+        
+        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        
+        if self.ds is None:
+            self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
+        
+        ds = self.ds
+        
+        options = tf.data.Options()
+        options.experimental_optimization.apply_default_optimizations = False
+        options.autotune.enabled = False
+        ds = ds.with_options(options)
+        
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            ds = ds.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+        
+        if self.repeat:
+            ds = ds.repeat()
+        
+        if self.shuffle_buffer_size > 1:
+            ds = ds.shuffle(self.shuffle_buffer_size)
+        
         fallback_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
         image_keys = [self.image_key] if self.image_key else fallback_keys
+        buffer_size = self.window_size + self.loss_horizon
         
-        # Accumulate data across chunks (keep only what's needed for windows)
-        all_imgs = []
-        all_props = []
-        
-        # Iterator over steps (don't convert to list!)
-        step_iterator = iter(episode['steps'])
-        
-        while True:
-            # Load one chunk of steps
-            chunk_imgs = []
-            chunk_props = []
+        for episode in ds:
+            # Extract full episode
+            imgs = []
+            props = []
             
-            for _ in range(CHUNK_SIZE):
-                try:
-                    s = next(step_iterator)
-                except StopIteration:
-                    break
-                
+            for s in episode['steps']:
                 obs = s['observation']
                 
-                # Process image
                 img = None
                 for key in image_keys:
                     if key in obs:
                         img = obs[key]
                         break
                 
-                if img is not None:
-                    processed_img = self._process_image(img)
-                else:
-                    processed_img = np.zeros((3, 128, 128), dtype=np.float32)
+                imgs.append(self._process_image(img))
+                props.append(self._get_pose(obs))
+            
+            if len(imgs) < buffer_size:
+                continue
+            
+            imgs = np.array(imgs, dtype=np.float32)
+            props = np.array(props, dtype=np.float32)
+            
+            # Segment into subtasks
+            segments = self._segment_subtasks(props)
+            
+            # Generate windows
+            num_windows = len(imgs) - self.window_size - self.loss_horizon + 1
+            
+            for w in range(num_windows):
+                w_imgs = imgs[w : w + self.window_size]
+                w_props = props[w : w + self.window_size]
                 
-                chunk_imgs.append(processed_img)
-                chunk_props.append(self._get_pose(obs))
+                current_frame = w + self.window_size - 1
+                goal_emb = self._get_goal_for_frame(segments, current_frame)
                 
-                # Delete step reference immediately
-                del s
-            
-            # If no new data, we're done
-            if len(chunk_imgs) == 0:
-                break
-            
-            # Clear TF session after each chunk to release decoded images
-            tf.keras.backend.clear_session()
-            gc.collect()
-            
-            # Add chunk to accumulated data
-            all_imgs.extend(chunk_imgs)
-            all_props.extend(chunk_props)
-            
-            # Yield windows that are now complete
-            while len(all_imgs) >= buffer_size:
-                w_imgs = np.array(all_imgs[:self.window_size], dtype=np.float32)
-                w_props = np.array(all_props[:self.window_size], dtype=np.float32)
-                
-                # Goal computation
-                start_pose = all_props[0]
-                end_pose = all_props[self.window_size - 1]
-                task_type = 0
-                if start_pose[6] < 0.5 and end_pose[6] > 0.5:
-                    task_type = 1
-                elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
-                    task_type = 2
-                goal_emb = self.oracle.encode_goal(task_type, start_pose, end_pose)
+                if goal_emb is None:
+                    continue
                 
                 # Compute twists
                 target_twists = []
                 target_poses = []
-                start_idx = self.window_size - 1
+                start_idx = w + self.window_size - 1
                 
                 for h in range(self.loss_horizon):
                     curr_idx = start_idx + h
                     next_idx = curr_idx + 1
-                    twist = self._compute_twist(all_props[curr_idx], all_props[next_idx])
+                    twist = self._compute_twist(props[curr_idx], props[next_idx])
                     target_twists.append(twist)
-                    target_poses.append(all_props[next_idx])
+                    target_poses.append(props[next_idx])
                 
                 yield {
                     'images': torch.tensor(w_imgs, dtype=torch.float32),
@@ -345,186 +696,13 @@ class RTXStreamLoader(IterableDataset):
                     'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
                     'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
                 }
-                
-                # Slide window: remove oldest frame
-                all_imgs.pop(0)
-                all_props.pop(0)
-        
-        # Cleanup
-        del all_imgs
-        del all_props
-        gc.collect()
-    
-    def _yield_windows(self, imgs, props):
-        """
-        Yield windows from pure numpy arrays. No TF references here.
-        """
-        total_steps = len(imgs)
-        
-        # 2. Identify Subtask Boundaries (gripper changes) for goal updates
-        grippers = props[:, 6]
-        is_closed = grippers > 0.5
-        # Find indices where gripper state changes
-        gripper_changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
-        # Add episode start and end
-        subtask_boundaries = np.concatenate([[0], gripper_changes, [total_steps]])
-        
-        # 3. Precompute goals for each subtask segment
-        # Each segment has a goal based on its start/end poses and task type
-        segment_goals = []
-        for i in range(len(subtask_boundaries) - 1):
-            seg_start = subtask_boundaries[i]
-            seg_end = subtask_boundaries[i + 1] - 1  # Last frame of segment
-            if seg_end <= seg_start:
-                seg_end = seg_start
             
-            start_pose = props[seg_start]
-            end_pose = props[seg_end]
-            
-            # Infer task type from gripper change
-            start_grip = start_pose[6]
-            end_grip = end_pose[6]
-            
-            task_type = 0  # Default: Move
-            if start_grip < 0.5 and end_grip > 0.5:
-                task_type = 1  # Pick
-            elif start_grip > 0.5 and end_grip < 0.5:
-                task_type = 2  # Place
-            
-            goal = self.oracle.encode_goal(task_type, start_pose, end_pose)
-            segment_goals.append({
-                'start': seg_start,
-                'end': subtask_boundaries[i + 1],  # Exclusive end
-                'goal': goal
-            })
-        
-        # Helper function to get goal for a given frame index
-        def get_goal_for_frame(frame_idx):
-            for seg in segment_goals:
-                if seg['start'] <= frame_idx < seg['end']:
-                    return seg['goal']
-            # Fallback to last segment's goal
-            return segment_goals[-1]['goal'] if segment_goals else self.oracle.encode_goal(0, props[0], props[-1])
-        
-        # 4. Sliding Window over entire episode
-        # Ensure we have enough future frames for loss_horizon steps after the window
-        num_windows = total_steps - self.window_size - self.loss_horizon + 1
-        
-        if num_windows <= 0:
-            return  # Episode too short for this window + horizon configuration
-        
-        for w in range(num_windows):
-            # Window frames: [w, w+window_size)
-            w_imgs = imgs[w : w + self.window_size]
-            w_props = props[w : w + self.window_size]
-            
-            # Goal is based on the LAST frame of the window (current context)
-            current_frame = w + self.window_size - 1
-            goal_emb = get_goal_for_frame(current_frame)
-            
-            # Starting pose: last frame of observation window
-            start_idx = w + self.window_size - 1
-            
-            # Compute twist targets for FUTURE steps (after the window)
-            target_twists = []
-            target_poses = []
-            
-            for h in range(self.loss_horizon):
-                curr_idx = start_idx + h
-                next_idx = curr_idx + 1
-                
-                twist = self._compute_twist(props[curr_idx], props[next_idx])
-                target_twists.append(twist)
-                target_poses.append(props[next_idx])
-            
-            yield {
-                'images': torch.tensor(w_imgs, dtype=torch.float32),
-                'proprio': torch.tensor(w_props, dtype=torch.float32),
-                'goal': goal_emb,
-                'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
-                'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
-            }
-
-    def __iter__(self):
-        # Load dataset in streaming mode
-        # Disable autocache to prevent TFDS from loading typically "small" datasets into RAM
-        # which defeats the purpose of streaming huge robotics datasets.
-        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
-        
-        if self.ds is None:
-            # We must use the same read_config for both cases
-            if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
-            else:
-                self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
-            
-        ds = self.ds
-        
-        # CRITICAL: Disable ALL TF data optimizations and prefetching
-        # This prevents TF from accumulating internal buffers
-        options = tf.data.Options()
-        options.experimental_optimization.apply_default_optimizations = False
-        options.autotune.enabled = False
-        ds = ds.with_options(options)
-            
-        # Sharding for PyTorch DataLoader Workers
-        # This ensures each worker processes a unique slice of the dataset
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            # tf.data.Dataset.shard(num_shards, index)
-            ds = ds.shard(num_shards=worker_info.num_workers, index=worker_info.id)
-            
-        # Repeat indefinitely ONLY if requested
-        # Note: Repeat should generally come after shard to ensure we repeat the shard
-        if self.repeat:
-            ds = ds.repeat()
-            
-        # Only shuffle if buffer is significant (>1) to save RAM
-        # Droid images are huge; buffering 10+ episodes can OOM 64GB RAM.
-        if self.shuffle_buffer_size > 1:
-            ds = ds.shuffle(self.shuffle_buffer_size)
-        
-        MAX_EPISODES_PER_ITERATOR = 50  # Recreate iterator every 50 episodes
-        episode_count = 0
-        
-        while True:
-            # Create fresh iterator
-            episode_iterator = iter(ds)
-            
-            try:
-                while episode_count < MAX_EPISODES_PER_ITERATOR:
-                    try:
-                        episode = next(episode_iterator)
-                    except StopIteration:
-                        if not self.repeat:
-                            return  # Dataset exhausted
-                        break  # Should not happen with repeat, recreate iterator
-                    
-                    episode_count += 1
-                    
-                    # STREAMING APPROACH: Yields windows with O(window_size) memory
-                    yield from self._stream_episode_windows(episode)
-                    
-                    # Cleanup after episode
-                    del episode
-                    gc.collect()
-            finally:
-                # Release iterator to free TF internal buffers
-                del episode_iterator
-            
-            # Reset for next batch of episodes
-            episode_count = 0
-            
-            # Clear TF session to release internal caches
+            # Cleanup
             tf.keras.backend.clear_session()
             gc.collect()
-            
-            # Anti-Fragmentation for Persistent Workers (Linux only)
-            import platform
-            if platform.system() == 'Linux':
-                try:
-                    import ctypes
-                    libc = ctypes.CDLL("libc.so.6")
-                    libc.malloc_trim(0)
-                except Exception:
-                    pass
+    
+    def __iter__(self):
+        if self.use_subprocess:
+            yield from self._iter_subprocess()
+        else:
+            yield from self._iter_inprocess()

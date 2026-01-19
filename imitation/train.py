@@ -18,10 +18,8 @@ from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.utils.mp_utils import NoDaemonContext
 from src.models.axis import AxisModel
 from imitation.data.rtx_stream_loader import RTXStreamLoader
-from imitation.data.subprocess_loader import SubprocessTFDSLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
@@ -46,9 +44,7 @@ def setup_logging(verbose: int = 1):
     )
     return logging.getLogger(__name__)
 
-# --- Multiprocessing Fix for Nested Subprocesses ---
-# We use a custom context from utils to allow DataLoader workers to spawn children
-from src.utils.mp_utils import NoDaemonContext
+
 
 log = logging.getLogger(__name__)
 
@@ -181,16 +177,10 @@ def train(args):
     
     def create_dataloader(batch_size, shuffle_buffer, num_workers, split='train'):
         """Factory function to create/recreate dataloader with specified params."""
-        # Split logic: 'train[:95%]' vs 'train[95%:]'
-        # Note: shuffle_buffer only applies to training
-        is_train = '[:' in split or split == 'train'
+        log.info(f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}")
         
-        log.info(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
-        
-        # SubprocessTFDSLoader isolates TensorFlow in a child process
-        # When the child dies, ALL TF memory is released by the OS
-        log.info("Using SubprocessTFDSLoader for TF memory isolation")
-        stream = SubprocessTFDSLoader(
+        # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
+        stream = RTXStreamLoader(
             data_dir=args.data_dir,
             dataset_name=args.dataset,
             split=split,
@@ -198,27 +188,21 @@ def train(args):
             image_size=(128, 128),
             window_size=config['window_size'],
             loss_horizon=args.loss_horizon,
+            shuffle_buffer_size=shuffle_buffer,
+            use_subprocess=args.use_subprocess,
             queue_size=64,
         )
         
-        if num_workers == 0:
-            loader = torch.utils.data.DataLoader(
-                stream, 
-                batch_size=batch_size,
-                num_workers=0,
-                pin_memory=False
-            )
-        else:
-            # Use NoDaemonContext to allow workers to spawn their own subprocesses
-            loader = torch.utils.data.DataLoader(
-                stream, 
-                batch_size=batch_size,
-                num_workers=num_workers,
-                pin_memory=False,
-                prefetch_factor=2,
-                persistent_workers=True,
-                multiprocessing_context=NoDaemonContext()
-            )
+        # When use_subprocess=True, the loader handles parallelism internally
+        # so we use num_workers=0 for the DataLoader
+        effective_workers = 0 if args.use_subprocess else num_workers
+        
+        loader = torch.utils.data.DataLoader(
+            stream, 
+            batch_size=batch_size,
+            num_workers=effective_workers,
+            pin_memory=False
+        )
         return loader, stream
     
     # Create initial dataloader
@@ -778,8 +762,10 @@ if __name__ == "__main__":
     parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
     parser.add_argument('--save_gif', action='store_true', help="Enable GIF generation (memory intensive)")
     parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
-    parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers")
+    parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers (used when use_subprocess=False)")
     parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
+    parser.add_argument('--use_subprocess', action='store_true', default=True, help="Run TensorFlow in subprocess for memory isolation (recommended for DROID)")
+    parser.add_argument('--no_subprocess', action='store_false', dest='use_subprocess', help="Run TensorFlow in-process (may leak memory)")
     parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss")
     parser.add_argument('--confidence_temperature', type=float, default=1.0, help="Temperature for confidence target: confidence = exp(-loss/temp). Lower = more sensitive to errors.")
 
