@@ -188,7 +188,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
         img_keys = [image_key] if image_key else fallback_keys
         
         buffer_size = window_size + loss_horizon
-        MAX_STEPS_PER_EPISODE = 200
+        MAX_STEPS_PER_EPISODE = 400
         MAX_EPISODES_BEFORE_REFRESH = 100
         PRESTART_AT = 50
         episode_count = 0
@@ -657,6 +657,12 @@ class RTXStreamLoader(IterableDataset):
             
             if len(imgs) < buffer_size:
                 continue
+            
+            # Truncate very long episodes (keep last N steps) - same as subprocess mode
+            MAX_STEPS_PER_EPISODE = 400
+            if len(imgs) > MAX_STEPS_PER_EPISODE:
+                imgs = imgs[-MAX_STEPS_PER_EPISODE:]
+                props = props[-MAX_STEPS_PER_EPISODE:]
             
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
