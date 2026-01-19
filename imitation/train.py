@@ -211,7 +211,7 @@ def train(args):
     
     dataloader, train_stream = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
     if args.dataset == 'droid':
-        avg_episode_length = 400
+        avg_episode_length = 250
     else:
         avg_episode_length = 100
     # Estimate total windows for progress tracking (if method exists)
