@@ -50,6 +50,8 @@ def setup_logging(verbose: int = 1):
 # We use a custom context from utils to allow DataLoader workers to spawn children
 from src.utils.mp_utils import NoDaemonContext
 
+log = logging.getLogger(__name__)
+
 def train(args):
     # Setup logging based on verbosity
     global log
