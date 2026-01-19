@@ -16,12 +16,12 @@ from tqdm import tqdm
 import shutil
 from datetime import datetime
 
-# Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.utils.mp_utils import NoDaemonContext
 from src.models.axis import AxisModel
 from imitation.data.rtx_stream_loader import RTXStreamLoader
-from imitation.data.subprocess_loader import SubprocessDROIDLoader
+from imitation.data.subprocess_loader import SubprocessTFDSLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
@@ -46,8 +46,9 @@ def setup_logging(verbose: int = 1):
     )
     return logging.getLogger(__name__)
 
-log = logging.getLogger(__name__)
-
+# --- Multiprocessing Fix for Nested Subprocesses ---
+# We use a custom context from utils to allow DataLoader workers to spawn children
+from src.utils.mp_utils import NoDaemonContext
 
 def train(args):
     # Setup logging based on verbosity
@@ -184,10 +185,10 @@ def train(args):
         
         log.info(f"Creating dataloader ({split}): batch_size={batch_size}, shuffle_buffer={shuffle_buffer}, workers={num_workers}")
         
-        # SubprocessDROIDLoader isolates TensorFlow in a child process
+        # SubprocessTFDSLoader isolates TensorFlow in a child process
         # When the child dies, ALL TF memory is released by the OS
-        log.info("Using SubprocessDROIDLoader for TF memory isolation")
-        stream = SubprocessDROIDLoader(
+        log.info("Using SubprocessTFDSLoader for TF memory isolation")
+        stream = SubprocessTFDSLoader(
             data_dir=args.data_dir,
             dataset_name=args.dataset,
             split=split,
@@ -198,7 +199,6 @@ def train(args):
             queue_size=64,
         )
         
-        # Handle num_workers=0 case (no prefetch_factor or persistent_workers)
         if num_workers == 0:
             loader = torch.utils.data.DataLoader(
                 stream, 
@@ -207,13 +207,15 @@ def train(args):
                 pin_memory=False
             )
         else:
+            # Use NoDaemonContext to allow workers to spawn their own subprocesses
             loader = torch.utils.data.DataLoader(
                 stream, 
                 batch_size=batch_size,
                 num_workers=num_workers,
                 pin_memory=False,
                 prefetch_factor=2,
-                persistent_workers=True
+                persistent_workers=True,
+                multiprocessing_context=NoDaemonContext()
             )
         return loader, stream
     

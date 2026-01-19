@@ -239,7 +239,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size, window
         result_queue.put({'error': error_msg})
 
 
-class SubprocessDROIDLoader(IterableDataset):
+class SubprocessTFDSLoader(IterableDataset):
     """
     Data loader that runs TensorFlow in a subprocess.
     
