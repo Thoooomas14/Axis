@@ -1,6 +1,8 @@
 # Data Pipeline (V2)
 
-Axis V2 uses a streaming data pipeline designed for large robotics datasets from Google Cloud Storage.
+Axis V2 supports two data loading modes:
+1. **Streaming**: Direct from GCS via RTXStreamLoader (default)
+2. **Local**: From preprocessed HDF5 via LocalDataLoader (faster, lower RAM)
 
 ## Components
 
@@ -138,3 +140,59 @@ for batch in loader:
     goal = batch['goal']          # (B, 64)
     actions = batch['actions']    # (B, 8, 7)
 ```
+
+---
+
+## Local Data Loading (Recommended for Large Datasets)
+
+For large datasets like DROID, preprocessing once and loading locally is recommended.
+
+### 1. Preprocessor (`imitation/data/preprocessor.py`)
+
+One-time script to extract and save minimal episode data:
+
+```bash
+# Preprocess DROID
+python -m imitation.data.preprocessor --output E:/data/droid.h5 --dataset droid
+
+# Preprocess Fractal
+python -m imitation.data.preprocessor --output E:/data/fractal.h5 \
+    --dataset fractal20220817_data --data_dir gs://gresearch/robotics
+
+# Test with subset
+python -m imitation.data.preprocessor --output ./test.h5 --max_episodes 10
+```
+
+**Stored per episode:**
+| Field | Shape | Dtype |
+|-------|-------|-------|
+| images | (T, 3, 128, 128) | uint8 |
+| proprio | (T, 7) | float32 |
+
+### 2. LocalDataLoader (`imitation/data/local_loader.py`)
+
+Loads preprocessed data and computes windowing, goals, twists at load time:
+
+```python
+from imitation.data.local_loader import LocalDataLoader
+
+loader = LocalDataLoader(
+    data_path='E:/data/droid.h5',
+    window_size=8,
+    loss_horizon=1,
+)
+
+for batch in loader:
+    # Same format as RTXStreamLoader
+    images = batch['images']      # (B, W, 3, 128, 128)
+    proprio = batch['proprio']    # (B, W, 7)
+    goal = batch['goal']          # (B, 64)
+```
+
+### 3. Train from Local Data
+
+```bash
+python imitation/train.py --local_data_path E:/data/droid.h5 --steps 10000
+```
+
+> **Note**: When `--local_data_path` is set, streaming args (`--dataset`, `--data_dir`, etc.) are ignored.

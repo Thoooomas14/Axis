@@ -20,6 +20,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.axis import AxisModel
 from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.local_loader import LocalDataLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
@@ -175,27 +176,41 @@ def train(args):
     effective_shuffle_buffer = args.shuffle_buffer_size
     effective_num_workers = args.num_workers
     
-    def create_dataloader(batch_size, shuffle_buffer, num_workers, split='train'):
+    def create_dataloader(batch_size, shuffle_buffer, num_workers, split='train', split_start=0.0, split_end=1.0):
         """Factory function to create/recreate dataloader with specified params."""
-        log.info(f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}")
         
-        # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
-        stream = RTXStreamLoader(
-            data_dir=args.data_dir,
-            dataset_name=args.dataset,
-            split=split,
-            image_key=args.image_key,
-            image_size=(128, 128),
-            window_size=config['window_size'],
-            loss_horizon=args.loss_horizon,
-            shuffle_buffer_size=shuffle_buffer,
-            use_subprocess=args.use_subprocess,
-            queue_size=64,
-        )
-        
-        # When use_subprocess=True, the loader handles parallelism internally
-        # so we use num_workers=0 for the DataLoader
-        effective_workers = 0 if args.use_subprocess else num_workers
+        # Use local loader if local_data_path is provided
+        if args.local_data_path:
+            log.info(f"Creating LOCAL dataloader: batch_size={batch_size}, split=[{split_start:.0%}-{split_end:.0%}]")
+            stream = LocalDataLoader(
+                data_path=args.local_data_path,
+                window_size=config['window_size'],
+                loss_horizon=args.loss_horizon,
+                shuffle=('train' in str(split_start) or split_start == 0.0),
+                repeat=(args.epochs == 0),
+                split_start=split_start,
+                split_end=split_end,
+            )
+            # Local loader supports multi-worker
+            effective_workers = num_workers
+        else:
+            log.info(f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}")
+            
+            # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
+            stream = RTXStreamLoader(
+                data_dir=args.data_dir,
+                dataset_name=args.dataset,
+                split=split,
+                image_key=args.image_key,
+                image_size=(128, 128),
+                window_size=config['window_size'],
+                loss_horizon=args.loss_horizon,
+                shuffle_buffer_size=shuffle_buffer,
+                use_subprocess=args.use_subprocess,
+                queue_size=64,
+            )
+            # When use_subprocess=True, the loader handles parallelism internally
+            effective_workers = 0 if args.use_subprocess else num_workers
         
         loader = torch.utils.data.DataLoader(
             stream, 
@@ -206,17 +221,21 @@ def train(args):
         return loader, stream
     
     # Create initial dataloader
+    # For streaming: use TFDS split syntax; for local: use split_start/split_end
     train_split = f'train[:{int(args.train_split_pct*100)}%]'
     val_split = f'train[{int(args.train_split_pct*100)}%:]'
     
-    dataloader, train_stream = create_dataloader(effective_batch_size, effective_shuffle_buffer, effective_num_workers, split=train_split)
+    dataloader, train_stream = create_dataloader(
+        effective_batch_size, effective_shuffle_buffer, effective_num_workers, 
+        split=train_split, split_start=0.0, split_end=args.train_split_pct
+    )
     if args.dataset == 'droid':
         avg_episode_length = 250
     else:
         avg_episode_length = 100
     # Estimate total windows for progress tracking (if method exists)
     if hasattr(train_stream, 'estimate_total_windows'):
-        estimated_windows = train_stream.estimate_total_windows(avg_episode_length=avg_episode_length)
+        estimated_windows = train_stream.estimate_total_windows() if args.local_data_path else train_stream.estimate_total_windows(avg_episode_length=avg_episode_length)
         estimated_batches = estimated_windows // effective_batch_size if estimated_windows else None
         if estimated_batches:
             log.info(f"Estimated ~{estimated_windows:,} windows ({estimated_batches:,} batches) per epoch")
@@ -225,8 +244,10 @@ def train(args):
         log.info("Progress estimation not available for subprocess loader")
     
     # Validation Dataloader (smaller batch size to save memory if needed)
-    # We use 0 workers for val to save overhead
-    val_dataloader, _ = create_dataloader(args.val_batch_size, 0, 0, split=val_split)
+    val_dataloader, _ = create_dataloader(
+        args.val_batch_size, 0, 0, 
+        split=val_split, split_start=args.train_split_pct, split_end=1.0
+    )
     
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
     
@@ -727,47 +748,90 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Training Args
-    parser.add_argument('--dataset', type=str, default='fractal20220817_data', help="Dataset name")
-    parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics', help="Data directory (local or GCS)")
+    
+    # === Data Source Args ===
+    # Option 1: Stream from GCS (default)
+    parser.add_argument('--dataset', type=str, default='fractal20220817_data', 
+                        help="Dataset name for streaming: droid, fractal20220817_data, etc.")
+    parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics', 
+                        help="TFDS data directory for streaming (default: GCS)")
+    parser.add_argument('--image_key', type=str, default=None, 
+                        help="Image key for streaming (e.g., exterior_image_1_left)")
+    
+    # Option 2: Load from preprocessed local file (overrides streaming)
+    parser.add_argument('--local_data_path', type=str, default=None, 
+                        help="Path to preprocessed HDF5 file. If set, uses LocalDROIDLoader instead of streaming.")
+    
+    # Streaming-specific (ignored when using --local_data_path)
+    parser.add_argument('--no_subprocess', action='store_true', 
+                        help="[Streaming] Disable subprocess isolation (default: subprocess enabled)")
+    parser.add_argument('--shuffle_buffer_size', type=int, default=10, 
+                        help="[Streaming] Shuffle buffer size (episodes) for TFDS")
+    
+    # === Training Args ===
     parser.add_argument('--steps', type=int, default=10000, help="Number of training steps")
-    parser.add_argument('--epochs', type=int, default=0, help="Number of training epochs (overrides steps if > 0)")
+    parser.add_argument('--epochs', type=int, default=0, help="Number of epochs (0 = use steps instead)")
     parser.add_argument('--batch_size', type=int, default=1, help="Batch size")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
-    parser.add_argument('--warmup_steps', type=int, default=1000, help="Number of warmup steps for LR scheduler")
-    parser.add_argument('--save_interval', type=int, default=1000, help="Interval to save checkpoints")
+    parser.add_argument('--warmup_steps', type=int, default=1000, help="LR warmup steps")
+    parser.add_argument('--window_size', type=int, default=10, help="Sliding window size")
+    parser.add_argument('--num_workers', type=int, default=0, help="DataLoader workers")
+    
+    # === Checkpointing ===
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help="Checkpoint directory")
+    parser.add_argument('--save_interval', type=int, default=1000, help="Steps between checkpoints")
     parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
-    parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop training after N minutes')
-    parser.add_argument('--window_size', type=int, default=10, help="Sliding window size for temporal context")
-    parser.add_argument('--image_key', type=str, default=None, help="Explicit image key (e.g., 'exterior_image_1_left' for DROID). If not set, uses fallback order.")
+    parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop after N minutes (0=no limit)')
     
-    # Visualization Args
-    parser.add_argument('--viz', action='store_true', help="Enable visualization during training")
-    parser.add_argument('--save_gif', action='store_true', help="Enable GIF generation (memory intensive)")
-    parser.add_argument('--viz_interval', type=int, default=1000, help="Step interval for visualization")
-    parser.add_argument('--num_workers', type=int, default=0, help="Number of dataloader workers (used when use_subprocess=False)")
-    parser.add_argument('--shuffle_buffer_size', type=int, default=10, help="Shuffle buffer size (episodes) for TFDS (keep low for memory!)")
-    parser.add_argument('--use_subprocess', action='store_true', default=True, help="Run TensorFlow in subprocess for memory isolation (recommended for DROID)")
-    parser.add_argument('--no_subprocess', action='store_false', dest='use_subprocess', help="Run TensorFlow in-process (may leak memory)")
-    parser.add_argument('--requery_weight', type=float, default=1.0, help="Weight for requery loss")
-    parser.add_argument('--confidence_temperature', type=float, default=1.0, help="Temperature for confidence target: confidence = exp(-loss/temp). Lower = more sensitive to errors.")
+    # === Visualization ===
+    parser.add_argument('--viz', action='store_true', help="Enable visualization")
+    parser.add_argument('--save_gif', action='store_true', help="Enable GIF generation")
+    parser.add_argument('--viz_interval', type=int, default=1000, help="Steps between visualizations")
 
-    # Validation Args
-    parser.add_argument('--train_split_pct', type=float, default=0.95, help="Percentage of data to use for training (remainder for validation)")
-    parser.add_argument('--val_interval', type=int, default=5000, help="Step interval for validation")
-    parser.add_argument('--val_batch_size', type=int, default=1, help="Batch size for validation")
-    parser.add_argument('--val_batches', type=int, default=50, help="Number of batches to run during validation")
+    # === Loss Function ===
+    parser.add_argument('--loss_horizon', type=int, default=1, 
+                        help="Twist steps to rollout before loss (1 <= horizon <= window_size)")
+    parser.add_argument('--omega_rot', type=float, default=1.0, help="Rotation loss weight")
+    parser.add_argument('--omega_trans', type=float, default=1.0, help="Translation loss weight")
+    parser.add_argument('--requery_weight', type=float, default=1.0, help="Requery loss weight")
+    parser.add_argument('--confidence_temperature', type=float, default=1.0, 
+                        help="Temperature for confidence target: exp(-loss/temp)")
+
+    # === Validation ===
+    parser.add_argument('--train_split_pct', type=float, default=0.95, help="Train split percentage")
+    parser.add_argument('--val_interval', type=int, default=5000, help="Steps between validation")
+    parser.add_argument('--val_batch_size', type=int, default=1, help="Validation batch size")
+    parser.add_argument('--val_batches', type=int, default=50, help="Batches per validation run")
     
-    # SE(3) Geodesic Loss Weights
-    parser.add_argument('--omega_rot', type=float, default=1.0, help="Weight for rotational error in geodesic loss")
-    parser.add_argument('--omega_trans', type=float, default=1.0, help="Weight for translational error in geodesic loss")
-    parser.add_argument('--loss_horizon', type=int, default=1, help="Number of twist steps to apply before computing loss (1=immediate, W=full chunk). Must be 1 <= loss_horizon <= window_size.")
-    
-    # Logging
-    parser.add_argument('--verbose', type=int, default=2, help="Logging verbosity: 0=WARNING, 1=INFO, 2=DEBUG")
+    # === Logging ===
+    parser.add_argument('--verbose', type=int, default=2, help="Verbosity: 0=WARNING, 1=INFO, 2=DEBUG")
 
     args = parser.parse_args()
+    
+    # === Arg Validation & Conflict Warnings ===
+    # Convert no_subprocess to use_subprocess (inverted logic)
+    args.use_subprocess = not args.no_subprocess
+    
+    # Warn about conflicting/ignored args when using local data
+    if args.local_data_path:
+        ignored_args = []
+        
+        if args.dataset != 'fractal20220817_data':  # Non-default
+            ignored_args.append(f"--dataset={args.dataset}")
+        if args.data_dir != 'gs://gresearch/robotics':  # Non-default
+            ignored_args.append(f"--data_dir={args.data_dir}")
+        if args.image_key is not None:
+            ignored_args.append(f"--image_key={args.image_key}")
+        if args.no_subprocess:
+            ignored_args.append("--no_subprocess")
+        if args.shuffle_buffer_size != 10:  # Non-default
+            ignored_args.append(f"--shuffle_buffer_size={args.shuffle_buffer_size}")
+        
+        if ignored_args:
+            import warnings
+            warnings.warn(
+                f"Using --local_data_path, the following streaming args are IGNORED: {', '.join(ignored_args)}"
+            )
     
     # Validate loss_horizon
     if args.loss_horizon < 1 or args.loss_horizon > args.window_size:

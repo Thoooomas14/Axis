@@ -6,7 +6,7 @@ This document outlines how to train the Axis V2 model.
 
 The core training logic handles:
 1. Model initialization with 7D SE(3) poses and twist actions
-2. Dataset streaming from GCS via RTXStreamLoader
+2. Dataset loading: streaming from GCS **or** local preprocessed HDF5
 3. Action chunking - model predicts W future actions simultaneously
 4. Self-supervised confidence training (requery signal)
 5. Dynamic OOM recovery
@@ -74,16 +74,29 @@ This teaches the model to predict its own accuracy - when to ask for help vs. pr
 
 ## Data Loading
 
-### RTXStreamLoader
+### Option 1: Streaming (default)
 
-Streams data from Google Cloud Storage in RLDS format:
+**RTXStreamLoader** streams data from Google Cloud Storage in RLDS format:
 - **Pose Format**: Converts raw 8D poses (pos + quaternion + gripper) to 7D minimal SE(3)
 - **Twist Computation**: Calculates ground truth twists using `log(T_curr⁻¹ · T_next)`
 - **Continuous Episodes**: Processes full episodes without subtask splitting
 - **Dynamic Goals**: Goal vector updates when gripper state changes
-- **Windowing**: Ensures `loss_horizon` future steps exist after each window
 
-### GCS Authentication
+### Option 2: Local Preprocessed (recommended for large datasets)
+
+**LocalDataLoader** loads from preprocessed HDF5 files:
+
+```bash
+# 1. Preprocess once (supports external drives)
+python -m imitation.data.preprocessor --output E:/data/droid.h5 --dataset droid
+
+# 2. Train from local
+python imitation/train.py --local_data_path E:/data/droid.h5
+```
+
+> When `--local_data_path` is set, streaming args are ignored (with warning).
+
+### GCS Authentication (streaming only)
 
 ```bash
 # Local machine with browser
@@ -111,17 +124,25 @@ python imitation/train.py \
 
 ## CLI Arguments
 
+### Data Source
+| Argument | Description | Default |
+|:---|:---|:---|
+| `--dataset` | [Streaming] TFDS dataset name | `fractal20220817_data` |
+| `--data_dir` | [Streaming] Data directory (GCS) | `gs://gresearch/robotics` |
+| `--image_key` | [Streaming] Image key to use | auto |
+| `--local_data_path` | Path to preprocessed HDF5 (overrides streaming) | None |
+| `--no_subprocess` | [Streaming] Disable subprocess isolation | False |
+| `--shuffle_buffer_size` | [Streaming] TFDS shuffle buffer | 10 |
+
 ### Core Training
 | Argument | Description | Default |
 |:---|:---|:---|
-| `--dataset` | TFDS dataset name | `fractal20220817_data` |
-| `--data_dir` | Data directory (local or GCS) | `gs://gresearch/robotics` |
 | `--steps` | Training steps (if epochs=0) | 10000 |
 | `--epochs` | Training epochs (overrides steps if >0) | 0 |
 | `--batch_size` | Batch size | 1 |
 | `--lr` | Learning rate | 1e-4 |
 | `--warmup_steps` | LR warmup steps | 1000 |
-| `--window_size` | Sliding window / action chunk size | 8 |
+| `--window_size` | Sliding window / action chunk size | 10 |
 
 ### Loss Weights
 | Argument | Description | Default |
