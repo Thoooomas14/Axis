@@ -15,6 +15,7 @@ import os
 import sys
 import argparse
 import gc
+import shutil
 from pathlib import Path
 
 # Suppress TF logs
@@ -29,6 +30,15 @@ from scipy.spatial.transform import Rotation as R
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+
+def get_free_space_gb(path: Path) -> float:
+    """Get free disk space in GB for the drive containing path."""
+    try:
+        total, used, free = shutil.disk_usage(path.parent)
+        return free / (1024 ** 3)
+    except Exception:
+        return float('inf')  # If we can't check, assume infinite
 
 
 def quat_to_rotvec(quat: np.ndarray) -> np.ndarray:
@@ -158,22 +168,62 @@ def preprocess_dataset(args):
     # Metadata collection
     episode_lengths = []
     
-    # Create HDF5 file
-    with h5py.File(output_path, 'w') as f:
-        # Store metadata
-        f.attrs['dataset'] = args.dataset
-        f.attrs['data_dir'] = args.data_dir or 'gcs'
-        f.attrs['image_size'] = args.image_size
-        f.attrs['image_key'] = args.image_key or 'auto'
+    # Check for resume
+    resume_from = 0
+    skip_count = 0
+    file_mode = 'w'
+    
+    if output_path.exists() and not args.overwrite:
+        try:
+            with h5py.File(output_path, 'r') as existing:
+                # Count existing episodes
+                episode_keys = [k for k in existing.keys() if k.startswith('episode_')]
+                resume_from = len(episode_keys)
+                
+                if resume_from > 0:
+                    print(f"\nResuming from existing file with {resume_from} episodes")
+                    # Load existing episode lengths for metadata
+                    for key in sorted(episode_keys):
+                        if 'length' in existing[key].attrs:
+                            episode_lengths.append(existing[key].attrs['length'])
+                    
+                    file_mode = 'a'  # Append mode
+                    # We need to skip episodes in the dataset
+                    # Account for skipped short episodes (estimate ~0.5% skip rate from user's run)
+                    skip_count = resume_from + int(resume_from * 0.006)
+                    print(f"Will skip ~{skip_count} episodes from dataset to resume")
+        except Exception as e:
+            print(f"Could not read existing file: {e}")
+            print("Starting fresh...")
+            file_mode = 'w'
+            resume_from = 0
+            episode_lengths = []
+    
+    # Open HDF5 file
+    with h5py.File(output_path, file_mode) as f:
+        # Store metadata (only on fresh start)
+        if file_mode == 'w':
+            f.attrs['dataset'] = args.dataset
+            f.attrs['data_dir'] = args.data_dir or 'gcs'
+            f.attrs['image_size'] = args.image_size
+            f.attrs['image_key'] = args.image_key or 'auto'
         
-        episode_idx = 0
+        episode_idx = resume_from
         skipped = 0
+        ds_episode_idx = 0
         
-        pbar = tqdm(ds, total=total_episodes, desc="Processing episodes")
+        pbar = tqdm(ds, total=total_episodes, desc="Processing episodes", initial=resume_from)
         
         for episode in pbar:
             if args.max_episodes > 0 and episode_idx >= args.max_episodes:
                 break
+            
+            # Skip already-processed episodes when resuming
+            ds_episode_idx += 1
+            if ds_episode_idx <= skip_count:
+                if ds_episode_idx % 1000 == 0:
+                    pbar.set_description(f"Skipping to resume point ({ds_episode_idx}/{skip_count})")
+                continue
             
             # Extract episode data
             imgs = []
@@ -202,16 +252,47 @@ def preprocess_dataset(args):
             imgs = np.array(imgs, dtype=np.uint8)    # (T, 3, H, W)
             props = np.array(props, dtype=np.float32) # (T, 7)
             
-            # Create episode group
-            ep_group = f.create_group(f'episode_{episode_idx:06d}')
+            # Check disk space before writing (minimum 2GB buffer)
+            free_space = get_free_space_gb(output_path)
+            if free_space < args.min_free_space_gb:
+                print(f"\n\n{'='*60}")
+                print(f"WARNING: Disk space low ({free_space:.2f} GB < {args.min_free_space_gb} GB)")
+                print(f"Stopping gracefully to prevent file corruption.")
+                print(f"{'='*60}\n")
+                # Remove the last episode length since we didn't write it
+                episode_lengths.pop()
+                break
             
-            # Save with compression
-            ep_group.create_dataset('images', data=imgs, compression='gzip', compression_opts=4)
-            ep_group.create_dataset('proprio', data=props, compression='gzip', compression_opts=4)
-            ep_group.attrs['length'] = len(imgs)
+            # Try to write episode - catch disk full errors
+            try:
+                # Create episode group
+                ep_group = f.create_group(f'episode_{episode_idx:06d}')
+                
+                # Save with compression
+                ep_group.create_dataset('images', data=imgs, compression='gzip', compression_opts=4)
+                ep_group.create_dataset('proprio', data=props, compression='gzip', compression_opts=4)
+                ep_group.attrs['length'] = len(imgs)
+                
+                # Flush to disk periodically to ensure data is saved
+                if episode_idx % 100 == 0:
+                    f.flush()
+                    
+            except OSError as e:
+                print(f"\n\n{'='*60}")
+                print(f"DISK WRITE ERROR: {e}")
+                print(f"Stopping gracefully to prevent file corruption.")
+                print(f"{'='*60}\n")
+                # Remove the last episode length since write failed
+                episode_lengths.pop()
+                # Try to remove the partially written group
+                try:
+                    del f[f'episode_{episode_idx:06d}']
+                except:
+                    pass
+                break
             
             episode_idx += 1
-            pbar.set_postfix({'saved': episode_idx, 'skipped': skipped})
+            pbar.set_postfix({'saved': episode_idx, 'skipped': skipped, 'free_gb': f'{free_space:.1f}'})
             
             # Aggressive memory cleanup after each episode
             del imgs, props
@@ -228,6 +309,9 @@ def preprocess_dataset(args):
         f.attrs['avg_episode_length'] = float(np.mean(episode_lengths)) if episode_lengths else 0.0
         f.attrs['min_episode_length'] = int(min(episode_lengths)) if episode_lengths else 0
         f.attrs['max_episode_length'] = int(max(episode_lengths)) if episode_lengths else 0
+        
+        # Final flush to ensure everything is written
+        f.flush()
     
     print(f"\nDone! Saved {episode_idx} episodes to {output_path}")
     print(f"Skipped {skipped} short episodes (< {args.min_episode_length} frames)")
@@ -263,6 +347,10 @@ if __name__ == '__main__':
     # Limits
     parser.add_argument('--max_episodes', type=int, default=0,
                         help='Maximum episodes to process, 0 = all')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Overwrite existing file instead of resuming')
+    parser.add_argument('--min_free_space_gb', type=float, default=2.0,
+                        help='Stop if disk space falls below this (GB, default: 2.0)')
     
     args = parser.parse_args()
     preprocess_dataset(args)
