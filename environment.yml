@@ -33,3 +33,4 @@ dependencies:
       - psutil
       - toml
       - gymnasium
+      - pypose>=0.6.0

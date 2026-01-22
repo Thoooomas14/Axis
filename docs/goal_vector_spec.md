@@ -20,13 +20,12 @@ The Axis goal vector is a dense 64D embedding containing:
 | Indices | Dims | Component | Description |
 |---------|------|-----------|-------------|
 | **0-2** | 3 | Task Type | One-hot: `[Move, Pick, Place]` |
-| **3-9** | 7 | Start Pose | 7D SE(3) minimal: `[RotVec(3), Pos(3), Gripper(1)]` |
-| **10-16** | 7 | Target Pose | 7D SE(3) minimal: `[RotVec(3), Pos(3), Gripper(1)]` |
-| **17-19** | 3 | Object Size | Normalized `[width, height, depth]` |
-| **20-22** | 3 | Object Color | RGB normalized to `[0, 1]` |
-| **23-25** | 3 | Object Shape | One-hot: `[Cube, Cylinder, Sphere]` |
-| **26-33** | 8 | Spatial Relations | One-hot spatial target |
-| **34-55** | 22 | Reserved | Future expansion (zeros) |
+| **3-15** | 13 | Start Pose | 13D SE(3): `[R_flat(9), Pos(3), Gripper(1)]` |
+| **16-28** | 13 | Target Pose | 13D SE(3): `[R_flat(9), Pos(3), Gripper(1)]` |
+| **29-31** | 3 | Object Size | Normalized `[width, height, depth]` |
+| **32-34** | 3 | Object Color | RGB normalized to `[0, 1]` |
+| **35-37** | 3 | Object Shape | One-hot: `[Cube, Cylinder, Sphere]` |
+| **38-55** | 18 | Reserved | Future expansion (zeros) |
 | **56-63** | 8 | Noise | Regularization noise (σ configurable) |
 
 ---
@@ -41,30 +40,30 @@ The Axis goal vector is a dense 64D embedding containing:
 | 1 | **Pick** | Gripper Open → Closed |
 | 2 | **Place** | Gripper Closed → Open |
 
-### Poses (Indices 3-16)
+### Poses (Indices 3-28)
 
-Axis V2 uses **7D minimal SE(3)** representation:
+Axis V2 uses **13D full SE(3)** representation:
 
 ```
-[φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
- └─ Rotation Vector ─┘  └─ Translation ─┘   └ Gripper
+[R_00, R_10, R_20, R_01, R_11, R_21, R_02, R_12, R_22, p_x, p_y, p_z, gripper]
+ └──────────── Flattened 3x3 Rotation Matrix ────────────┘  └─ Translation ─┘   └─ Gripper
 ```
 
-The rotation vector `φ = θ * axis` encodes rotation about an axis by angle θ (Rodrigues form).
+Using the full rotation matrix avoids trigonometric conversions during training.
 
 | Sub-Index | Dims | Component |
 |-----------|------|-----------|
-| 0-2 | 3 | Rotation vector (axis-angle) |
-| 3-5 | 3 | Position (x, y, z) |
-| 6 | 1 | Gripper state (0=open, 1=closed) |
+| 0-8 | 9 | Flattened rotation matrix (column-major) |
+| 9-11 | 3 | Position (x, y, z) |
+| 12 | 1 | Gripper state (0=open, 1=closed) |
 
-### Object Properties (Indices 17-25)
+### Object Properties (Indices 29-37)
 
 | Indices | Component | Encoding |
 |---------|-----------|----------|
-| 17-19 | Size | `[width, height, depth]` normalized |
-| 20-22 | Color | `[R, G, B]` in `[0, 1]` |
-| 23-25 | Shape | One-hot `[Cube, Cylinder, Sphere]` |
+| 29-31 | Size | `[width, height, depth]` normalized |
+| 32-34 | Color | `[R, G, B]` in `[0, 1]` |
+| 35-37 | Shape | One-hot `[Cube, Cylinder, Sphere]` |
 
 ### Spatial Relations (Indices 26-33)
 
@@ -155,9 +154,9 @@ import numpy as np
 
 oracle = GoalOracle(output_dim=64, noise_scale=0.1)
 
-# 7D minimal SE(3) poses
-start_pose = np.array([0, 0, 0, 0.4, 0.0, 0.3, 0.0])  # [rotvec, pos, gripper]
-end_pose = np.array([0, 0, 0, 0.5, 0.0, 0.1, 1.0])
+# 13D full SE(3) poses: [R_flat(9), pos(3), gripper(1)]
+start_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 0.0, 0.3, 0.0])  # Identity rotation
+end_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.0, 0.1, 1.0])
 
 goal = oracle.encode_goal(
     task_type=1,  # Pick
@@ -208,6 +207,7 @@ In V2, the requery output represents **model confidence**:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| **2.1** | 2026-01 | 7D SE(3) poses, configurable noise, confidence requery |
+| **2.2** | 2026-01 | 13D full SE(3) poses (flattened rotation matrix), chordal loss |
+| 2.1 | 2026-01 | 7D SE(3) poses, configurable noise, confidence requery |
 | 2.0 | 2026-01 | Standardized 64D format |
 | 1.0 | 2025-06 | Random projection (deprecated) |

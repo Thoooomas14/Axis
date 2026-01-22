@@ -17,3 +17,4 @@ opencv-python-headless
 psutil
 toml
 gymnasium
+pypose>=0.6.0

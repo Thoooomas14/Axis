@@ -15,6 +15,7 @@ import pickle
 from tqdm import tqdm
 import shutil
 from datetime import datetime
+import pypose as pp
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -23,7 +24,7 @@ from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
-from src.utils.rotation_utils import se3_exp, se3_log, so3_exp, so3_log
+from src.utils.rotation_utils import chordal_se3_loss, pose_13d_to_se3_matrix, apply_twist
 from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 import tensorflow_datasets as tfds
@@ -69,91 +70,79 @@ def train(args):
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'proprio_dim': 7, # 3 RotVec + 3 Trans + 1 Gripper (SE(3) minimal + gripper)
+        'proprio_dim': 13, # R_flat(9) + Trans(3) + Gripper(1) (full SE(3) matrix + gripper)
         'action_dim': 7   # 3 AngularVel + 3 LinearVel + 1 Gripper (twist + gripper)
     }
     
-    # --- Endpoint Loss Function (task-oriented) ---
-    def endpoint_geodesic_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
+    # --- Endpoint Chordal Loss (task-oriented, trig-free) ---
+    def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
         """
-        Compute full SE(3) Geodesic loss on the manifold for the endpoint.
+        Compute SE(3) chordal loss on endpoint after twist rollout.
         
-        Uses se3_log on the relative transform T_rel = T_pred^(-1) @ T_target
-        to properly capture the geodesic distance on SE(3).
+        Uses Frobenius norm on rotation matrix difference - NO trigonometric functions!
         
         Args:
             pred_twists: (B, W, 7) predicted twists [ω, v, gripper_delta] per step
-                        Only the first `horizon` twists are used.
-            start_poses: (B, 7) starting pose [rotvec, pos, gripper] - last frame of input window
-            target_poses: (B, 7) target pose at step t+horizon (from data loader)
+            start_poses: (B, 13) starting pose [R_flat, pos, gripper] - last frame of input window
+            target_poses: (B, 13) target pose at step t+horizon
             horizon: Number of twist steps to apply (1 <= horizon <= W)
-            omega_rot: Weight for rotational component of twist
-            omega_trans: Weight for translational component of twist
+            omega_rot: Weight for rotational component
+            omega_trans: Weight for translational component
             
         Returns:
-            Scalar loss: geodesic distance on SE(3) (weighted) + gripper loss
+            Scalar loss: chordal distance on SE(3) + gripper loss
         """
         B = pred_twists.shape[0]
         device = pred_twists.device
         dtype = pred_twists.dtype
         
-        # 1. Build Predicted SE(3) Transform by rollout
-        R_start = so3_exp(start_poses[:, :3])  # (B, 3, 3)
-        p_start = start_poses[:, 3:6]  # (B, 3)
+        # 1. Build Predicted SE(3) Transform by rollout from 13D pose
+        # Extract R and p from 13D: [R_flat(9), pos(3), gripper(1)]
+        R_start = start_poses[:, :9].reshape(B, 3, 3)  # (B, 3, 3)
+        p_start = start_poses[:, 9:12]  # (B, 3)
         
         T_pred = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
         T_pred[:, :3, :3] = R_start
         T_pred[:, :3, 3] = p_start
         
-        gripper_curr = start_poses[:, 6:7]  # (B, 1)
+        gripper_curr = start_poses[:, 12:13]  # (B, 1)
         
-        # Rollout: Apply predicted twists sequentially
+        # Rollout: Apply predicted twists sequentially using PyPose
         for t in range(horizon):
             twist_6d = pred_twists[:, t, :6]  # (B, 6) - [ω, v]
             gripper_delta = pred_twists[:, t, 6:7]  # (B, 1)
             
-            T_delta = se3_exp(twist_6d)  # (B, 4, 4)
-            
-            # Twists are in BODY frame (local gripper coordinates)
-            T_pred = torch.bmm(T_pred, T_delta)
+            # Use PyPose for twist application
+            T_delta_pp = pp.Exp(pp.se3(twist_6d))  # SE(3) delta
+            T_pred_pp = pp.mat2SE3(T_pred)
+            T_pred_pp = T_pred_pp @ T_delta_pp  # Body-frame composition
+            T_pred = T_pred_pp.matrix()
             
             gripper_curr = gripper_curr + gripper_delta
         
-        # 2. Build Target SE(3) Transform
-        R_target = so3_exp(target_poses[:, :3])  # (B, 3, 3)
-        p_target = target_poses[:, 3:6]  # (B, 3)
+        # 2. Build Target SE(3) Transform from 13D pose
+        R_target = target_poses[:, :9].reshape(B, 3, 3)  # (B, 3, 3)
+        p_target = target_poses[:, 9:12]  # (B, 3)
         
         T_target = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
         T_target[:, :3, :3] = R_target
         T_target[:, :3, 3] = p_target
         
-        # 3. Compute Relative Transform: T_rel = T_pred^(-1) @ T_target
-        # For SE(3): T^(-1) = [R^T, -R^T @ p; 0, 1]
+        # 3. Compute Chordal Loss (Frobenius norm - NO TRIG!)
         R_pred = T_pred[:, :3, :3]
         p_pred = T_pred[:, :3, 3]
         
-        R_pred_inv = R_pred.transpose(1, 2)  # R^T
-        p_pred_inv = -torch.bmm(R_pred_inv, p_pred.unsqueeze(-1)).squeeze(-1)  # -R^T @ p
+        # Rotation loss: ||R_pred - R_target||^2_F
+        rot_diff = R_pred - R_target
+        rot_loss = torch.mean(torch.sum(rot_diff ** 2, dim=(-2, -1)))
         
-        T_pred_inv = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
-        T_pred_inv[:, :3, :3] = R_pred_inv
-        T_pred_inv[:, :3, 3] = p_pred_inv
+        # Translation loss: ||p_pred - p_target||^2
+        trans_diff = p_pred - p_target
+        trans_loss = torch.mean(torch.sum(trans_diff ** 2, dim=-1))
         
-        T_rel = torch.bmm(T_pred_inv, T_target)  # (B, 4, 4)
-        
-        # 4. Map to Lie Algebra using se3_log
-        twist_rel = se3_log(T_rel)  # (B, 6) - [ω_x, ω_y, ω_z, v_x, v_y, v_z]
-        
-        # 5. Weighted L2 Norm on Lie Algebra
-        rot_component = twist_rel[:, :3]   # ω
-        trans_component = twist_rel[:, 3:6]  # v
-        
-        rot_loss = torch.mean(torch.sum(rot_component**2, dim=1))
-        trans_loss = torch.mean(torch.sum(trans_component**2, dim=1))
-        
-        # 6. Gripper Loss (separate, not part of SE(3))
+        # 4. Gripper Loss (separate, not part of SE(3))
         gripper_pred = torch.clamp(gripper_curr, 0.0, 1.0)
-        gripper_target = target_poses[:, 6:7]
+        gripper_target = target_poses[:, 12:13]
         grip_loss = torch.mean((gripper_pred - gripper_target)**2)
         
         return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
@@ -430,15 +419,15 @@ def train(args):
                         with torch.cuda.amp.autocast(enabled=False):
                             # Cast to float32 for numerical precision in rotation ops
                             pred_action_f32 = pred_action.float()
-                            start_poses_f32 = proprio[:, -1, :].float()  # (B, 7)
+                            start_poses_f32 = proprio[:, -1, :].float()  # (B, 13)
                             
                             # Target endpoint: directly from data loader at the horizon step
                             horizon = args.loss_horizon
-                            target_endpoint_f32 = target_poses[:, horizon - 1, :].float()  # (B, 7)
+                            target_endpoint_f32 = target_poses[:, horizon - 1, :].float()  # (B, 13)
                             
                             
-                            # Compute endpoint loss in float32
-                            action_loss = endpoint_geodesic_loss(
+                            # Compute endpoint loss in float32 (chordal - trig-free!)
+                            action_loss = endpoint_chordal_loss(
                                 pred_action_f32, start_poses_f32, target_endpoint_f32, 
                                 horizon, args.omega_rot, args.omega_trans
                             )

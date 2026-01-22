@@ -20,7 +20,7 @@ from scipy.spatial.transform import Rotation as R
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.utils.rotation_utils import se3_log
+import pypose as pp
 from .goal_oracle import GoalOracle
 
 
@@ -96,8 +96,8 @@ class LocalDataLoader(IterableDataset):
         return self.num_episodes
     
     def _segment_subtasks(self, props: np.ndarray):
-        """Segment episode into subtasks based on gripper changes."""
-        grippers = props[:, 6]
+        """Segment episode into subtasks based on gripper changes (13D poses)."""
+        grippers = props[:, 12]  # Gripper at index 12 in 13D pose
         is_closed = grippers > 0.5
         changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
         boundaries = np.concatenate([[0], changes, [len(props)]])
@@ -112,10 +112,10 @@ class LocalDataLoader(IterableDataset):
             start_pose = props[start]
             end_pose = props[end]
             
-            # Determine task type
-            if start_pose[6] < 0.5 and end_pose[6] > 0.5:
+            # Determine task type (index 12 for gripper)
+            if start_pose[12] < 0.5 and end_pose[12] > 0.5:
                 task_type = 1  # Pick (gripper closing)
-            elif start_pose[6] > 0.5 and end_pose[6] < 0.5:
+            elif start_pose[12] > 0.5 and end_pose[12] < 0.5:
                 task_type = 2  # Place (gripper opening)
             else:
                 task_type = 0  # Move (no change)
@@ -137,33 +137,26 @@ class LocalDataLoader(IterableDataset):
         return segments[-1] if segments else None
     
     def _compute_twist(self, pose_curr: np.ndarray, pose_next: np.ndarray) -> np.ndarray:
-        """Compute ground truth twist: ξ = log(T_curr⁻¹ · T_next)."""
-        R_curr = R.from_rotvec(pose_curr[:3]).as_matrix()
-        p_curr = pose_curr[3:6]
+        """Compute twist from 13D poses using PyPose: ξ = log(T_curr⁻¹ · T_next)."""
+        R_curr = pose_curr[:9].reshape(3, 3)
+        p_curr = pose_curr[9:12]
         T_curr = np.eye(4, dtype=np.float32)
         T_curr[:3, :3] = R_curr
         T_curr[:3, 3] = p_curr
         
-        R_next = R.from_rotvec(pose_next[:3]).as_matrix()
-        p_next = pose_next[3:6]
+        R_next = pose_next[:9].reshape(3, 3)
+        p_next = pose_next[9:12]
         T_next = np.eye(4, dtype=np.float32)
         T_next[:3, :3] = R_next
         T_next[:3, 3] = p_next
         
-        # Inverse of T_curr
-        T_curr_inv = np.eye(4, dtype=np.float32)
-        T_curr_inv[:3, :3] = R_curr.T
-        T_curr_inv[:3, 3] = -R_curr.T @ p_curr
+        # Use PyPose for log map
+        T_curr_pp = pp.mat2SE3(torch.tensor(T_curr, dtype=torch.float32).unsqueeze(0))
+        T_next_pp = pp.mat2SE3(torch.tensor(T_next, dtype=torch.float32).unsqueeze(0))
+        T_rel_pp = T_curr_pp.Inv() @ T_next_pp
+        xi = pp.Log(T_rel_pp).tensor().squeeze(0).numpy()
         
-        # Relative transform
-        T_rel = T_curr_inv @ T_next
-        
-        # Log map
-        T_rel_torch = torch.tensor(T_rel, dtype=torch.float32).unsqueeze(0)
-        xi = se3_log(T_rel_torch).squeeze(0).numpy()
-        
-        # Gripper delta
-        gripper_delta = pose_next[6] - pose_curr[6]
+        gripper_delta = pose_next[12] - pose_curr[12]
         
         twist7 = np.zeros(7, dtype=np.float32)
         twist7[:6] = xi

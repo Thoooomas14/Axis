@@ -6,15 +6,14 @@ class GoalOracle:
     """
     Generates standardized 64D goal embeddings for robot manipulation tasks.
     
-    Goal Vector Layout (64D) - Updated for 7D SE(3) minimal poses:
+    Goal Vector Layout (64D) - Updated for 13D SE(3) poses:
     | Indices | Component                              |
     |---------|----------------------------------------|
     | 0-2     | Task type one-hot [Move, Pick, Place]  |
-    | 3-9     | Start pose (7D): [φ, p, gripper]       |
-    | 10-16   | Target pose (7D): [φ, p, gripper]      |
-    | 17-25   | Object properties (size, color, shape) |
-    | 26-39   | Spatial relations / Reserved           |
-    | 40-55   | Reserved (zeros)                       |
+    | 3-15    | Start pose (13D): [R_flat, pos, grip]  |
+    | 16-28   | Target pose (13D): [R_flat, pos, grip] |
+    | 29-37   | Object properties (size, color, shape) |
+    | 38-55   | Reserved (zeros)                       |
     | 56-63   | Random noise                           |
     """
     
@@ -35,8 +34,8 @@ class GoalOracle:
         
         Args:
             task_type: 0=Move, 1=Pick, 2=Place
-            start_pose: 7D current pose [φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
-            end_pose: 7D target pose [φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
+            start_pose: 13D current pose [R_flat(9), pos(3), gripper(1)]
+            end_pose: 13D target pose [R_flat(9), pos(3), gripper(1)]
             object_props: Optional dict with 'size', 'color', 'shape'
                 - size: (3,) array [width, height, depth]
                 - color: (3,) array [r, g, b] normalized to [0, 1]
@@ -51,27 +50,25 @@ class GoalOracle:
         if 0 <= task_type < 3:
             goal[task_type] = 1.0
         
-        # Start pose (indices 3-9) - 7D minimal SE(3) + gripper
-        goal[3:10] = start_pose[:7]
+        # Start pose (indices 3-15) - 13D SE(3) + gripper
+        goal[3:16] = start_pose[:13]
         
-        # Target pose (indices 10-16) - 7D minimal SE(3) + gripper
-        goal[10:17] = end_pose[:7]
+        # Target pose (indices 16-28) - 13D SE(3) + gripper
+        goal[16:29] = end_pose[:13]
         
-        # Object properties (indices 17-25) - optional
+        # Object properties (indices 29-37) - optional
         if object_props:
             if 'size' in object_props:
-                goal[17:20] = object_props['size']
+                goal[29:32] = object_props['size']
             if 'color' in object_props:
-                goal[20:23] = object_props['color']
+                goal[32:35] = object_props['color']
             if 'shape' in object_props:  # one-hot [cube, cylinder, sphere]
-                goal[23:26] = object_props['shape']
+                goal[35:38] = object_props['shape']
         
-        # Spatial relations (indices 32-39) - reserved for future use
-        # Currently zeros
-        
-        # Reserved (indices 40-55) - zeros
+        # Reserved (indices 38-55) - zeros
         
         # Random noise for regularization (indices 56-63)
         goal[56:64] = np.random.randn(8) * self.noise_scale
         
         return torch.tensor(goal, dtype=torch.float32)
+

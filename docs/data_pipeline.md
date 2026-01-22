@@ -15,8 +15,8 @@ The core data loader wrapping `tensorflow_datasets` (TFDS) for streaming.
 - **Streaming**: Uses `tfds.load(..., streaming=True)` to avoid downloading entire datasets
 - **Continuous Episodes**: Processes full episodes without subtask splitting
 - **Dynamic Goals**: Goal vector updates automatically when gripper state changes
-- **7D SE(3) Conversion**: Converts raw 8D poses (pos + quaternion + gripper) to 7D minimal format
-- **Twist Computation**: Calculates ground truth 7D twist actions using SE(3) log map
+- **13D SE(3) Conversion**: Converts raw 8D poses (pos + quaternion + gripper) to 13D full matrix format
+- **Twist Computation**: Calculates ground truth 7D twist actions using PyPose Log map
 - **Platform-Aware**: Windows-compatible memory management
 
 #### Episode Processing
@@ -36,14 +36,18 @@ gripper_changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
 
 #### Twist Computation
 
-Ground truth twists computed via SE(3) log map:
+Ground truth twists computed via PyPose SE(3) log map:
 ```python
+import pypose as pp
+
 # T_curr, T_next are 4x4 SE(3) matrices
-twist = se3_log(T_curr.inverse() @ T_next)
+T_curr_pp = pp.mat2SE3(T_curr)
+T_next_pp = pp.mat2SE3(T_next)
+twist = pp.Log(T_curr_pp.Inv() @ T_next_pp).tensor()
 # twist = [ω_x, ω_y, ω_z, v_x, v_y, v_z]  (6D)
 
 # With gripper delta (7D)
-twist_7d = [ω, v, gripper_next - gripper_curr]
+twist_7d = [twist, gripper_next - gripper_curr]
 ```
 
 #### Subtask Types
@@ -63,10 +67,10 @@ Generates deterministic 64D semantic goal embeddings during training.
 | Indices | Dims | Component |
 |---------|------|-----------|
 | 0-2 | 3 | Task type one-hot `[Move, Pick, Place]` |
-| 3-9 | 7 | Start pose (7D SE(3) minimal) |
-| 10-16 | 7 | End pose (7D SE(3) minimal) |
-| 17-39 | 23 | Object properties & spatial relations |
-| 40-55 | 16 | Reserved (zeros) |
+| 3-15 | 13 | Start pose (13D SE(3) full matrix) |
+| 16-28 | 13 | End pose (13D SE(3) full matrix) |
+| 29-37 | 9 | Object properties (size, color, shape) |
+| 38-55 | 18 | Reserved (zeros) |
 | 56-63 | 8 | Regularization noise (σ configurable) |
 
 #### Configurable Noise Scale
@@ -82,10 +86,10 @@ Each batch contains (where H = `loss_horizon`):
 | Key | Shape | Description |
 |-----|-------|--------------|
 | `images` | `(B, W, 3, 128, 128)` | RGB images (observation window) |
-| `proprio` | `(B, W, 7)` | 7D SE(3) poses (observation window) |
+| `proprio` | `(B, W, 13)` | 13D SE(3) poses (observation window) |
 | `goal` | `(B, 64)` | Dynamic goal embedding |
 | `actions` | `(B, H, 7)` | 7D twist targets for future H steps |
-| `target_poses` | `(B, H, 7)` | Direct future poses for endpoint loss |
+| `target_poses` | `(B, H, 13)` | Direct future poses for endpoint loss |
 
 > **Windowing**: Episodes are windowed such that there are always H valid future poses after each window. Windows near episode end are excluded.
 
@@ -96,8 +100,8 @@ Each batch contains (where H = `loss_horizon`):
 ```mermaid
 graph LR
     GCS[GCS Bucket] -->|Stream| TFDS[TFDS Iterator]
-    TFDS -->|Episode| Conv[Pose Converter<br/>8D → 7D]
-    Conv --> Twist[Twist Calculator<br/>SE3 Log Map]
+    TFDS -->|Episode| Conv[Pose Converter<br/>8D → 13D]
+    Conv --> Twist[Twist Calculator<br/>PyPose Log Map]
     Conv --> GS[Gripper State<br/>Change Detection]
     
     subgraph Dynamic Goal
@@ -136,7 +140,7 @@ loader = RTXStreamLoader(
 
 for batch in loader:
     images = batch['images']      # (B, 8, 3, 128, 128)
-    proprio = batch['proprio']    # (B, 8, 7)
+    proprio = batch['proprio']    # (B, 8, 13)
     goal = batch['goal']          # (B, 64)
     actions = batch['actions']    # (B, 8, 7)
 ```
@@ -167,7 +171,7 @@ python -m imitation.data.preprocessor --output ./test.h5 --max_episodes 10
 | Field | Shape | Dtype |
 |-------|-------|-------|
 | images | (T, 3, 128, 128) | uint8 |
-| proprio | (T, 7) | float32 |
+| proprio | (T, 13) | float32 |
 
 ### 2. LocalDataLoader (`imitation/data/local_loader.py`)
 
@@ -185,7 +189,7 @@ loader = LocalDataLoader(
 for batch in loader:
     # Same format as RTXStreamLoader
     images = batch['images']      # (B, W, 3, 128, 128)
-    proprio = batch['proprio']    # (B, W, 7)
+    proprio = batch['proprio']    # (B, W, 13)
     goal = batch['goal']          # (B, 64)
 ```
 

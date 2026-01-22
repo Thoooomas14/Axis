@@ -2,8 +2,10 @@
 RTX Dataset Preprocessor
 
 Streams RTX datasets (DROID, Fractal, etc.) from GCS and saves minimal episode data locally.
-Stores only: images (one camera, resized) and 7D poses per timestep.
+Stores only: images (one camera, resized) and 13D poses per timestep.
 All derived computations (windowing, goals, twists) are done at load time by LocalDataLoader.
+
+13D Pose Format: [R_flat(9), pos(3), gripper(1)]
 
 Usage:
     python -m imitation.data.preprocessor --output E:/data/droid.h5 --dataset droid
@@ -41,17 +43,17 @@ def get_free_space_gb(path: Path) -> float:
         return float('inf')  # If we can't check, assume infinite
 
 
-def quat_to_rotvec(quat: np.ndarray) -> np.ndarray:
-    """Convert quaternion [qx, qy, qz, qw] to rotation vector."""
+def quat_to_rotmat(quat: np.ndarray) -> np.ndarray:
+    """Convert quaternion [qx, qy, qz, qw] to 3x3 rotation matrix."""
     quat = quat / (np.linalg.norm(quat) + 1e-8)
-    return R.from_quat(quat).as_rotvec().astype(np.float32)
+    return R.from_quat(quat).as_matrix().astype(np.float32)
 
 
 def get_pose(obs) -> np.ndarray:
-    """Extract 7D pose: [rotvec (3), position (3), gripper (1)]."""
+    """Extract 13D pose: [R_flat(9), position(3), gripper(1)]."""
     pos = np.zeros(3, dtype=np.float32)
     quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-    rotvec = None
+    rotmat = None
     
     # Position and orientation
     if 'base_pose_tool_reached' in obs:
@@ -63,15 +65,15 @@ def get_pose(obs) -> np.ndarray:
         if p6.shape[0] == 6:
             pos = p6[:3]
             euler = p6[3:]
-            rotvec = R.from_euler('xyz', euler).as_rotvec().astype(np.float32)
+            rotmat = R.from_euler('xyz', euler).as_matrix().astype(np.float32)
     elif 'ee_pose' in obs:
         p7 = obs['ee_pose'].numpy()
         pos = p7[:3]
         if p7.shape[0] >= 7:
             quat = p7[3:7]
     
-    if rotvec is None:
-        rotvec = quat_to_rotvec(quat)
+    if rotmat is None:
+        rotmat = quat_to_rotmat(quat)
     
     # Gripper state
     g = 0.0
@@ -85,11 +87,12 @@ def get_pose(obs) -> np.ndarray:
     if not np.isscalar(g):
         g = g.item() if g.size == 1 else g[0]
     
-    pose7 = np.zeros(7, dtype=np.float32)
-    pose7[:3] = rotvec
-    pose7[3:6] = pos
-    pose7[6] = g
-    return pose7
+    # 13D pose: [R_flat(9), pos(3), gripper(1)]
+    pose13 = np.zeros(13, dtype=np.float32)
+    pose13[:9] = rotmat.flatten()
+    pose13[9:12] = pos
+    pose13[12] = g
+    return pose13
 
 
 def process_image(img, size: tuple) -> np.ndarray:
@@ -250,7 +253,7 @@ def preprocess_dataset(args):
             # Stack arrays
             episode_lengths.append(len(imgs))  # Track for metadata
             imgs = np.array(imgs, dtype=np.uint8)    # (T, 3, H, W)
-            props = np.array(props, dtype=np.float32) # (T, 7)
+            props = np.array(props, dtype=np.float32) # (T, 13)
             
             # Check disk space before writing (minimum 2GB buffer)
             free_space = get_free_space_gb(output_path)

@@ -4,8 +4,9 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 
 ## Key V2 Changes
 
-- **7D Minimal Poses**: Uses SE(3) representation (Rotation Vector + Translation + Gripper)
-- **7D Twist Actions**: Predicts Lie algebra twists (ω, v, gripper) instead of delta poses
+- **13D Full SE(3) Poses**: Uses flattened rotation matrix + translation + gripper
+- **7D Twist Actions**: Predicts Lie algebra twists (ω, v, gripper) via PyPose
+- **Chordal Loss**: Trig-free SE(3) loss using Frobenius norm
 - **Action Chunking**: Outputs `(B, W, 7)` - a sequence of W future actions per forward pass
 - **Confidence Requery**: Self-supervised confidence prediction based on action loss
 - **RoPE**: Rotary Position Embeddings for better sequence modeling
@@ -22,7 +23,7 @@ graph TD
 
     subgraph Encoders
         VE[Vision Encoder<br/>ResNet-18]
-        PE[Proprio Encoder<br/>7D → 128D]
+        PE[Proprio Encoder<br/>13D → 128D]
         GE[Goal Encoder<br/>64D → 128D]
     end
 
@@ -56,9 +57,9 @@ graph TD
 
 | Component | Dimension | Description |
 |-----------|-----------|-------------|
-| Proprioception | 7D | `[φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]` - Rotation vector + translation + gripper |
+| Proprioception | 13D | `[R_flat(9), p_x, p_y, p_z, gripper]` - Flattened rotation matrix + translation + gripper |
 | Action (Twist) | 7D | `[ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]` - Angular velocity + linear velocity + gripper |
-| Goal | 64D | Structured semantic goal vector |
+| Goal | 64D | Structured semantic goal vector (includes 13D start/end poses) |
 | Vision tokens | 256D | Per-frame visual features (1 token/frame) |
 | Proprio tokens | 128D | Encoded proprioceptive state |
 | Goal tokens | 128D | Encoded goal embedding |
@@ -69,7 +70,7 @@ graph TD
 ### 1. Encoders
 
 #### Proprio Encoder
-- **Input**: 7D minimal SE(3) pose `[rotation_vector(3), translation(3), gripper(1)]`
+- **Input**: 13D full SE(3) pose `[R_flat(9), translation(3), gripper(1)]`
 - **Running Normalization**: Uses EMA to normalize inputs during training
 - **Output**: 128D latent vector
 
@@ -105,15 +106,15 @@ The transformer processes a sliding window of W=8 timesteps, with each timestep'
 
 ## SE(3) Representation
 
-Axis V2 uses **SE(3) Lie group** representation for rigid body motion:
+Axis V2 uses **SE(3) Lie group** representation with **PyPose** library:
 
-### Poses (7D Minimal)
+### Poses (13D Full Matrix)
 ```
-[φ_x, φ_y, φ_z, p_x, p_y, p_z, gripper]
- └─ Rotation Vector ─┘  └─ Translation ─┘   └─ Gripper
+[R_00, R_10, R_20, R_01, R_11, R_21, R_02, R_12, R_22, p_x, p_y, p_z, gripper]
+ └────────────── Flattened 3x3 Rotation Matrix ──────────────┘  └─ Trans ─┘   └─ Grip
 ```
 
-The rotation vector `φ = θ * axis` encodes rotation about an axis by angle θ (Rodrigues form).
+Using the full rotation matrix avoids trigonometric conversions in the loss function.
 
 ### Actions (7D Twist)
 ```
@@ -121,14 +122,15 @@ The rotation vector `φ = θ * axis` encodes rotation about an axis by angle θ 
  └─ Angular Velocity ─┘  └─ Linear Velocity ─┘   └─ Gripper Δ
 ```
 
-Twist actions are integrated using the SE(3) exponential map:
+Twist actions are integrated using PyPose's SE(3) exponential map:
 ```python
-T_new = T_current @ se3_exp(twist)
+import pypose as pp
+T_new = (pp.mat2SE3(T_current) @ pp.Exp(pp.se3(twist))).matrix()
 ```
 
 ## Data Flow
 
-1. **Input**: Window of W=8 images, 7D proprio states, and 64D goal
+1. **Input**: Window of W=8 images, 13D proprio states, and 64D goal
 2. **Encoding**: Each modality encoded to its latent dimension
 3. **Concatenation**: Per-timestep tokens concatenated to 512D
 4. **Transformer**: RoPE-based attention across temporal sequence

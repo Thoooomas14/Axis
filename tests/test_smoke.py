@@ -12,11 +12,11 @@ def test_model_dimensions():
     """Verifies that the AxisModel accepts inputs and produces outputs with expected shapes."""
     print("Verifying Axis Model Dimensions...")
     
-    # Config matching SE(3) Lie group requirements
+    # Config matching SE(3) full matrix representation
     config = {
         'device': 'cpu',
-        'proprio_dim': 7,  # SE(3) uses 7D: 3 RotVec + 3 Trans + 1 Gripper
-        'action_dim': 7,   # Twist: 3 AngVel + 3 LinVel + 1 Gripper
+        'proprio_dim': 13,  # SE(3) uses 13D: R_flat(9) + Trans(3) + Gripper(1)
+        'action_dim': 7,    # Twist: 3 AngVel + 3 LinVel + 1 Gripper
         'goal_dim': 64,
         'embed_dim': 256,
         'vision_feature_dim': 256,
@@ -34,8 +34,8 @@ def test_model_dimensions():
     C, H, W_img = 3, 128, 128
     
     images = torch.randn(B, W, C, H, W_img)
-    proprio = torch.randn(B, W, 7) # 7D Proprio
-    goal = torch.randn(B, 64) # 64D Goal
+    proprio = torch.randn(B, W, 13)  # 13D Proprio
+    goal = torch.randn(B, 64)  # 64D Goal
     
     # Forward Pass
     action, requery = model(images, proprio, goal)
@@ -48,8 +48,9 @@ def test_model_instantiation():
     """Simple test to check model instantiation with default config."""
     config = {
         'device': 'cpu', 
-        'proprio_dim': 7,
+        'proprio_dim': 13,
         'action_dim': 7
     }
     model = AxisModel(config)
     assert isinstance(model, AxisModel)
+

@@ -5,7 +5,7 @@ This document outlines how to train the Axis V2 model.
 ## Training Script: `imitation/train.py`
 
 The core training logic handles:
-1. Model initialization with 7D SE(3) poses and twist actions
+1. Model initialization with 13D SE(3) poses and 7D twist actions
 2. Dataset loading: streaming from GCS **or** local preprocessed HDF5
 3. Action chunking - model predicts W future actions simultaneously
 4. Self-supervised confidence training (requery signal)
@@ -21,35 +21,49 @@ Key parameters in the config dictionary:
 | `embed_dim` | Token embedding dimension (vision+proprio+goal) | 512 |
 | `num_heads` | Number of attention heads | 8 |
 | `num_layers` | Number of transformer layers | 4 |
-| `proprio_dim` | Dimension of SE(3) minimal pose | **7** |
+| `proprio_dim` | Dimension of SE(3) full matrix pose | **13** |
 | `action_dim` | Dimension of twist output | **7** |
 | `window_size` | Sliding window size (action chunk size) | 8 |
 
 ## Loss Functions
 
-### Geodesic Loss (Actions)
+### Chordal Loss (Actions) - Trig-Free!
 
-Axis V2 uses a weighted geodesic loss for SE(3) twists that balances rotational and translational errors:
+Axis V2 uses a **chordal loss** for SE(3) that directly compares rotation matrices using Frobenius norm:
 
 ```python
-def geodesic_loss(pred, target, omega_rot=1.0, omega_trans=1.0):
-    rot_loss = mean((pred[..., :3] - target[..., :3])**2)   # ω (angular velocity)
-    trans_loss = mean((pred[..., 3:6] - target[..., 3:6])**2)  # v (linear velocity)
-    grip_loss = mean((pred[..., 6:7] - target[..., 6:7])**2)   # gripper delta
+import pypose as pp
+
+def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon):
+    # Rollout predicted twists from 13D start pose
+    T_pred = build_se3_from_13d(start_poses)  # (B, 4, 4)
+    for t in range(horizon):
+        T_delta = pp.Exp(pp.se3(pred_twists[:, t, :6]))
+        T_pred = pp.mat2SE3(T_pred) @ T_delta
+        T_pred = T_pred.matrix()
+    
+    # Chordal loss: ||R_pred - R_target||^2_F + ||p_pred - p_target||^2
+    rot_loss = frobenius_norm(R_pred - R_target)
+    trans_loss = l2_norm(p_pred - p_target)
     return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
 ```
+
+**Why Chordal Loss?**
+- No trigonometric functions (no `sin`, `cos`, `acos`, `atan2`)
+- Numerically stable gradients
+- Direct matrix comparison
 
 ### Endpoint Loss (Task-Oriented)
 
 For task-oriented training, **endpoint loss** focuses on where the robot ends up rather than following the exact trajectory:
 
 ```python
-# Apply predicted twists to reach endpoint
+# Apply predicted twists to reach endpoint using PyPose
 for t in range(loss_horizon):
-    T_curr = T_curr @ se3_exp(pred_twist[t])
+    T_curr = (pp.mat2SE3(T_curr) @ pp.Exp(pp.se3(pred_twist[t]))).matrix()
 
-# Compare to target endpoint
-loss = geodesic(final_pose, target_endpoint)
+# Compare to target endpoint (chordal distance)
+loss = chordal_distance(final_pose, target_endpoint)
 ```
 
 This is controlled by `--loss_horizon`:
@@ -77,8 +91,8 @@ This teaches the model to predict its own accuracy - when to ask for help vs. pr
 ### Option 1: Streaming (default)
 
 **RTXStreamLoader** streams data from Google Cloud Storage in RLDS format:
-- **Pose Format**: Converts raw 8D poses (pos + quaternion + gripper) to 7D minimal SE(3)
-- **Twist Computation**: Calculates ground truth twists using `log(T_curr⁻¹ · T_next)`
+- **Pose Format**: Converts raw 8D poses (pos + quaternion + gripper) to 13D full SE(3)
+- **Twist Computation**: Calculates ground truth twists using PyPose `Log(T_curr⁻¹ · T_next)`
 - **Continuous Episodes**: Processes full episodes without subtask splitting
 - **Dynamic Goals**: Goal vector updates when gripper state changes
 
@@ -147,8 +161,8 @@ python imitation/train.py \
 ### Loss Weights
 | Argument | Description | Default |
 |:---|:---|:---|
-| `--omega_rot` | Weight for rotational error in geodesic loss | 1.0 |
-| `--omega_trans` | Weight for translational error in geodesic loss | 1.0 |
+| `--omega_rot` | Weight for rotational error in chordal loss | 1.0 |
+| `--omega_trans` | Weight for translational error in chordal loss | 1.0 |
 | `--requery_weight` | Weight for confidence loss | 1.0 |
 | `--confidence_temperature` | Temperature for confidence target: `exp(-loss/temp)` | 1.0 |
 | `--loss_horizon` | Future steps for endpoint loss (1 to W) | 1 |
@@ -229,8 +243,8 @@ pred_action, requery_pred = model(images, proprio, goals)
 # pred_action: (B, W, 7) - W future twist actions
 # requery_pred: (B, 1) - confidence score
 
-# Loss computed over entire chunk
-action_loss = geodesic_loss(pred_action, target_actions)
+# Loss computed over entire chunk (chordal - trig-free!)
+action_loss = chordal_loss(pred_action, target_actions)
 ```
 
 Benefits:
