@@ -60,6 +60,12 @@ def train(args):
     log.debug("Script started. Initializing...")
 
     # --- Configuration ---
+    chunk_size = 10  # Fixed model parameter for action chunking
+    
+    # Validate: loss_horizon must be <= chunk_size
+    if args.loss_horizon > chunk_size:
+        raise ValueError(f"loss_horizon ({args.loss_horizon}) must be <= chunk_size ({chunk_size})")
+    
     config = {
         'device': device,
         'goal_dim': 64, 
@@ -71,7 +77,8 @@ def train(args):
         'num_heads': 4,
         'num_layers': 4,
         'proprio_dim': 13, # R_flat(9) + Trans(3) + Gripper(1) (full SE(3) matrix + gripper)
-        'action_dim': 7   # 3 AngularVel + 3 LinearVel + 1 Gripper (twist + gripper)
+        'action_dim': 7,   # 3 AngularVel + 3 LinearVel + 1 Gripper (twist + gripper)
+        'chunk_size': chunk_size,
     }
     
     # --- Endpoint Chordal Loss (task-oriented, trig-free) ---

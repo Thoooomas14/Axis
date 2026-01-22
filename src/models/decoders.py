@@ -3,26 +3,33 @@ import torch.nn as nn
 
 class ActionDecoder(nn.Module):
     """
-    Decodes the transformer output into robot actions (Typcally 6D Twist + Gripper).
-    Default output_dim=7: 3 angular vel + 3 linear vel + 1 gripper.
+    Decodes a single token into an action chunk.
+    Input: (B, EmbedDim) - last token (current state).
+    Output: (B, ChunkSize, 7) - predicted future trajectory.
     """
-    def __init__(self, input_dim=256, output_dim=7, hidden_dim=128):
+    def __init__(self, input_dim=256, output_dim=7, hidden_dim=128, chunk_size=10):
         super().__init__()
+        self.chunk_size = chunk_size
+        self.output_dim = output_dim
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(hidden_dim, chunk_size * output_dim)
         )
 
     def forward(self, x):
         """
         Args:
-            x: Transformer output token(s) (B, EmbedDim)
+            x: Single token (B, EmbedDim)
+        Returns:
+            actions: (B, ChunkSize, 7)
         """
-        return self.net(x)
+        B = x.shape[0]
+        out = self.net(x)  # (B, ChunkSize * 7)
+        return out.view(B, self.chunk_size, self.output_dim)
 
 
 
@@ -71,15 +78,12 @@ class SafeActionDecoder(nn.Module):
 
 class RequeryDecoder(nn.Module):
     """
-    Predicts if the current sub-task is complete and a new goal is needed.
-    Outputs a logit (use sigmoid for probability).
-    Supports 2D (B, D) or 3D (B, T, D) inputs.
+    Predicts confidence for the current prediction.
+    Input: (B, EmbedDim) - last token (current state).
+    Output: (B, 1) - confidence logit.
     """
     def __init__(self, embed_dim, hidden_dim=128):
         super().__init__()
-        # Content-based attention pooling to aggregate chunk
-        self.attn_proj = nn.Linear(embed_dim, 1)
-        
         self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
             nn.ReLU(),
@@ -90,18 +94,8 @@ class RequeryDecoder(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: Input tokens (B, T, D)
+            x: Single token (B, EmbedDim)
         Returns:
             logit: (B, 1)
         """
-        if x.dim() != 3:
-            raise ValueError(f"RequeryDecoder expects 3D input (B, T, D), got {x.shape}")
-             
-        # (B, T, D) -> Attention Pooling -> (B, D)
-        # 1. Compute attention scores for each step
-        attn_logits = self.attn_proj(x) # (B, T, 1)
-        attn_weights = torch.softmax(attn_logits, dim=1)
-        
-        # 2. Weighted sum
-        x_pooled = (x * attn_weights).sum(dim=1) # (B, D)
-        return self.net(x_pooled)
+        return self.net(x)

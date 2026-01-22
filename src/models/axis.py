@@ -11,15 +11,16 @@ class AxisModel(nn.Module):
     The Axis Model.
     
     Uses a concatenated single token per timestep: [Proprio(128) | Vision(256) | Goal(128)] -> 512 dim.
+    Predicts future trajectory from the LAST token only (Current State -> Future).
     
     Inputs:
         - images: (B, W, C, H, W) - window of RGB images
-        - proprio: (B, W, 7) - window of 7D SE(3) poses
+        - proprio: (B, W, 13) - window of 13D SE(3) poses
         - goal: (B, 64) - standardized goal vector
     
     Outputs:
-        - action: (B, 7) or (B, chunk_size, 7) - predicted twist action(s)
-        - requery: (B, 1) - subtask completion signal
+        - action: (B, ChunkSize, 7) - predicted future trajectory
+        - requery: (B, 1) - prediction confidence
     """
     
     def __init__(self, config):
@@ -65,11 +66,13 @@ class AxisModel(nn.Module):
         
         # --- Decoders ---
         action_dim = config.get('action_dim', 7)
+        chunk_size = config.get('chunk_size', 10)
         
         base_decoder = ActionDecoder(
             input_dim=self.embed_dim,
             output_dim=action_dim,
-            hidden_dim=config.get('hidden_dim', 128)
+            hidden_dim=config.get('hidden_dim', 128),
+            chunk_size=chunk_size
         )
         
         self.action_decoder = SafeActionDecoder(base_decoder)
@@ -144,11 +147,11 @@ class AxisModel(nn.Module):
         # 5. Transformer backbone
         output_tokens = self.transformer(input_tokens)  # (B, W, 512)
         
-        # 6. Decode all tokens (action chunk of length W)
-        # output_tokens: (B, W, 512)
+        # 6. Decode from LAST token ONLY (Current State -> Future Trajectory)
+        last_token = output_tokens[:, -1, :]  # (B, 512)
         
-        pred_action = self.action_decoder(output_tokens) # (B, W, 7)
-        requery_logit = self.requery_decoder(output_tokens) # (B, W, 1)
+        pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
+        requery_logit = self.requery_decoder(last_token)  # (B, 1)
         
         if return_tokens:
             return pred_action, requery_logit, input_tokens

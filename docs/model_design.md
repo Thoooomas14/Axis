@@ -7,8 +7,8 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 - **13D Full SE(3) Poses**: Uses flattened rotation matrix + translation + gripper
 - **7D Twist Actions**: Predicts Lie algebra twists (ω, v, gripper) via PyPose
 - **Chordal Loss**: Trig-free SE(3) loss using Frobenius norm
-- **Action Chunking**: Outputs `(B, W, 7)` - a sequence of W future actions per forward pass
-- **Confidence Requery**: Self-supervised confidence prediction based on action loss
+- **Action Chunking**: Predicts (B, ChunkSize, 7) - a sequence of ChunkSize future actions from the LAST token only
+- **Confidence Requery**: Simple MLP prediction from the LAST token based on action loss
 - **RoPE**: Rotary Position Embeddings for better sequence modeling
 
 ## Architecture Overview
@@ -35,9 +35,13 @@ graph TD
         T[Axis Transformer<br/>512D, RoPE]
     end
 
+    subgraph "Last Token Bottleneck"
+        LT[Extract Last Token<br/>1, 512]
+    end
+
     subgraph Outputs
-        AD[Action Decoder<br/>512D → 7D twist]
-        RD[Requery Decoder<br/>Confidence 0-1]
+        AD[Action Decoder<br/>MLP: 512D → ChunkSize*7D]
+        RD[Requery Decoder<br/>MLP: 512D → 1D]
     end
 
     Img --> VE --> TL
@@ -49,8 +53,9 @@ graph TD
     GE --> Concat
     Concat[Concat: 256+128+128=512D] --> T
     
-    T --> AD
-    T --> RD
+    T --> LT
+    LT --> AD
+    LT --> RD
 ```
 
 ## Dimensions
@@ -94,14 +99,17 @@ The transformer processes a sliding window of W=8 timesteps, with each timestep'
 ### 3. Decoders
 
 #### Action Decoder
-- **Input**: Transformer output tokens `(B, W, 512)`
-- **Output**: 7D twist per timestep `(B, W, 7)`
+- **Input**: LAST transformer output token `(B, 512)`
+- **Output**: Multi-step trajectory `(B, ChunkSize, 7)`
+- **Architecture**: Standard MLP with LayerNorm, projecting to `ChunkSize * 7` and reshaping.
 - **SafeActionDecoder**: Wraps output with safety clamps (rotation and translation limits)
 
 #### Requery Decoder (Confidence)
+- **Input**: LAST transformer output token `(B, 512)`
 - **Function**: Predicts model confidence as a self-supervised signal
+- **Architecture**: Simple MLP (Linear -> ReLU -> Linear -> Sigmoid)
 - **Training**: Target = `exp(-action_loss / temperature)` - high when predictions are accurate
-- **Output**: Single scalar `(B, 1)` via attention pooling across all timesteps
+- **Output**: Single scalar `(B, 1)` representing current prediction confidence
 - **Inference**: When confidence < threshold, request new goal from high-level planner
 
 ## SE(3) Representation
@@ -134,6 +142,7 @@ T_new = (pp.mat2SE3(T_current) @ pp.Exp(pp.se3(twist))).matrix()
 2. **Encoding**: Each modality encoded to its latent dimension
 3. **Concatenation**: Per-timestep tokens concatenated to 512D
 4. **Transformer**: RoPE-based attention across temporal sequence
-5. **Decoding**:
-   - Action: 7D twist for each timestep in window `(B, W, 7)`
-   - Requery: Single confidence value `(B, 1)`
+5. **Extraction**: Extraction of the **LAST token** (current state representation)
+6. **Decoding**:
+   - Action: 7D twist for each future timestep in chunk `(B, ChunkSize, 7)`
+   - Requery: Single confidence value `(B, 1)` for the entire trajectory

@@ -8,13 +8,13 @@ This document visualizes the data flow and structure of the Axis V2 model.
 graph TD
     subgraph Inputs
         IMG[("Images<br/>(B, W, 3, 128, 128)")]
-        PROP[("Proprioception<br/>(B, W, 7)<br/>[RotVec, Pos, Gripper]")]
+        PROP[("Proprioception<br/>(B, W, 13)<br/>[R_flat(9), Pos, Gripper]")]
         GOAL[("Goal Embed<br/>(B, 64)")]
     end
 
     subgraph Encoders
         VE[("VisionEncoder<br/>ResNet-18")]
-        PE[("ProprioEncoder<br/>7D → 128D")]
+        PE[("ProprioEncoder<br/>13D → 128D")]
         GE[("GoalEncoder<br/>64D → 128D")]
         TL[("TokenLearner<br/>1 token/frame")]
     end
@@ -28,12 +28,13 @@ graph TD
     end
 
     subgraph Decoders
-        AD[("ActionDecoder<br/>512D → 7D twist")]
-        RD[("RequeryDecoder<br/>Attention Pooling → 1D")]
+        LT[("Last Token Bottleneck<br/>Extract output_tokens[:, -1, :]")]
+        AD[("ActionDecoder<br/>MLP: 512D → ChunkSize*7D")]
+        RD[("RequeryDecoder<br/>MLP: 512D → 1D")]
     end
 
     subgraph Outputs
-        ACT[("Action Twists<br/>(B, W, 7)")]
+        ACT[("Future Trajectory<br/>(B, ChunkSize, 7)")]
         REQ[("Confidence<br/>(B, 1)")]
     end
 
@@ -53,8 +54,11 @@ graph TD
     
     TR -->|"(B, W, 512)"| OUT[("Output Tokens")]
     
-    OUT --> AD --> ACT
-    OUT --> RD --> REQ
+    OUT --> LT
+    LT --> AD
+    LT --> RD
+    AD --> ACT
+    RD --> REQ
 
     classDef tensor fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
     classDef component fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,rx:10,ry:10;
@@ -67,12 +71,12 @@ graph TD
 
 ## Key V2 Architecture Changes
 
-| Component | V1 | V2 |
+| Component | V1 | V2 (Pure Chunking) |
 |-----------|----|----|
-| Proprioception | 10D (pos + 6D rot + grip) | **7D** (rotvec + pos + grip) |
+| Proprioception | 7D (rotvec + pos + grip) | **13D** (R_flat + pos + grip) |
 | Action Output | 10D delta pose | **7D twist** (ω, v, grip) |
 | Token Structure | Interleaved P, V tokens | **Concatenated** per frame |
-| Output Shape | (B, 1, 10) or (B, K, 10) | **(B, W, 7)** full window |
+| Output Shape | (B, W, 7) sequential | **(B, ChunkSize, 7)** from last token |
 | Requery | Binary logit | **Confidence** [0, 1] |
 
 ## Token Concatenation
@@ -105,11 +109,11 @@ V2 predicts a **full window of actions** in one forward pass:
 
 ```python
 pred_action, confidence = model(images, proprio, goal)
-# pred_action: (B, W, 7) - W twist actions
-# confidence: (B, 1) - model confidence
+# pred_action: (B, ChunkSize, 7) - Chunk of future twist actions
+# confidence: (B, 1) - model confidence for this trajectory
 
 # At inference, use temporal smoothing
-ensembler = ActionChunkEnsembler(chunk_size=W)
+ensembler = ActionChunkEnsembler(chunk_size=ChunkSize)
 action = ensembler.update(pred_action)  # Smoothed action
 ```
 
@@ -117,10 +121,11 @@ action = ensembler.update(pred_action)  # Smoothed action
 
 ### Action Decoder
 
-Projects each output token independently:
+Predicts the entire trajectory from the **last transformer token**:
 ```python
-# For each timestep t in window W
-action[t] = MLP(output_tokens[:, t, :])  # 512D → 7D
+# Based on output_tokens[:, -1, :] (512D)
+trajectory = MLP(last_token)  # 512D → 10 * 7D
+pred_action = trajectory.reshape(B, 10, 7)
 ```
 
 Output is clamped by `SafeActionDecoder`:
@@ -129,12 +134,10 @@ Output is clamped by `SafeActionDecoder`:
 
 ### Requery Decoder (Confidence)
 
-Uses attention pooling across all timesteps:
+Simplified to a standard MLP acting on the last token:
 ```python
-# Attention weights over W timesteps
-attn = softmax(MLP(output_tokens))  # (B, W, 1)
-pooled = sum(attn * output_tokens, dim=1)  # (B, 512)
-confidence = sigmoid(Linear(pooled))  # (B, 1)
+# Based on output_tokens[:, -1, :] (512D)
+confidence = sigmoid(MLP(last_token))  # 512D → 1D
 ```
 
 During training, target = `exp(-action_loss / temperature)`.
@@ -144,11 +147,11 @@ During training, target = `exp(-action_loss / temperature)`.
 | Tensor | Shape | Description |
 |--------|-------|-------------|
 | Input Images | `(B, W, 3, 128, 128)` | RGB images |
-| Input Proprio | `(B, W, 7)` | 7D SE(3) poses |
+| Input Proprio | `(B, W, 13)` | 13D SE(3) poses |
 | Input Goal | `(B, 64)` | Semantic goal |
 | Vision Tokens | `(B, W, 256)` | 1 token per frame |
 | Proprio Tokens | `(B, W, 128)` | Encoded proprio |
 | Goal Tokens | `(B, W, 128)` | Repeated goal |
 | Transformer Input | `(B, W, 512)` | Concatenated tokens |
-| Action Output | `(B, W, 7)` | 7D twists |
+| Action Output | `(B, ChunkSize, 7)` | 7D twists |
 | Confidence Output | `(B, 1)` | Single scalar |

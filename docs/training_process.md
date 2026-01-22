@@ -23,7 +23,9 @@ Key parameters in the config dictionary:
 | `num_layers` | Number of transformer layers | 4 |
 | `proprio_dim` | Dimension of SE(3) full matrix pose | **13** |
 | `action_dim` | Dimension of twist output | **7** |
-| `window_size` | Sliding window size (action chunk size) | 8 |
+| `window_size` | Sliding window of historical observations | 8 |
+| `chunk_size` | Model parameter: number of future actions to predict | **10** |
+| `action_dim` | Dimension of twist output | **7** |
 
 ## Loss Functions
 
@@ -156,16 +158,8 @@ python imitation/train.py \
 | `--batch_size` | Batch size | 1 |
 | `--lr` | Learning rate | 1e-4 |
 | `--warmup_steps` | LR warmup steps | 1000 |
-| `--window_size` | Sliding window / action chunk size | 10 |
-
-### Loss Weights
-| Argument | Description | Default |
-|:---|:---|:---|
-| `--omega_rot` | Weight for rotational error in chordal loss | 1.0 |
-| `--omega_trans` | Weight for translational error in chordal loss | 1.0 |
-| `--requery_weight` | Weight for confidence loss | 1.0 |
-| `--confidence_temperature` | Temperature for confidence target: `exp(-loss/temp)` | 1.0 |
-| `--loss_horizon` | Future steps for endpoint loss (1 to W) | 1 |
+| `--window_size` | Size of the observation history window | 10 |
+| `--loss_horizon` | Future steps for endpoint loss (**must be <= chunk_size**) | 1 |
 
 ### Checkpointing & Validation
 | Argument | Description | Default |
@@ -235,19 +229,19 @@ The training script includes automatic OOM recovery:
 
 ## Action Chunking
 
-Unlike autoregressive training, Axis V2 uses **action chunking**:
+Unlike autoregressive training, Axis V2 uses **action chunking** from the current state:
 
 ```python
-# Model outputs chunked predictions
+# Model extracts LAST token and predicts chunk
 pred_action, requery_pred = model(images, proprio, goals)
-# pred_action: (B, W, 7) - W future twist actions
-# requery_pred: (B, 1) - confidence score
+# pred_action: (B, ChunkSize, 7) - Future trajectory
+# requery_pred: (B, 1) - Confidence score for this chunk
 
-# Loss computed over entire chunk (chordal - trig-free!)
-action_loss = chordal_loss(pred_action, target_actions)
+# Loss computed over the trajectory up to loss_horizon
+action_loss = chordal_loss(pred_action, target_actions, horizon=loss_horizon)
 ```
 
 Benefits:
-- More efficient training (one forward pass predicts W actions)
-- Smoother action sequences during inference
-- No error accumulation from autoregressive rollout
+- **Efficiency**: Single forward pass predicts long-horizon trajectory.
+- **Independence**: Decouples observation window (history) from prediction chunk (future).
+- **Consistency**: High-quality trajectories without autoregressive drift.
