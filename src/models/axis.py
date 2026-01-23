@@ -51,7 +51,7 @@ class AxisModel(nn.Module):
         )
         
         self.proprio_encoder = ProprioEncoder(
-            input_dim=config.get('proprio_dim', 7),
+            input_dim=config.get('proprio_dim', 13),
             output_dim=self.proprio_dim,
             hidden_dim=config.get('hidden_dim', 128)
         )
@@ -59,7 +59,7 @@ class AxisModel(nn.Module):
         # --- Backbone ---
         self.transformer = AxisTransformer(
             embed_dim=self.embed_dim,
-            num_heads=config.get('num_heads', 8), # Increased heads for 512 dim
+            num_heads=config.get('num_heads', 4), # Increased heads for 512 dim
             num_layers=config.get('num_layers', 4),
             use_rope=config.get('use_rope', True)
         )

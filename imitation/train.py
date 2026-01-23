@@ -49,6 +49,7 @@ def setup_logging(verbose: int = 1):
 
 
 log = logging.getLogger(__name__)
+CHUNK_SIZE = 10
 
 def train(args):
     # Setup logging based on verbosity
@@ -59,26 +60,17 @@ def train(args):
     log.info(f"Using device: {device}")
     log.debug("Script started. Initializing...")
 
-    # --- Configuration ---
-    chunk_size = 10  # Fixed model parameter for action chunking
-    
-    # Validate: loss_horizon must be <= chunk_size
-    if args.loss_horizon > chunk_size:
-        raise ValueError(f"loss_horizon ({args.loss_horizon}) must be <= chunk_size ({chunk_size})")
-    
     config = {
         'device': device,
         'goal_dim': 38, 
         'cond_dim': 256,
-        'vision_feature_dim': 256,
-        'num_vision_tokens': 8,
         'window_size': args.window_size,
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
         'proprio_dim': 13, # R_flat(9) + Trans(3) + Gripper(1) (full SE(3) matrix + gripper)
         'action_dim': 7,   # 3 AngularVel + 3 LinearVel + 1 Gripper (twist + gripper)
-        'chunk_size': chunk_size,
+        'chunk_size': CHUNK_SIZE,
     }
     
     # --- Endpoint Chordal Loss (task-oriented, trig-free) ---
@@ -830,8 +822,8 @@ if __name__ == "__main__":
             )
     
     # Validate loss_horizon
-    if args.loss_horizon < 1 or args.loss_horizon > args.window_size:
-        parser.error(f"--loss_horizon must be between 1 and window_size ({args.window_size}), got {args.loss_horizon}")
+    if args.loss_horizon < 1 or args.loss_horizon > CHUNK_SIZE:
+        parser.error(f"--loss_horizon must be between 1 and chunk_size ({CHUNK_SIZE}), got {args.loss_horizon}")
     
     log.debug(f"Args parsed. Viz: {args.viz}, Viz Interval: {args.viz_interval}")
     train(args)
