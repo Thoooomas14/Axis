@@ -136,7 +136,7 @@ def test_requirements_vs_codebase():
     import_map = {
         'PIL': 'pillow',
         'sklearn': 'scikit-learn',
-        'cv2': 'opencv-python',
+        'cv2': 'opencv-python-headless',
         'yaml': 'pyyaml',
         'skimage': 'scikit-image',
         'tqdm': 'tqdm',
