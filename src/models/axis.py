@@ -16,7 +16,7 @@ class AxisModel(nn.Module):
     Inputs:
         - images: (B, W, C, H, W) - window of RGB images
         - proprio: (B, W, 13) - window of 13D SE(3) poses
-        - goal: (B, 64) - standardized goal vector
+        - goal: (B, 38) - standardized goal vector
     
     Outputs:
         - action: (B, ChunkSize, 7) - predicted future trajectory

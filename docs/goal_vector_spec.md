@@ -1,12 +1,12 @@
 # Goal Vector Specification (Axis V2)
 
-This document specifies the **64-dimensional goal vector** used by Axis V2 to encode the semantic intent of each robot subtask.
+This document specifies the **38-dimensional goal vector** used by Axis V2 to encode the semantic intent of each robot subtask.
 
 ---
 
 ## Overview
 
-The Axis goal vector is a dense 64D embedding containing:
+The Axis goal vector is a dense 38D embedding containing:
 
 - **Determinism**: Same inputs always produce the same embedding
 - **Interpretability**: Each dimension has defined semantic meaning
@@ -22,11 +22,16 @@ The Axis goal vector is a dense 64D embedding containing:
 | **0-2** | 3 | Task Type | One-hot: `[Move, Pick, Place]` |
 | **3-15** | 13 | Start Pose | 13D SE(3): `[R_flat(9), Pos(3), Gripper(1)]` |
 | **16-28** | 13 | Target Pose | 13D SE(3): `[R_flat(9), Pos(3), Gripper(1)]` |
-| **29-31** | 3 | Object Size | Normalized `[width, height, depth]` |
-| **32-34** | 3 | Object Color | RGB normalized to `[0, 1]` |
-| **35-37** | 3 | Object Shape | One-hot: `[Cube, Cylinder, Sphere]` |
-| **38-55** | 18 | Reserved | Future expansion (zeros) |
-| **56-63** | 8 | Noise | Regularization noise (σ configurable) |
+| **29-31** | 3 | Object Size | Normalized `[width, height, depth]` (from language instruction) |
+| **32-34** | 3 | Object Color | RGB normalized to `[0, 1]` (from language instruction) |
+| **35-37** | 3 | Object Shape | One-hot: `[Cube, Cylinder, Sphere]` (from language instruction) |
+
+> [!NOTE]
+> Object properties are inferred from language instructions using keyword matching.
+> If no keywords are found or the instruction is blank, these fields default to:
+> - **Size**: Medium `[0.5, 0.5, 0.5]`
+> - **Color**: Black `[0.0, 0.0, 0.0]`
+> - **Shape**: Cube `[1.0, 0.0, 0.0]`
 
 ---
 
@@ -65,28 +70,6 @@ Using the full rotation matrix avoids trigonometric conversions during training.
 | 32-34 | Color | `[R, G, B]` in `[0, 1]` |
 | 35-37 | Shape | One-hot `[Cube, Cylinder, Sphere]` |
 
-### Spatial Relations (Indices 26-33)
-
-| Index | Relation |
-|-------|----------|
-| 26 | Above |
-| 27 | Below |
-| 28 | Left |
-| 29 | Right |
-| 30 | Front |
-| 31 | Back |
-| 32 | Inside |
-| 33 | On |
-
-### Noise (Indices 56-63)
-
-Configurable regularization noise:
-
-```python
-oracle = GoalOracle(output_dim=64, noise_scale=0.1)
-# goal[56:64] = np.random.randn(8) * noise_scale
-```
-
 ---
 
 ## Example: Constructing Goal Manually
@@ -101,45 +84,37 @@ def quaternion_to_rotvec(quat):
 
 def construct_goal_vector(
     task_type: int,
-    start_pose: dict,
-    target_pose: dict,
-    object_props: dict = None,
-    noise_scale: float = 0.1
+    start_pose: np.ndarray,
+    target_pose: np.ndarray,
+    object_props: dict = None
 ) -> np.ndarray:
     """
-    Construct 64D goal vector.
+    Construct 38D goal vector.
     
     Args:
         task_type: 0=Move, 1=Pick, 2=Place
-        start_pose: dict with 'position'(3), 'quaternion'(4), 'gripper'(float)
-        target_pose: dict with 'position'(3), 'quaternion'(4), 'gripper'(float)
+        start_pose: 13D SE(3) array
+        target_pose: 13D SE(3) array
     """
-    goal = np.zeros(64, dtype=np.float32)
+    goal = np.zeros(38, dtype=np.float32)
     
     # Task Type (0-2)
     goal[task_type] = 1.0
     
-    # Start Pose (3-9): 7D SE(3) minimal
-    goal[3:6] = quaternion_to_rotvec(start_pose['quaternion'])
-    goal[6:9] = start_pose['position']
-    goal[9] = start_pose['gripper']
+    # Start Pose (3-15): 13D SE(3)
+    goal[3:16] = start_pose
     
-    # Target Pose (10-16): 7D SE(3) minimal
-    goal[10:13] = quaternion_to_rotvec(target_pose['quaternion'])
-    goal[13:16] = target_pose['position']
-    goal[16] = target_pose['gripper']
+    # Target Pose (16-28): 13D SE(3)
+    goal[16:29] = target_pose
     
-    # Object Properties (17-25)
+    # Object Properties (29-37)
     if object_props:
         if 'size' in object_props:
-            goal[17:20] = object_props['size']
+            goal[29:32] = object_props['size']
         if 'color' in object_props:
-            goal[20:23] = object_props['color']
+            goal[32:35] = object_props['color']
         if 'shape' in object_props:
-            goal[23:26] = object_props['shape']
-    
-    # Noise (56-63)
-    goal[56:64] = np.random.randn(8) * noise_scale
+            goal[35:38] = object_props['shape']
     
     return goal
 ```
@@ -149,22 +124,26 @@ def construct_goal_vector(
 ## Example: Using GoalOracle
 
 ```python
-from imitation.data.goal_oracle import GoalOracle
+from imitation.data.goal_oracle import GoalOracle, extract_object_properties
 import numpy as np
 
-oracle = GoalOracle(output_dim=64, noise_scale=0.1)
+oracle = GoalOracle(output_dim=38)
 
 # 13D full SE(3) poses: [R_flat(9), pos(3), gripper(1)]
 start_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 0.0, 0.3, 0.0])  # Identity rotation
 end_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.0, 0.1, 1.0])
 
+# Extract properties from instruction
+object_props = extract_object_properties("pick up the red block")
+
 goal = oracle.encode_goal(
     task_type=1,  # Pick
     start_pose=start_pose,
-    end_pose=end_pose
+    end_pose=end_pose,
+    object_props=object_props
 )
 
-print(f"Goal shape: {goal.shape}")  # (64,)
+print(f"Goal shape: {goal.shape}")  # (38,)
 ```
 
 ---
@@ -207,7 +186,8 @@ In V2, the requery output represents **model confidence**:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| **2.2** | 2026-01 | 13D full SE(3) poses (flattened rotation matrix), chordal loss |
+| **2.3** | 2026-01 | 38D refactor: removed noise/zeros, added text parsing for obj props |
+| 2.2 | 2026-01 | 13D full SE(3) poses (flattened rotation matrix), chordal loss |
 | 2.1 | 2026-01 | 7D SE(3) poses, configurable noise, confidence requery |
 | 2.0 | 2026-01 | Standardized 64D format |
 | 1.0 | 2025-06 | Random projection (deprecated) |

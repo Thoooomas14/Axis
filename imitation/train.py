@@ -68,7 +68,7 @@ def train(args):
     
     config = {
         'device': device,
-        'goal_dim': 64, 
+        'goal_dim': 38, 
         'cond_dim': 256,
         'vision_feature_dim': 256,
         'num_vision_tokens': 8,

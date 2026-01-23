@@ -21,7 +21,7 @@ import queue
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 import pypose as pp
-from .goal_oracle import GoalOracle
+from .goal_oracle import GoalOracle, extract_object_properties
 
 
 def _episode_worker(data_dir, dataset_name, split, image_key, image_size, 
@@ -204,9 +204,28 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
             # Extract episode data to numpy
             imgs = []
             props = []
+            language_instruction = ""
             
             for s in episode['steps']:
                 obs = s['observation']
+                
+                # Extract language instruction from first step (with fallback)
+                if not language_instruction and 'language_instruction' in s:
+                    instr = s['language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
+                
+                # Fallback: check observation/natural_language_instruction
+                if not language_instruction and 'natural_language_instruction' in obs:
+                    instr = obs['natural_language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
                 
                 img = None
                 for key in img_keys:
@@ -216,6 +235,15 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                 
                 imgs.append(process_image(img, image_size))
                 props.append(get_pose(obs))
+            
+            # Extract object properties from language instruction
+            from imitation.data.goal_oracle import extract_object_properties as extract_props
+            object_props = extract_props(language_instruction)
+            object_props_vec = np.concatenate([
+                object_props['size'],
+                object_props['color'],
+                object_props['shape']
+            ]).astype(np.float32)  # (9,)
             
             if len(imgs) < buffer_size:
                 continue
@@ -267,6 +295,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                     'subtask_start_pose': seg['start_pose'] if seg else props[0],
                     'subtask_end_pose': seg['end_pose'] if seg else props[-1],
                     'subtask_type': seg['task_type'] if seg else 0,
+                    'object_props': object_props_vec,
                 })
             
             # Clear TF after each episode
@@ -320,7 +349,7 @@ class RTXStreamLoader(IterableDataset):
         self.use_subprocess = use_subprocess
         self.queue_size = queue_size
         
-        self.oracle = GoalOracle(output_dim=64)
+        self.oracle = GoalOracle(output_dim=38)
         
         # Lazy-initialized for in-process mode
         self.builder = None
@@ -446,10 +475,19 @@ class RTXStreamLoader(IterableDataset):
                     continue
                 
                 # Compute goal using subtask poses (from worker)
+                # Convert object_props_vec back to dict
+                obj_props_vec = data.get('object_props', np.zeros(9, dtype=np.float32))
+                object_props = {
+                    'size': obj_props_vec[:3],
+                    'color': obj_props_vec[3:6],
+                    'shape': obj_props_vec[6:9]
+                }
+                
                 goal_emb = self.oracle.encode_goal(
                     data['subtask_type'],
                     data['subtask_start_pose'],
-                    data['subtask_end_pose']
+                    data['subtask_end_pose'],
+                    object_props
                 )
                 
                 yield {
@@ -562,7 +600,7 @@ class RTXStreamLoader(IterableDataset):
         img = np.transpose(img, (2, 0, 1))
         return img
     
-    def _segment_subtasks(self, props: np.ndarray):
+    def _segment_subtasks(self, props: np.ndarray, object_props: dict = None):
         """Segment episode into subtasks based on gripper changes (13D poses)."""
         grippers = props[:, 12]  # Gripper at index 12 in 13D pose
         is_closed = grippers > 0.5
@@ -586,7 +624,7 @@ class RTXStreamLoader(IterableDataset):
             else:
                 task_type = 0  # Move
             
-            goal = self.oracle.encode_goal(task_type, start_pose, end_pose)
+            goal = self.oracle.encode_goal(task_type, start_pose, end_pose, object_props)
             segments.append({
                 'start': start,
                 'end': boundaries[i + 1],
@@ -642,9 +680,28 @@ class RTXStreamLoader(IterableDataset):
             # Extract full episode
             imgs = []
             props = []
+            language_instruction = ""
             
             for s in episode['steps']:
                 obs = s['observation']
+                
+                # Extract language instruction from first step (with fallback)
+                if not language_instruction and 'language_instruction' in s:
+                    instr = s['language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
+                
+                # Fallback: check observation/natural_language_instruction
+                if not language_instruction and 'natural_language_instruction' in obs:
+                    instr = obs['natural_language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
                 
                 img = None
                 for key in image_keys:
@@ -667,8 +724,11 @@ class RTXStreamLoader(IterableDataset):
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
             
-            # Segment into subtasks
-            segments = self._segment_subtasks(props)
+            # Extract object properties from language instruction
+            object_props = extract_object_properties(language_instruction)
+            
+            # Segment into subtasks (with object_props)
+            segments = self._segment_subtasks(props, object_props)
             
             # Generate windows
             num_windows = len(imgs) - self.window_size - self.loss_horizon + 1

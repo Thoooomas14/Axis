@@ -33,6 +33,8 @@ from scipy.spatial.transform import Rotation as R
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+from imitation.data.goal_oracle import extract_object_properties
+
 
 def get_free_space_gb(path: Path) -> float:
     """Get free disk space in GB for the drive containing path."""
@@ -214,6 +216,7 @@ def preprocess_dataset(args):
         episode_idx = resume_from
         skipped = 0
         ds_episode_idx = 0
+        episodes_with_instruction = 0
         
         pbar = tqdm(ds, total=total_episodes, desc="Processing episodes", initial=resume_from)
         
@@ -231,9 +234,28 @@ def preprocess_dataset(args):
             # Extract episode data
             imgs = []
             props = []
+            language_instruction = ""
             
             for step in episode['steps']:
                 obs = step['observation']
+                
+                # Extract language instruction from first step (with fallback)
+                if not language_instruction and 'language_instruction' in step:
+                    instr = step['language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
+                
+                # Fallback: check observation/natural_language_instruction
+                if not language_instruction and 'natural_language_instruction' in obs:
+                    instr = obs['natural_language_instruction']
+                    if hasattr(instr, 'numpy'):
+                        instr = instr.numpy()
+                    if isinstance(instr, bytes):
+                        instr = instr.decode('utf-8', errors='ignore')
+                    language_instruction = str(instr).strip() if instr else ""
                 
                 # Find image
                 img = None
@@ -244,6 +266,17 @@ def preprocess_dataset(args):
                 
                 imgs.append(process_image(img, image_size))
                 props.append(get_pose(obs))
+            
+            # Extract object properties from language instruction
+            if language_instruction:
+                episodes_with_instruction += 1
+                
+            object_props = extract_object_properties(language_instruction)
+            object_props_vec = np.concatenate([
+                object_props['size'],
+                object_props['color'],
+                object_props['shape']
+            ]).astype(np.float32)  # (9,)
             
             # Skip very short episodes
             if len(imgs) < args.min_episode_length:
@@ -274,7 +307,10 @@ def preprocess_dataset(args):
                 # Save with compression
                 ep_group.create_dataset('images', data=imgs, compression='gzip', compression_opts=4)
                 ep_group.create_dataset('proprio', data=props, compression='gzip', compression_opts=4)
+                ep_group.create_dataset('object_props', data=object_props_vec)  # (9,) per episode
                 ep_group.attrs['length'] = len(imgs)
+                ep_group.attrs['language_instruction'] = language_instruction
+                ep_group.attrs['has_instruction'] = bool(language_instruction)
                 
                 # Flush to disk periodically to ensure data is saved
                 if episode_idx % 100 == 0:
@@ -295,7 +331,12 @@ def preprocess_dataset(args):
                 break
             
             episode_idx += 1
-            pbar.set_postfix({'saved': episode_idx, 'skipped': skipped, 'free_gb': f'{free_space:.1f}'})
+            pbar.set_postfix({
+                'saved': episode_idx,
+                'skipped': skipped,
+                'instr': episodes_with_instruction,
+                'free_gb': f'{free_space:.1f}'
+            })
             
             # Aggressive memory cleanup after each episode
             del imgs, props
@@ -318,6 +359,7 @@ def preprocess_dataset(args):
     
     print(f"\nDone! Saved {episode_idx} episodes to {output_path}")
     print(f"Skipped {skipped} short episodes (< {args.min_episode_length} frames)")
+    print(f"Episodes with language instruction: {episodes_with_instruction}/{episode_idx} ({episodes_with_instruction/max(1, episode_idx)*100:.1f}%)")
     print(f"Total frames: {sum(episode_lengths):,}")
     print(f"Avg episode length: {np.mean(episode_lengths):.1f} frames")
     

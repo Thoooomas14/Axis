@@ -67,7 +67,7 @@ class LocalDataLoader(IterableDataset):
         self.split_start = split_start
         self.split_end = split_end
         
-        self.oracle = GoalOracle(output_dim=64)
+        self.oracle = GoalOracle(output_dim=38)
         
         # Get episode keys, metadata, and apply split
         with h5py.File(data_path, 'r') as f:
@@ -163,7 +163,7 @@ class LocalDataLoader(IterableDataset):
         twist7[6] = gripper_delta
         return twist7
     
-    def _process_episode(self, imgs: np.ndarray, props: np.ndarray):
+    def _process_episode(self, imgs: np.ndarray, props: np.ndarray, object_props: dict = None):
         """Generate training windows from an episode."""
         if len(imgs) < self.buffer_size:
             return
@@ -185,11 +185,12 @@ class LocalDataLoader(IterableDataset):
             if seg is None:
                 continue
             
-            # Compute goal
+            # Compute goal (with object properties)
             goal_emb = self.oracle.encode_goal(
                 seg['task_type'],
                 seg['start_pose'],
-                seg['end_pose']
+                seg['end_pose'],
+                object_props
             )
             
             # Compute target twists and poses
@@ -234,9 +235,19 @@ class LocalDataLoader(IterableDataset):
                 for key in episode_keys:
                     ep = f[key]
                     imgs = ep['images'][:]  # (T, 3, H, W) uint8
-                    props = ep['proprio'][:]  # (T, 7) float32
+                    props = ep['proprio'][:]  # (T, 13) float32
                     
-                    yield from self._process_episode(imgs, props)
+                    # Load object properties if available (9D: size, color, shape)
+                    object_props = None
+                    if 'object_props' in ep:
+                        obj_vec = ep['object_props'][:]  # (9,)
+                        object_props = {
+                            'size': obj_vec[:3],
+                            'color': obj_vec[3:6],
+                            'shape': obj_vec[6:9]
+                        }
+                    
+                    yield from self._process_episode(imgs, props, object_props)
                 
                 if not self.repeat:
                     break
