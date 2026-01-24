@@ -306,6 +306,8 @@ def train(args):
         log.info("Progress estimation not available for subprocess loader")
     
     # Validation Dataloader (smaller batch size to save memory if needed)
+    if args.val_batch_size == 0:
+        args.val_batch_size = effective_batch_size
     val_dataloader, _ = create_dataloader(
         args.val_batch_size, 0, 0, 
         split=val_split, split_start=args.train_split_pct, split_end=1.0
@@ -872,7 +874,7 @@ if __name__ == "__main__":
     # === Validation ===
     parser.add_argument('--train_split_pct', type=float, default=0.95, help="Train split percentage")
     parser.add_argument('--val_interval', type=int, default=5000, help="Steps between validation")
-    parser.add_argument('--val_batch_size', type=int, default=1, help="Validation batch size")
+    parser.add_argument('--val_batch_size', type=int, default=0, help="Validation batch size")
     parser.add_argument('--val_batches', type=int, default=50, help="Batches per validation run")
     
     # === Logging ===
