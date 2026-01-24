@@ -596,7 +596,7 @@ def train(args):
                                     horizon = args.loss_horizon
                                     v_target_endpoint_f32 = v_target_poses[:, horizon - 1, :].float()
                                     
-                                    v_a_loss = endpoint_geodesic_loss(
+                                    v_a_loss = endpoint_chordal_loss(
                                         v_pred_f32, v_start_poses_f32, v_target_endpoint_f32,
                                         horizon, args.omega_rot, args.omega_trans
                                     )
