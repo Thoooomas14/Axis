@@ -233,7 +233,9 @@ def train(args):
             stream, 
             batch_size=batch_size,
             num_workers=effective_workers,
-            pin_memory=False
+            pin_memory=True, # Enable pinning for speed
+            prefetch_factor=4 if effective_workers > 0 else None,
+            persistent_workers=True if effective_workers > 0 else False,
         )
         return loader, stream
     
@@ -405,11 +407,12 @@ def train(args):
                 
                 # === OOM Protection: Wrap batch processing in try/except ===
                 try:
-                    # Periodic memory cleanup (every 100 steps)
-                    if step % 100 == 0:
+                    # Periodic memory cleanup (every 1000 steps)
+                    if step % 1000 == 0:
                         gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        # Only clear CUDA cache on OOM or very rarely to avoid sync overhead
+                        # if torch.cuda.is_available():
+                        #     torch.cuda.empty_cache()
                     
                     # Unpack Batch (requery is NOT in data - computed from action loss)
                     images = batch['images'].to(device)   # (B, W, 3, 128, 128)
