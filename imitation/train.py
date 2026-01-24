@@ -554,16 +554,7 @@ def train(args):
                     # === Persistent Memory Fix ===
                     # Python doesn't always release memory to OS. We force it periodically.
                     if step % 1000 == 0:
-                        if platform.system() == 'Linux':
-                            try:
-                                import ctypes
-                                libc = ctypes.CDLL("libc.so.6")
-                                libc.malloc_trim(0)
-                            except Exception as e:
-                                log.debug(f"malloc_trim failed: {e}")
-                        elif platform.system() == 'Windows':
-                            # Windows does not support malloc_trim; use gc.collect() as fallback
-                            gc.collect()
+                        gc.collect()
 
                     
                     # === Validation Loop ===
