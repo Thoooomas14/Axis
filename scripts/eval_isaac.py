@@ -84,11 +84,11 @@ def main():
     print(f"Loading AxisInference from {args.checkpoint}...")
     config = {
         'device': device,
-        'proprio_dim': 10,
-        'action_dim': 7, # Twist=7 (used internally by model)
+        'proprio_dim': 13, # 13D: [R(9), p(3), g(1)]
+        'action_dim': 7,   # 7D: [v(3), w(3), g(1)] Twist
         'embed_dim': 256,
         'window_size': 8,
-        'chunk_size': args.chunk_size, # Passed to inference wrapper
+        'chunk_size': args.chunk_size, 
         'max_pos_delta': 0.05,
         'max_rot_delta': 0.1
     }
@@ -101,7 +101,7 @@ def main():
         simulation_app.close()
         sys.exit(1)
 
-    oracle = GoalOracle(output_dim=64)
+    oracle = GoalOracle(output_dim=38) # Updated to 38D
 
     # --- Setup Environment ---
     try:
@@ -116,7 +116,7 @@ def main():
             video_folder = os.path.join(os.path.dirname(args.checkpoint), "videos")
             env = RecordVideo(env, video_folder=video_folder, step_trigger=lambda step: step == 0, video_length=args.steps, name_prefix="eval_v2")
             
-        # Wrapper now returns 10D proprio
+        # Wrapper now returns 13D proprio
         env = AxisObservationWrapper(env, window_size=8, device=device)
     except Exception as e:
         print(f"Error initializing environment: {e}")
@@ -131,9 +131,9 @@ def main():
         B = env.num_envs
         
         # State
-        initial_pose_10d = None
+        initial_pose_13d = None
         target_pos_sim = None 
-        goal_vector = np.zeros((B, 64), dtype=np.float32)
+        goal_vector = np.zeros((B, 38), dtype=np.float32) # 38D
         requery_flag = True
         
         print("Starting Control Loop...")
@@ -142,11 +142,11 @@ def main():
             # 1. Get Observations (Torch -> Numpy)
             # Images: (B, W, C, H, W)
             images_np = obs['images'].cpu().numpy()
-            # Proprio: (B, W, 10) [pos3, rot6d, grip1] (already handled by wrapper)
-            proprio_10d_np = obs['proprio'].cpu().numpy()
+            # Proprio: (B, W, 13) [rot9, pos3, grip1]
+            proprio_13d_np = obs['proprio'].cpu().numpy()
             
             # Use last proprio in window as current state
-            current_pose_10d = proprio_10d_np[0, -1] # (10,)
+            current_pose_13d = proprio_13d_np[0, -1] # (13,)
             
             # 3. Goal Logic (Sim specific hacking)
             if 'cube' in env.unwrapped.scene.keys():
@@ -154,26 +154,30 @@ def main():
             else:
                 cube_pos = np.zeros(3)
                 
-            if initial_pose_10d is None or requery_flag:
-                initial_pose_10d = current_pose_10d.copy()
+            if initial_pose_13d is None or requery_flag:
+                initial_pose_13d = current_pose_13d.copy()
                 
                 # Goal Target: Cube Pos (converted to Model Frame)
                 target_pos_model = cube_pos.copy()
                 target_pos_model[1] *= -1.0 # Mirror Y
                 
                 # Goal Pose: Target Pos + Fixed Downward Orientation
-                target_pose_10d = np.zeros(10, dtype=np.float32)
-                target_pose_10d[:3] = target_pos_model
+                # Construct 13D Target Pose
+                target_pose_13d = np.zeros(13, dtype=np.float32)
                 
-                # Fixed Rotation: Downward [0,0,1,0] xyzw -> 6D
-                target_quat_xyzw = np.array([0.0, 0.0, 1.0, 0.0])
-                target_rot6d = quaternion_to_rot6d_numpy(target_quat_xyzw)
-                target_pose_10d[3:9] = target_rot6d
-                target_pose_10d[9] = 1.0 # Close gripper
+                # Rotation: Downward [0,0,1,0] xyzw -> 3x3 Mat -> Flatten
+                # Scipy uses scalar LAST [x,y,z,w] for from_quat
+                target_quat_xyzw = np.array([0.0, 0.0, 1.0, 0.0]) 
+                target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
+                
+                target_pose_13d[:9] = target_rot
+                target_pose_13d[9:12] = target_pos_model
+                target_pose_13d[12] = 1.0 # Close gripper
                 
                 # Encode Goal
                 # Task 1: Pick
-                g_emb = oracle.encode_goal(1, initial_pose_10d, target_pose_10d)
+                # Oracle handles 13D logic internally now
+                g_emb = oracle.encode_goal(1, initial_pose_13d, target_pose_13d)
                 goal_vector[0] = g_emb.numpy()
                 
                 print(f"Goal Updated! Target: {target_pos_model.round(3)}")
@@ -183,14 +187,17 @@ def main():
             # Call agent with single sample (remove batch dim)
             batch_result = agent.predict(
                 images_np[0], # (W, C, H, W)
-                proprio_10d_np[0], # (W, 10)
-                goal_vector[0] # (64,)
+                proprio_13d_np[0], # (W, 13)
+                goal_vector[0] # (38,)
             )
             
-            requery_flag = batch_result['requery']
+            requery_flag = batch_result.get('requery', False)
             
             # 5. Execute
-            # Model Output: 'action_absolute' is 10D (pos3, rot6d, grip1)
+            # Model Output: 'action_absolute' is what Inference class returns.
+            # If the model outputs twist, Inference class should handle integration.
+            # Assuming Inference class returns *Absolute* action for Step (pos, quat, grip)
+            
             act_pos = batch_result['position']
             act_quat_xyzw = batch_result['quaternion']
             act_grip = batch_result['gripper']
@@ -213,13 +220,13 @@ def main():
             obs, reward, terminated, truncated, info = env.step(env_action_t)
             
             if i % 10 == 0:
-                print(f"Step {i} | Pos:{current_pose_10d[:3].round(3)} | Grip:{current_pose_10d[9]:.2f}")
+                print(f"Step {i} | Pos:{current_pose_13d[9:12].round(3)} | Grip:{current_pose_13d[12]:.2f}")
                 
             if terminated.any() or truncated.any():
                 print("Reset triggered.")
                 obs, info = env.reset()
                 agent.reset() # Reset inference state
-                initial_pose_10d = None
+                initial_pose_13d = None
                 requery_flag = True
 
         print("Evaluation Complete.")

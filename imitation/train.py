@@ -616,7 +616,7 @@ def train(args):
                         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
                     # Checkpointing (Step-based)
-                    if args.epochs == 0 and step % args.save_interval == 0:
+                    if step % args.save_interval == 0:
                         # Define checkpoint data
                         ckpt_data = {
                             'step': step,
@@ -648,7 +648,7 @@ def train(args):
                         training_logger.plot_progress()
                         
                     # Visualization (Step-based)
-                    if args.epochs == 0 and args.viz and step % args.viz_interval == 0:
+                    if args.viz and step % args.viz_interval == 0:
                         visualizer.visualize_batch(step, batch, pred_action)
                 
                 except torch.cuda.OutOfMemoryError:
