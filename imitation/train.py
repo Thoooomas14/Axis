@@ -375,7 +375,7 @@ def train(args):
         
         # Global pbar for step-based training
         if args.epochs == 0:
-            pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps")
+            pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps", smoothing=0.95, mininterval=1.0)
         
         steps_per_epoch_actual = None
         
@@ -392,7 +392,7 @@ def train(args):
                 else:
                     epoch_total = steps_per_epoch_actual  # Actual count from previous epoch
                 
-                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}")
+                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.95, mininterval=1.0)
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
