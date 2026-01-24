@@ -58,7 +58,7 @@ class ThroughputMonitor:
     Tracks wall-clock throughput using a sliding window.
     Accounts for I/O pauses better than standard EMA.
     """
-    def __init__(self, window_size=50, total_steps=None):
+    def __init__(self, window_size=100, total_steps=None):
         self.window = deque(maxlen=window_size)
         self.total_steps = total_steps
         self.start_time = time.time()
@@ -546,7 +546,7 @@ def train(args):
                     monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
                     rate, eta = monitor.get_stats()
                     
-                    pbar.set_description(f"L:{loss.item():.4f} | {rate:.2f}it/s | ETA: {eta}")
+                    pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | {rate:.2f}it/s | ETA: {eta}")
                     pbar.update(1)  # Increment progress bar counter
                     
                     # === Persistent Memory Fix ===
