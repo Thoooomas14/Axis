@@ -74,6 +74,25 @@ def train(args):
     }
     
     # --- Endpoint Chordal Loss (task-oriented, trig-free) ---
+    def orthonormalize_rotation(R):
+        """
+        Orthonormalize rotation matrices using SVD.
+        Project onto the closest valid rotation matrix in Frobenius norm.
+        R: (B, 3, 3)
+        Returns: (B, 3, 3) valid rotation matrices
+        """
+        U, S, V = torch.svd(R)
+        # Ensure det(U @ V.T) is 1 (handle reflection case)
+        # Construct correction matrix
+        with torch.no_grad():
+             det = torch.det(U @ V.transpose(-2, -1))
+             diag = torch.ones_like(S)
+             diag[:, -1] = det
+             
+             # Reconstruct: R = U @ diag @ V.T
+             R_new = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
+        return R_new
+
     def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
         """
         Compute SE(3) chordal loss on endpoint after twist rollout.
@@ -101,8 +120,15 @@ def train(args):
         p_start = start_poses[:, 9:12]  # (B, 3)
         
         T_pred = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
-        T_pred[:, :3, :3] = R_start
+        
+        # Sanitize input rotation
+        R_start_clean = orthonormalize_rotation(R_start)
+        T_pred[:, :3, :3] = R_start_clean
         T_pred[:, :3, 3] = p_start
+        
+        # Initialize LieTensor state once
+        # check=False is acceptable here because we just sanitized it
+        T_pred_pp = pp.mat2SE3(T_pred, check=False) 
         
         gripper_curr = start_poses[:, 12:13]  # (B, 1)
         
@@ -113,11 +139,14 @@ def train(args):
             
             # Use PyPose for twist application
             T_delta_pp = pp.Exp(pp.se3(twist_6d))  # SE(3) delta
-            T_pred_pp = pp.mat2SE3(T_pred)
+            
+            # Update state in Lie Group (No matrix conversion inside loop)
             T_pred_pp = T_pred_pp @ T_delta_pp  # Body-frame composition
-            T_pred = T_pred_pp.matrix()
             
             gripper_curr = gripper_curr + gripper_delta
+            
+        # Final conversion to matrix for loss calculation
+        T_pred = T_pred_pp.matrix()
         
         # 2. Build Target SE(3) Transform from 13D pose
         R_target = target_poses[:, :9].reshape(B, 3, 3)  # (B, 3, 3)
