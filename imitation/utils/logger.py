@@ -15,7 +15,7 @@ class TrainingLogger:
             if not os.path.exists(self.log_path):
                 with open(self.log_path, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss'])
+                    writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss', 'val_loss'])
             # Verify writable
             with open(self.log_path, 'a', newline='') as f:
                 pass
@@ -27,12 +27,12 @@ class TrainingLogger:
             # Create fallback
             with open(self.log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss'])
+                writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss', 'val_loss'])
 
-    def log_step(self, step, epoch, loss, action_loss, requery_loss):
+    def log_step(self, step, epoch, loss, action_loss, requery_loss, val_loss=None):
         with open(self.log_path, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([step, epoch, loss, action_loss, requery_loss])
+            writer.writerow([step, epoch, loss, action_loss, requery_loss, val_loss])
 
     def plot_progress(self):
         try:
@@ -45,9 +45,15 @@ class TrainingLogger:
             
             plt.figure(figsize=(12, 6))
             
-            # Plot Total Loss
+            # Plot Total Loss with Validation
             plt.subplot(1, 2, 1)
-            plt.plot(df['step'], df['loss'], label='Total Loss', color='blue')
+            plt.plot(df['step'], df['loss'], label='Train Loss', color='blue', alpha=0.7)
+            if 'val_loss' in df.columns:
+                # Plot validation points only where they exist (not NaNs)
+                val_data = df[df['val_loss'].notna()]
+                if len(val_data) > 0:
+                    plt.plot(val_data['step'], val_data['val_loss'], label='Val Loss', color='orange', marker='o', linestyle='--')
+            
             plt.xlabel('Step')
             plt.ylabel('Loss')
             plt.title('Training Loss')

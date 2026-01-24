@@ -611,7 +611,10 @@ def train(args):
                         
                         avg_val_loss = val_loss_total / max(1, val_batches)
                         log.info(f"Validation Loss: {avg_val_loss:.4f}")
-                        # Log validation loss (You might need to update Logger to handle 'val_loss' key or just print)
+                        
+                        # Log validation step (re-use previous action/requery loss for continuity in CSV, or None)
+                        # We pass None for training components to indicate this is a val update
+                        training_logger.log_step(step, epoch, None, None, None, val_loss=avg_val_loss)
                         # Assuming Logger has a generic log_scalar or we just print for now.
                         # logger.writer.add_scalar("Loss/val", avg_val_loss, step) 
                         model.train()
