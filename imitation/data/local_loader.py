@@ -136,33 +136,51 @@ class LocalDataLoader(IterableDataset):
                 return seg
         return segments[-1] if segments else None
     
-    def _compute_twist(self, pose_curr: np.ndarray, pose_next: np.ndarray) -> np.ndarray:
-        """Compute twist from 13D poses using PyPose: ξ = log(T_curr⁻¹ · T_next)."""
-        R_curr = pose_curr[:9].reshape(3, 3)
-        p_curr = pose_curr[9:12]
-        T_curr = np.eye(4, dtype=np.float32)
-        T_curr[:3, :3] = R_curr
-        T_curr[:3, 3] = p_curr
+    def _compute_episode_twists(self, props: np.ndarray) -> np.ndarray:
+        """
+        Vectorized twist computation for entire episode using PyPose.
+        props: (T, 13)
+        Returns: (T-1, 7) - [twist(6), gripper_delta(1)]
+        """
+        # Extract components
+        R_flat = props[:, :9].reshape(-1, 3, 3) # (T, 3, 3)
+        p = props[:, 9:12] # (T, 3)
+        gripper = props[:, 12:13] # (T, 1)
         
-        R_next = pose_next[:9].reshape(3, 3)
-        p_next = pose_next[9:12]
-        T_next = np.eye(4, dtype=np.float32)
-        T_next[:3, :3] = R_next
-        T_next[:3, 3] = p_next
+        # SVD Orthonormalization (Robustness)
+        # We must perform this here as well to match training logic
+        U, S, V = torch.svd(torch.tensor(R_flat, dtype=torch.float32))
+        with torch.no_grad():
+             det = torch.det(U @ V.transpose(-2, -1))
+             diag = torch.ones_like(S)
+             diag[:, -1] = det
+             R_clean = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
         
-        # Use PyPose for log map
-        T_curr_pp = pp.mat2SE3(torch.tensor(T_curr, dtype=torch.float32).unsqueeze(0))
-        T_next_pp = pp.mat2SE3(torch.tensor(T_next, dtype=torch.float32).unsqueeze(0))
-        T_rel_pp = T_curr_pp.Inv() @ T_next_pp
-        xi = pp.Log(T_rel_pp).tensor().squeeze(0).numpy()
+        # Construct SE(3) matrices
+        T_mats = torch.eye(4).unsqueeze(0).repeat(len(props), 1, 1)
+        T_mats[:, :3, :3] = R_clean
+        T_mats[:, :3, 3] = torch.tensor(p, dtype=torch.float32)
         
-        gripper_delta = pose_next[12] - pose_curr[12]
+        # Convert to PyPose LieTensor
+        T_pp = pp.mat2SE3(T_mats, check=False)
         
-        twist7 = np.zeros(7, dtype=np.float32)
-        twist7[:6] = xi
-        twist7[6] = gripper_delta
-        return twist7
-    
+        # Compute relative transforms: T_i^{-1} @ T_{i+1}
+        # Slice: Current [0 : -1], Next [1 : ]
+        T_curr = T_pp[:-1]
+        T_next = T_pp[1:]
+        
+        T_rel = T_curr.Inv() @ T_next
+        xi = pp.Log(T_rel).tensor().numpy() # (T-1, 6)
+        
+        # Gripper delta
+        g_curr = gripper[:-1]
+        g_next = gripper[1:]
+        g_delta = g_next - g_curr
+        
+        # Combine
+        twists = np.concatenate([xi, g_delta], axis=1) # (T-1, 7)
+        return twists
+
     def _process_episode(self, imgs: np.ndarray, props: np.ndarray, object_props: dict = None):
         """Generate training windows from an episode."""
         if len(imgs) < self.buffer_size:
@@ -171,7 +189,14 @@ class LocalDataLoader(IterableDataset):
         # Segment into subtasks
         segments = self._segment_subtasks(props)
         
+        # Pre-compute ALL twists for the episode (Vectorized)
+        # Shape: (T-1, 7)
+        all_twists = self._compute_episode_twists(props)
+        
         # Generate windows
+        # Ensure we have enough future frames for the loss horizon
+        # twist index i corresponds to transition from frame i to i+1
+        # we need twists starting from (w + window_size - 1) up to horizon
         num_windows = len(imgs) - self.window_size - self.loss_horizon + 1
         
         for w in range(num_windows):
@@ -179,8 +204,8 @@ class LocalDataLoader(IterableDataset):
             w_props = props[w : w + self.window_size]
             
             # Find subtask for current window's last frame
-            current_frame = w + self.window_size - 1
-            seg = self._get_segment_for_frame(segments, current_frame)
+            current_frame_idx = w + self.window_size - 1
+            seg = self._get_segment_for_frame(segments, current_frame_idx)
             
             if seg is None:
                 continue
@@ -193,24 +218,27 @@ class LocalDataLoader(IterableDataset):
                 object_props
             )
             
-            # Compute target twists and poses
-            target_twists = []
-            target_poses = []
-            start_idx = w + self.window_size - 1
+            # Get Targets
+            # Twist at index t is step t -> t+1
+            # We want twists starting from current_frame_idx
+            twist_start = current_frame_idx
+            twist_end = twist_start + self.loss_horizon
             
-            for h in range(self.loss_horizon):
-                curr_idx = start_idx + h
-                next_idx = curr_idx + 1
-                twist = self._compute_twist(props[curr_idx], props[next_idx])
-                target_twists.append(twist)
-                target_poses.append(props[next_idx])
+            target_twists = all_twists[twist_start : twist_end] # (H, 7)
+            
+            # Target poses are the poses REACHED by the twists
+            # If twist[t] goes t -> t+1, the target pose is t+1
+            # So targets are props from current+1 to current+horizon+1
+            pose_start = current_frame_idx + 1
+            pose_end = pose_start + self.loss_horizon
+            target_poses = props[pose_start : pose_end] # (H, 13)
             
             yield {
                 'images': torch.tensor(w_imgs, dtype=torch.float32) / 255.0,
                 'proprio': torch.tensor(w_props, dtype=torch.float32),
                 'goal': goal_emb,
-                'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
-                'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
+                'actions': torch.tensor(target_twists, dtype=torch.float32),
+                'target_poses': torch.tensor(target_poses, dtype=torch.float32),
             }
     
     def __iter__(self):
