@@ -29,6 +29,8 @@ from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 import tensorflow_datasets as tfds
 import tensorflow as tf
+from collections import deque
+import time
 # Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
 tf.config.set_visible_devices([], 'GPU')
 
@@ -50,6 +52,47 @@ def setup_logging(verbose: int = 1):
 
 log = logging.getLogger(__name__)
 CHUNK_SIZE = 10
+
+class ThroughputMonitor:
+    """
+    Tracks wall-clock throughput using a sliding window.
+    Accounts for I/O pauses better than standard EMA.
+    """
+    def __init__(self, window_size=50, total_steps=None):
+        self.window = deque(maxlen=window_size)
+        self.total_steps = total_steps
+        self.start_time = time.time()
+        self.window.append((self.start_time, 0)) # time, step_count
+        
+    def update(self, current_step):
+        now = time.time()
+        self.window.append((now, current_step))
+        
+    def get_stats(self):
+        if len(self.window) < 2:
+            return 0.0, "N/A"
+            
+        t_start, s_start = self.window[0]
+        t_end, s_end = self.window[-1]
+        
+        duration = t_end - t_start
+        steps = s_end - s_start
+        
+        if duration < 1e-6:
+            return 0.0, "N/A"
+            
+        rate = steps / duration
+        
+        eta_str = "N/A"
+        if self.total_steps and rate > 0:
+            remaining = self.total_steps - s_end
+            if self.total_steps == float('inf'): # Infinite epochs
+                 eta_str = "??" 
+            else:
+                remaining_sec = remaining / rate
+                eta_str = time.strftime("%H:%M:%S", time.gmtime(remaining_sec))
+            
+        return rate, eta_str
 
 def train(args):
     # Setup logging based on verbosity
@@ -374,8 +417,11 @@ def train(args):
             start_epoch = 0
         
         # Global pbar for step-based training
+        # Global pbar for step-based training
         if args.epochs == 0:
-            pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps", smoothing=0.95, mininterval=1.0)
+            pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps", smoothing=0.0) # Disable tqdm smoothing
+            monitor = ThroughputMonitor(window_size=20, total_steps=target_step) 
+            monitor.update(start_step)
         
         steps_per_epoch_actual = None
         
@@ -392,7 +438,8 @@ def train(args):
                 else:
                     epoch_total = steps_per_epoch_actual  # Actual count from previous epoch
                 
-                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.95, mininterval=1.0)
+                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.0)
+                monitor = ThroughputMonitor(window_size=20, total_steps=epoch_total)
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
@@ -494,7 +541,12 @@ def train(args):
                     
                     step += 1
                     steps_in_current_epoch += 1
-                    pbar.set_description(f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f}")
+                    
+                    # Update Monitor
+                    monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
+                    rate, eta = monitor.get_stats()
+                    
+                    pbar.set_description(f"L:{loss.item():.4f} | {rate:.2f}it/s | ETA: {eta}")
                     pbar.update(1)  # Increment progress bar counter
                     
                     # === Persistent Memory Fix ===
