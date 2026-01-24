@@ -255,7 +255,9 @@ class LocalDataLoader(IterableDataset):
             end = start + per_worker if worker_id < worker_info.num_workers - 1 else len(episode_keys)
             episode_keys = episode_keys[start:end]
         
-        with h5py.File(self.data_path, 'r') as f:
+        # Optimize HDF5 cache for SSD reading
+        # rdcc_nbytes: 4MB cache (default is 1MB)
+        with h5py.File(self.data_path, 'r', rdcc_nbytes=4 * 1024 * 1024) as f:
             while True:
                 if self.shuffle:
                     random.shuffle(episode_keys)
