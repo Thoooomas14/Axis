@@ -420,7 +420,7 @@ def train(args):
         # Global pbar for step-based training
         if args.epochs == 0:
             pbar = tqdm(total=target_step, initial=start_step, desc="Training Steps", smoothing=0.0) # Disable tqdm smoothing
-            monitor = ThroughputMonitor(window_size=20, total_steps=target_step) 
+            monitor = ThroughputMonitor(window_size=100, total_steps=target_step) 
             monitor.update(start_step)
         
         steps_per_epoch_actual = None
@@ -439,7 +439,7 @@ def train(args):
                     epoch_total = steps_per_epoch_actual  # Actual count from previous epoch
                 
                 pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.0)
-                monitor = ThroughputMonitor(window_size=20, total_steps=epoch_total)
+                monitor = ThroughputMonitor(window_size=100, total_steps=epoch_total)
             
             for batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
