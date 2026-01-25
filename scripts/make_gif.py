@@ -172,12 +172,13 @@ def make_gif(args):
             requery_preds.append(current_req)
             
             # Integrate Prediction
-            # Update curr_pred_pose_13d from input state using predicted action
-            # If closed loop, input state is from our window. If teacher forcing, it's from GT.
-            input_state_13d = proprio_input[0, -1].cpu().numpy()
+            # Update curr_pred_pose_13d from PREVIOUS PREDICTED STATE using predicted action
+            # This ensures we visualize the smooth accumulated trajectory (rollout),
+            # even if the model input (proprio_input) was reset to GT (Teacher Forcing).
+            integration_start_state = curr_pred_pose_13d
             
             # integrate_twist returns (H, 13), we pass (1, 7)
-            integrated = viz.integrate_twist(input_state_13d, current_pred_action)
+            integrated = viz.integrate_twist(integration_start_state, current_pred_action)
             next_pred_pose = integrated[0]
             pred_poses.append(next_pred_pose)
             

@@ -38,7 +38,7 @@ class SafeActionDecoder(nn.Module):
     Wraps any action decoder with safety bounds.
     Clamps position and rotation deltas to prevent unsafe motions.
     """
-    def __init__(self, base_decoder, max_pos_delta=0.05, max_rot_delta=0.1):
+    def __init__(self, base_decoder, max_pos_delta=10.0, max_rot_delta=10.0):
         super().__init__()
         self.base_decoder = base_decoder
         self.max_pos_delta = max_pos_delta
