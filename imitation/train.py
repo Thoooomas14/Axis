@@ -5,7 +5,8 @@ import logging
 import platform
 
 # Suppress TF INFO/WARNING logs to reduce noise (e.g. OUT_OF_RANGE)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import torch
 import torch.nn as nn

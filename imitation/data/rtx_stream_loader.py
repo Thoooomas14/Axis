@@ -7,7 +7,9 @@ Subprocess mode isolates TF memory - when the child process dies, ALL its memory
 
 import os
 # Suppress TF logs globally
+# Suppress TF logs globally
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import torch
 from torch.utils.data import IterableDataset
@@ -31,7 +33,9 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
     Runs in a SEPARATE PROCESS - when it exits, all TensorFlow memory is released.
     """
     import os
+    import os
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     
     import warnings
@@ -659,7 +663,7 @@ class RTXStreamLoader(IterableDataset):
         """Iterator using in-process TensorFlow (may leak memory)."""
         import tensorflow as tf
         tf.config.set_visible_devices([], 'GPU')
-        tf.config.run_functions_eagerly(True)
+        # tf.config.run_functions_eagerly(True) # Causes warnings with tf.data, not needed for simple iteration
         import tensorflow_datasets as tfds
         import cv2
         

@@ -78,8 +78,12 @@ class Visualizer:
         curr_grip = start_grip
         
         # Process twists
+        # Process twists
         # Ensure twists are tensor
-        twists_tensor = torch.tensor(twists_7d, dtype=torch.float32)
+        if isinstance(twists_7d, torch.Tensor):
+            twists_tensor = twists_7d.clone().detach().to(dtype=torch.float32)
+        else:
+            twists_tensor = torch.tensor(twists_7d, dtype=torch.float32)
         
         for i in range(len(twists_tensor)):
             twist = twists_tensor[i]
