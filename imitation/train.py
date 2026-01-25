@@ -435,7 +435,8 @@ def train(args):
                 
                 # Dynamic Progress Bar with estimation
                 # Use estimated_batches for first epoch, then actual count from previous epochs
-                if epoch == 0:
+                # Use estimated_batches if we haven't completed an epoch yet (e.g. start or resume)
+                if steps_per_epoch_actual is None:
                     epoch_total = estimated_batches  # Use estimate for ETA (may be None)
                 else:
                     epoch_total = steps_per_epoch_actual  # Actual count from previous epoch
