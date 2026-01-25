@@ -26,6 +26,20 @@ class Visualizer:
         # Twist Labels: Linear Velocity (3), Angular Velocity (3), Gripper (1)
         self.action_labels = ['vx', 'vy', 'vz', 'wx', 'wy', 'wz', 'g']
 
+    def orthonormalize_rotation(self, R):
+        """
+        Orthonormalize rotation matrices using SVD.
+        R: (..., 3, 3)
+        Returns: (..., 3, 3) valid rotation matrices
+        """
+        U, S, V = torch.svd(torch.tensor(R, dtype=torch.float32))
+        with torch.no_grad():
+             det = torch.det(U @ V.transpose(-2, -1))
+             diag = torch.ones_like(S)
+             diag[..., -1] = det
+             R_new = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
+        return R_new.numpy()
+
     def integrate_twist(self, start_pose_13d, twists_7d):
         """
         Integrate a sequence of twists starting from a 13D pose.
@@ -42,6 +56,10 @@ class Visualizer:
 
         # 1. Convert start pose to SE(3) matrix
         start_rot = start_pose_13d[:9].reshape(3, 3)
+        
+        # Sanitize Rotation! (PyPose is strict)
+        start_rot = self.orthonormalize_rotation(start_rot)
+        
         start_pos = start_pose_13d[9:12]
         start_grip = start_pose_13d[12]
         
@@ -50,6 +68,7 @@ class Visualizer:
         T_curr[:3, 3] = start_pos
         
         # Convert to PyPose SE3
+        # Ensure input to mat2SE3 is clean
         T_curr_pp = pp.mat2SE3(torch.tensor(T_curr, dtype=torch.float32).unsqueeze(0)) # (1, 7)
         
         # 2. Integrate Twists
@@ -110,36 +129,55 @@ class Visualizer:
         Args:
             step: Current training step
             batch: Dict with 'images', 'proprio', 'actions', 'target_poses'
-            pred_action: (B, 7) tensor - predicted twist for LAST step in window
+            pred_action: (B, H, 7) tensor - predicted twist sequence
             save_prefix: Filename prefix
         """
         try:
             # We visualize the LAST step of the window for the first batch element
             b = 0
             
+            # Helper to ensure shape (H, 7)
+            if pred_action.dim() == 2: # (B, 7) -> (B, 1, 7)
+                pred_action = pred_action.unsqueeze(1)
+                
+            horizon = pred_action.shape[1]
+            
             # 1. Images
             images = batch['images'][b] # (T, 3, H, W)
             # Take last frame
             img = images[-1].cpu().permute(1, 2, 0).numpy() # (H, W, 3)
             
-            # 2. Twist Comparison
-            gt_twist = batch['actions'][b][0].cpu().numpy() # (7,) - assuming loss_horizon=1
-            pred_twist = pred_action[b].detach().cpu().numpy() # (7,)
+            # 2. Twist Comparison (Comparing average or first step?)
+            # Let's verify we have enough GT steps
+            gt_action_seq = batch['actions'][b].cpu().numpy() # (GT_H, 7)
             
-            # 3. Trajectory Integration (1 step)
+            # Truncate to min horizon
+            common_horizon = min(horizon, gt_action_seq.shape[0])
+            
+            gt_twist_seq = gt_action_seq[:common_horizon]
+            pred_twist_seq = pred_action[b, :common_horizon].detach().cpu().numpy()
+            
+            # Plot the FIRST step twist for bar chart clarity (or average?)
+            gt_twist_0 = gt_twist_seq[0]
+            pred_twist_0 = pred_twist_seq[0]
+            
+            # 3. Trajectory Integration (Horizon steps)
             # Start Pose: Last proprio in window
             start_pose = batch['proprio'][b][-1].cpu().numpy() # (13,)
             
-            # Integrate GT
-            # We have pre-computed target poses in batch, let's use them directly for GT
-            if 'target_poses' in batch:
-                gt_next_pose = batch['target_poses'][b][0].cpu().numpy() # (13,)
+            # Integrate GT (Full sequence)
+            # Note: target_poses usually contains the N-step future poses.
+            # If we have target_poses, we can just grab the H-th one.
+            if 'target_poses' in batch and batch['target_poses'][b].shape[0] >= common_horizon:
+                 gt_next_pose = batch['target_poses'][b][common_horizon-1].cpu().numpy()
             else:
-                # Fallback integration
-                gt_next_pose = self.integrate_twist(start_pose, gt_twist[None, :])[0]
-                
+                 # Fallback: Integrate GT twists
+                 gt_poses = self.integrate_twist(start_pose, gt_twist_seq)
+                 gt_next_pose = gt_poses[-1]
+                 
             # Integrate Pred
-            pred_next_pose = self.integrate_twist(start_pose, pred_twist[None, :])[0]
+            pred_poses = self.integrate_twist(start_pose, pred_twist_seq)
+            pred_next_pose = pred_poses[-1]
             
             # --- Plotting ---
             fig = plt.figure(figsize=(16, 8))
@@ -147,22 +185,22 @@ class Visualizer:
             # A. Image
             ax_img = fig.add_subplot(2, 2, 1)
             ax_img.imshow(img)
-            ax_img.set_title(f"Step {step} (Input)")
+            ax_img.set_title(f"Step {step} (Input) | Horizon {common_horizon}")
             ax_img.axis('off')
             
-            # B. Twist Bar Chart
+            # B. Twist Bar Chart (Step 0)
             ax_twist = fig.add_subplot(2, 2, 2)
             x = np.arange(7)
             width = 0.35
-            ax_twist.bar(x - width/2, gt_twist, width, label='GT Twist', color='green', alpha=0.7)
-            ax_twist.bar(x + width/2, pred_twist, width, label='Pred Twist', color='red', alpha=0.7)
+            ax_twist.bar(x - width/2, gt_twist_0, width, label='GT Twist (t=0)', color='green', alpha=0.7)
+            ax_twist.bar(x + width/2, pred_twist_0, width, label='Pred Twist (t=0)', color='red', alpha=0.7)
             ax_twist.set_xticks(x)
             ax_twist.set_xticklabels(self.action_labels)
-            ax_twist.set_title("Twist Prediction (Velocities)")
+            ax_twist.set_title("Twist Prediction (Step 0 Only)")
             ax_twist.legend()
             ax_twist.grid(True, alpha=0.3)
             
-            # C. Trajectory / Next Pose Comparison (Position)
+            # C. Trajectory / Next Pose Comparison (Final Pose at Horizon)
             ax_pos = fig.add_subplot(2, 2, 3)
             # Compare XYZ + Gripper
             # GT
@@ -178,19 +216,19 @@ class Visualizer:
             labels = ['x', 'y', 'z', 'g']
             x_pos = np.arange(4)
             
-            ax_pos.bar(x_pos - width/2, gt_vec, width, label='GT Pose', color='blue', alpha=0.7)
-            ax_pos.bar(x_pos + width/2, pred_vec, width, label='Pred Pose', color='orange', alpha=0.7)
+            ax_pos.bar(x_pos - width/2, gt_vec, width, label=f'GT Pose (t+{common_horizon})', color='blue', alpha=0.7)
+            ax_pos.bar(x_pos + width/2, pred_vec, width, label=f'Pred Pose (t+{common_horizon})', color='orange', alpha=0.7)
             ax_pos.set_xticks(x_pos)
             ax_pos.set_xticklabels(labels)
-            ax_pos.set_title("Next Step Pose (Position + Gripper)")
+            ax_pos.set_title(f"Pose at Horizon t+{common_horizon} (Pos+Grip)")
             ax_pos.legend()
             
             # D. Text Info
             ax_text = fig.add_subplot(2, 2, 4)
             ax_text.axis('off')
-            info = f"Movement Norm (GT): {np.linalg.norm(gt_twist[:6]):.4f}\n"
-            info += f"Prediction Norm: {np.linalg.norm(pred_twist[:6]):.4f}\n"
-            info += f"Pos Error: {np.linalg.norm(gt_pos - pred_pos):.4f}"
+            info = f"Movement Norm (GT Steps 0-{common_horizon}): {np.linalg.norm(gt_twist_seq):.4f}\n"
+            info += f"Prediction Norm (Steps 0-{common_horizon}): {np.linalg.norm(pred_twist_seq):.4f}\n"
+            info += f"Pos Error (at t+{common_horizon}): {np.linalg.norm(gt_pos - pred_pos):.4f}"
             ax_text.text(0.1, 0.5, info, fontsize=12, va='center')
             
             plt.tight_layout()
@@ -203,7 +241,7 @@ class Visualizer:
             import traceback
             traceback.print_exc()
 
-    def create_gif(self, step, images, target_actions, pred_actions, requery_preds=None, inference_times=None, save_prefix='episode', dpi=50):
+    def create_gif(self, step, images, target_actions, pred_actions, gt_poses=None, pred_poses=None, requery_preds=None, inference_times=None, save_prefix='episode', dpi=50):
         """
         Creates a GIF visualizing an entire episode, comparing Trajectories.
         Assumes inputs are full episode sequences.
@@ -215,6 +253,8 @@ class Visualizer:
             if isinstance(images, torch.Tensor): images = images.cpu().permute(0, 2, 3, 1).numpy()
             if isinstance(target_actions, torch.Tensor): target_actions = target_actions.cpu().numpy()
             if isinstance(pred_actions, torch.Tensor): pred_actions = pred_actions.cpu().numpy()
+            if gt_poses is not None and isinstance(gt_poses, torch.Tensor): gt_poses = gt_poses.cpu().numpy()
+            if pred_poses is not None and isinstance(pred_poses, torch.Tensor): pred_poses = pred_poses.cpu().numpy()
             
             T = images.shape[0]
             
@@ -223,35 +263,72 @@ class Visualizer:
                 print(f"Truncating GIF from {T} to 200 frames.")
                 T = 200
             
-            fig = plt.figure(figsize=(14, 6))
-            ax_img = fig.add_subplot(1, 2, 1)
-            ax_twist = fig.add_subplot(1, 2, 2)
+            # Layout: 2x2 grid (Image, XY, XZ, ZY)
+            fig = plt.figure(figsize=(12, 10))
             
+            ax_img = fig.add_subplot(2, 2, 1)
+            ax_xy = fig.add_subplot(2, 2, 2)
+            ax_xz = fig.add_subplot(2, 2, 3)
+            ax_zy = fig.add_subplot(2, 2, 4)
+            
+            # Pre-calculate limits for all plots if poses exist
+            pass_poses = (gt_poses is not None and pred_poses is not None)
+            if pass_poses:
+                margin = 0.05
+                all_x = np.concatenate([gt_poses[:, 9], pred_poses[:, 9]])
+                all_y = np.concatenate([gt_poses[:, 10], pred_poses[:, 10]])
+                all_z = np.concatenate([gt_poses[:, 11], pred_poses[:, 11]])
+                
+                xlim = (all_x.min()-margin, all_x.max()+margin)
+                ylim = (all_y.min()-margin, all_y.max()+margin)
+                zlim = (all_z.min()-margin, all_z.max()+margin)
+
             def update(t):
                 ax_img.clear()
-                ax_twist.clear()
+                ax_xy.clear()
+                ax_xz.clear()
+                ax_zy.clear()
                 
                 # 1. Image
                 ax_img.imshow(images[t])
                 ax_img.set_title(f"Step {t}")
                 ax_img.axis('off')
                 
-                # 2. Twist
-                gt = target_actions[t]
-                pred = pred_actions[t]
-                
-                x = np.arange(7)
-                width = 0.35
-                
-                ax_twist.bar(x - width/2, gt, width, color='green', alpha=0.7, label='GT')
-                ax_twist.bar(x + width/2, pred, width, color='red', alpha=0.7, label='Pred')
-                
-                ax_twist.set_ylim(-1.0, 1.0) 
-                ax_twist.set_xticks(x)
-                ax_twist.set_xticklabels(self.action_labels)
-                ax_twist.legend(loc='upper right')
-                ax_twist.set_title("Twist")
-                ax_twist.grid(True, alpha=0.3)
+                if pass_poses:
+                    # Common plot helper
+                    def plot_projection(ax, dim1_idx, dim2_idx, label1, label2, title, limits):
+                        # GT
+                        ax.plot(gt_poses[:t+1, dim1_idx], gt_poses[:t+1, dim2_idx], label='GT', color='green')
+                        # Pred
+                        ax.plot(pred_poses[:t+1, dim1_idx], pred_poses[:t+1, dim2_idx], label='Pred', color='red', linestyle='--')
+                        
+                        # Current Point
+                        ax.scatter(gt_poses[t, dim1_idx], gt_poses[t, dim2_idx], c='green', s=50)
+                        ax.scatter(pred_poses[t, dim1_idx], pred_poses[t, dim2_idx], c='red', s=50)
+                        
+                        ax.set_title(title)
+                        ax.set_xlabel(label1)
+                        ax.set_ylabel(label2)
+                        ax.grid(True)
+                        
+                        # Set limits
+                        if limits[0] is not None: ax.set_xlim(limits[0])
+                        if limits[1] is not None: ax.set_ylim(limits[1])
+                        
+                        if t == 0: ax.legend() # Only legend on first frame to save clutter/time? Or just always.
+
+                    # Indices: X=9, Y=10, Z=11
+                    
+                    # 2. XY (Top View)
+                    plot_projection(ax_xy, 9, 10, "X (m)", "Y (m)", "XY Projection (Top)", (xlim, ylim))
+                    
+                    # 3. XZ (Front View)
+                    plot_projection(ax_xz, 9, 11, "X (m)", "Z (m)", "XZ Projection (Front)", (xlim, zlim))
+                    
+                    # 4. ZY (Side View - Z vs Y) - as requested
+                    plot_projection(ax_zy, 11, 10, "Z (m)", "Y (m)", "ZY Projection", (zlim, ylim))
+                else:
+                    ax_xy.text(0.5, 0.5, "Poses not provided", ha='center')
                 
             ani = animation.FuncAnimation(fig, update, frames=T, interval=100)
             save_path = os.path.join(self.save_dir, f"{save_prefix}_step_{step}.gif")

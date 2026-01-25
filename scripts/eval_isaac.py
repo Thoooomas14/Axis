@@ -54,12 +54,13 @@ def quaternion_to_rot6d_numpy(quat_xyzw):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
-    parser.add_argument('--checkpoint', type=str, required=True, help="Path to model checkpoint")
+    parser.add_argument('--checkpoint', type=str, default=None, help="Path to model checkpoint")
     parser.add_argument('--robot', type=str, default='franka', choices=['franka', 'google'], help="Robot type")
     parser.add_argument('--steps', type=int, default=1000, help="Max steps")
     parser.add_argument('--video', action='store_true', help="Record video")
     parser.add_argument('--model_refresh', type=int, default=30, help="Control frequency Hz")
     parser.add_argument('--chunk_size', type=int, default=1, help="Action chunk size used in model")
+    parser.add_argument('--random_weights', action='store_true', help="Use random weights (no checkpoint)")
     
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -94,7 +95,7 @@ def main():
     }
     
     try:
-        agent = AxisInference(args.checkpoint, config, device=device)
+        agent = AxisInference(args.checkpoint, config, device=device, random_weights=args.random_weights)
         print("Model loaded successfully.")
     except Exception as e:
         print(f"Failed to load agent: {e}")

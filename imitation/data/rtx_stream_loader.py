@@ -180,6 +180,11 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
         if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
             full_path = f"{data_dir}/{dataset_name}/0.1.0"
             builder = tfds.builder_from_directory(builder_dir=full_path)
+        elif dataset_name == 'droid':
+            # DROID GCS handling
+            gcs_base = data_dir if data_dir else "gs://gresearch/robotics"
+            full_path = f"{gcs_base}/droid/1.0.1"
+            builder = tfds.builder_from_directory(builder_dir=full_path)
         else:
             builder = tfds.builder(dataset_name, data_dir=data_dir, try_gcs=True)
         
@@ -335,7 +340,7 @@ class RTXStreamLoader(IterableDataset):
     def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
                  loss_horizon=1, image_key=None, image_size=(128, 128), 
                  shuffle_buffer_size=1000, data_dir=None, repeat=True,
-                 use_subprocess=True, queue_size=32):
+                 use_subprocess=True, queue_size=32, shuffle_files=True):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -348,6 +353,7 @@ class RTXStreamLoader(IterableDataset):
         self.repeat = repeat
         self.use_subprocess = use_subprocess
         self.queue_size = queue_size
+        self.shuffle_files = shuffle_files
         
         self.oracle = GoalOracle(output_dim=38)
         
@@ -367,10 +373,19 @@ class RTXStreamLoader(IterableDataset):
         """Initialize TFDS builder (only for in-process mode or length queries)."""
         import tensorflow as tf
         tf.config.set_visible_devices([], 'GPU')
+        # Limit TF memory
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+        
         import tensorflow_datasets as tfds
         
         if self.data_dir and self.data_dir.startswith('gs://') and 'fractal' in self.dataset_name:
             full_path = f"{self.data_dir}/{self.dataset_name}/0.1.0"
+            self.builder = tfds.builder_from_directory(builder_dir=full_path)
+        elif self.dataset_name == 'droid':
+             # DROID GCS handling
+            gcs_base = self.data_dir if self.data_dir else "gs://gresearch/robotics"
+            full_path = f"{gcs_base}/droid/1.0.1"
             self.builder = tfds.builder_from_directory(builder_dir=full_path)
         else:
             use_gcs = (self.data_dir is None)
@@ -639,6 +654,7 @@ class RTXStreamLoader(IterableDataset):
                 return seg['goal']
         return segments[-1]['goal'] if segments else None
     
+    
     def _iter_inprocess(self):
         """Iterator using in-process TensorFlow (may leak memory)."""
         import tensorflow as tf
@@ -650,10 +666,20 @@ class RTXStreamLoader(IterableDataset):
         if self.builder is None:
             self._init_builder()
         
-        read_config = tfds.ReadConfig(try_autocache=False, add_tfds_id=False)
+        # Optimize ReadConfig based on shuffling
+        read_config = tfds.ReadConfig(
+            try_autocache=False, 
+            add_tfds_id=False,
+            interleave_cycle_length=1 if not self.shuffle_files else None, # Sequential if not shuffling
+            interleave_block_length=1 if not self.shuffle_files else None
+        )
         
         if self.ds is None:
-            self.ds = self.builder.as_dataset(split=self.split, shuffle_files=True, read_config=read_config)
+            self.ds = self.builder.as_dataset(
+                split=self.split, 
+                shuffle_files=self.shuffle_files, # Control file shuffling
+                read_config=read_config
+            )
         
         ds = self.ds
         
@@ -669,6 +695,7 @@ class RTXStreamLoader(IterableDataset):
         if self.repeat:
             ds = ds.repeat()
         
+        # Only shuffle if buffer size > 1 (and > 0)
         if self.shuffle_buffer_size > 1:
             ds = ds.shuffle(self.shuffle_buffer_size)
         

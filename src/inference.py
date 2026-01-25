@@ -79,26 +79,33 @@ class ActionChunkEnsembler:
 class AxisInference:
     """Production inference wrapper with safety features, KV-caching, and temporal ensembling."""
     
-    def __init__(self, checkpoint_path: str, config: dict, device: str = 'cuda'):
+    def __init__(self, checkpoint_path: str, config: dict, device: str = 'cuda', random_weights=False):
         """
         Args:
             checkpoint_path: Path to .pt checkpoint
             config: Model configuration dict
             device: 'cuda' or 'cpu'
         """
-        self.config = config
         self.device = device
+        self.config = config
+        self.random_weights = random_weights
         
-        # Load model
-        self.model = AxisModel(config)
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.to(device)
+        # Initialize Model
+        self.model = AxisModel(config).to(device)
         self.model.eval()
         
-        # Safety bounds
-        self.max_pos_delta = config.get('max_pos_delta', 0.05)
-        self.max_rot_delta = config.get('max_rot_delta', 0.1)
+        if self.random_weights:
+            print("WARNING: Using Random Weights for AxisInference.")
+        else:
+            self._load_checkpoint(checkpoint_path)
+            
+        # State History (for windowing)
+        self.image_history = deque(maxlen=config.get('window_size', 1)) # Default to 1 if not in config
+        self.proprio_history = deque(maxlen=config.get('window_size', 1)) # Default to 1 if not in config
+        self.goal_embedding = None # Set by reset()
+        
+        self.cached_tokens = None
+        self.action_queue = deque()
         
         # Action Chunking Ensembler
         self.chunk_size = config.get('action_dim', 1) # Fallback to 1 if not chunked, though typically it is

@@ -13,96 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.axis import AxisModel
 from imitation.utils.visualizer import Visualizer
 from imitation.data.goal_oracle import GoalOracle
-from src.utils.rotation_utils import quaternion_to_rotation_6d
-
-def load_episode(dataset_name, data_dir, split='train'):
-    """Loads a single random episode and converts to 10D pose format."""
-    print(f"Loading dataset {dataset_name} from {data_dir}...")
-    
-    # Special handling for fractal on GCS
-    if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
-        full_path = f"{data_dir}/{dataset_name}/0.1.0"
-        builder = tfds.builder_from_directory(builder_dir=full_path)
-        ds = builder.as_dataset(split=split, shuffle_files=True)
-    else:
-        # Standard load
-        ds = tfds.load(dataset_name, split=split, shuffle_files=True, data_dir=data_dir)
-    
-    # Use safe iteration
-    iterator = iter(ds)
-    episode = next(iterator)
-    steps = list(episode['steps'])
-    
-    images = []
-    proprio = []
-    
-    image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
-    
-    for s in steps:
-        obs = s['observation']
-        
-        # Image Processing
-        img = None
-        for key in image_keys:
-            if key in obs:
-                img = obs[key]
-                break
-        
-        if img is not None:
-            img = tf.image.resize(img, (128, 128))
-            img = tf.cast(img, tf.float32) / 255.0
-            images.append(tf.transpose(img, [2, 0, 1]).numpy())
-        else:
-            images.append(np.zeros((3, 128, 128), dtype=np.float32))
-        
-        # Identity quat default
-        quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-        pos = np.zeros(3, dtype=np.float32)
-
-        # Pose Extraction
-        if 'base_pose_tool_reached' in obs:
-            p = obs['base_pose_tool_reached'].numpy() # 7D: [x,y,z,qx,qy,qz,qw]
-            pos = p[:3]
-            quat = p[3:7]
-        elif 'cartesian_position' in obs:
-            p6 = obs['cartesian_position'].numpy() # 6D: [x,y,z,rx,ry,rz]
-            if p6.shape[0] == 6:
-                pos = p6[:3]
-                euler = p6[3:]
-                quat = R.from_euler('xyz', euler).as_quat()
-        elif 'ee_pose' in obs:
-            p = obs['ee_pose'].numpy()
-            if p.shape[0] >= 7:
-                pos = p[:3]
-                quat = p[3:7]
-        elif 'pose' in obs:
-            p = obs['pose'].numpy()
-            if p.shape[0] >= 7:
-                pos = p[:3]
-                quat = p[3:7]
-        
-        # Gripper Extraction
-        g = 0.0
-        if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
-        elif 'gripper_position' in obs: g = obs['gripper_position'].numpy()
-        elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
-        
-        if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
-        
-        # Normalize Quat
-        qn = np.linalg.norm(quat)
-        if qn < 1e-8: quat = np.array([0., 0., 0., 1.], dtype=np.float32)
-        else: quat = quat / qn
-        
-        # Convert to 10D: [Pos(3) + Rot6D(6) + Gripper(1)]
-        rot_6d = quaternion_to_rotation_6d(torch.tensor(quat, dtype=torch.float32)).numpy()
-        p10 = np.zeros(10, dtype=np.float32)
-        p10[:3] = pos
-        p10[3:9] = rot_6d
-        p10[9] = g
-        proprio.append(p10)
-        
-    return np.array(images), np.array(proprio)
+from imitation.data.rtx_stream_loader import RTXStreamLoader
 
 def make_gif(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -114,159 +25,235 @@ def make_gif(args):
     # --- V2 Configuration ---
     config = {
         'device': device,
-        'goal_dim': 64, 
+        'goal_dim': 38, 
         'embed_dim': 256,
         'num_heads': 4,
         'num_layers': 4,
-        'proprio_dim': 10, # 10D Pose
-        'action_dim': 10,  # 10D Action
-        'use_rope': True
+        'proprio_dim': 13, # 13D Pose
+        'action_dim': 7,   # 7D Twist
+        'use_rope': True,
+        'chunk_size': 10
     }
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
-    model.eval()
+    
+    if args.random_weights:
+        print("WARNING: Using Random Weights.")
+        model.eval()
+    else:
+        model.eval()
+        checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+        if not os.path.exists(checkpoint_path):
+            print(f"Checkpoint not found: {checkpoint_path}")
+            # Try finding runs
+            if os.path.exists(args.checkpoint_dir):
+                files = [f for f in os.listdir(args.checkpoint_dir) if f.endswith('.pt')]
+                if files:
+                    files.sort(key=lambda x: os.path.getmtime(os.path.join(args.checkpoint_dir, x)))
+                    checkpoint_path = os.path.join(args.checkpoint_dir, files[-1])
+                    print(f"Using latest found checkpoint: {checkpoint_path}")
+                else:
+                    print("No checkpoints found.")
+                    return
+            else:
+                 print(f"Checkpoint dir {args.checkpoint_dir} does not exist.")
+                 return
 
-    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
-    if not os.path.exists(checkpoint_path):
-        print(f"Checkpoint not found: {checkpoint_path}")
-        files = [f for f in os.listdir(args.checkpoint_dir) if f.startswith('run_') and f.endswith('.pt')]
-        if files:
-            files.sort(key=lambda x: os.path.getmtime(os.path.join(args.checkpoint_dir, x)))
-            checkpoint_path = os.path.join(args.checkpoint_dir, files[-1])
-            print(f"Using latest run checkpoint: {checkpoint_path}")
-        else:
-            return
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded model at step {checkpoint.get('step', 'unknown')}")
 
-    print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # --- Load Data (Using RTXStreamLoader) ---
+    print(f"Initializing RTXStreamLoader for {args.dataset}...")
+    # Use sequential settings
+    loader = RTXStreamLoader(
+        dataset_name=args.dataset,
+        split='train',
+        batch_size=1,
+        window_size=8,
+        image_size=(128, 128),
+        data_dir=args.data_dir,
+        repeat=False,
+        use_subprocess=False, # In-process for simple debug
+        shuffle_buffer_size=0, # No shuffle = sequential
+        shuffle_files=False    # Sequential files
+    )
     
-    # Handle both full checkpoint and simple state dict
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
-    model_state = model.state_dict()
-    
-    # Filter/Migrate logic (if needed, but assuming fresh V2 training here)
-    filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state and v.shape == model_state[k].shape}
-    model.load_state_dict(filtered_state_dict, strict=False)
-    
-    step = checkpoint.get('step', 0)
-    print(f"Loaded model at step {step}")
+    iterator = iter(loader)
 
-    # --- Load Data ---
-    print("Loading one episode...")
-    images_np, proprio_np = load_episode(args.dataset, args.data_dir)
-    
-    if images_np is None:
-        print("Failed to load episode.")
-        return
-
-    T = images_np.shape[0]
-    print(f"Episode length: {T}")
-
-    # Prepare Inputs
-    images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0) # (1, T, 3, 128, 128)
-    proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0) # (1, T, 10)
-    
-    # --- Goal Oracle (V2) ---
-    oracle = GoalOracle(output_dim=64)
-    
-    # Infer task type
-    start_grip = proprio_np[0][9] # Gripper is index 9 in 10D pose
-    end_grip = proprio_np[-1][9]
-    task_type = 0
-    if start_grip < 0.5 and end_grip > 0.5: task_type = 1 # Pick
-    elif start_grip > 0.5 and end_grip < 0.5: task_type = 2 # Place
-    
-    print(f"Inferred Task Type: {task_type} (Start Grip: {start_grip:.2f}, End Grip: {end_grip:.2f})")
-    
-    # Goal needs start/end poses
-    goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1])
-    goal_emb = goal_emb.to(device).unsqueeze(0) # (1, 64)
+    # --- Visualization Setup ---
+    viz = Visualizer(args.checkpoint_dir)
 
     # --- Inference Loop ---
     pred_actions = []
     requery_preds = []
+    images_collected = []
+    gt_twists = []
     
-    W = 8 # Window size
+    # Store Poses
+    gt_poses = []
+    pred_poses = []
     
-    import time
-    print("Running inference (Autoregressive V2)...")
     inference_times = []
     
-    # Clone proprio for autoregressive updates (starts as Ground Truth)
-    simulated_proprio = proprio.clone()
+    print(f"Processing {args.length} steps...")
+    
+    # Initialize predicted pose with first GT pose
+    # We need to get the first batch to initialize this.
+    # But iterator gives batches one by one.
+    # We'll initialize on the first step.
+    curr_pred_pose_13d = None
+    current_proprio_window = None
     
     with torch.no_grad():
-        for t in range(T):
-            if t % 10 == 0: print(f"Step {t}/{T}")
+        for i in range(args.length):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                print("Dataset exhausted.")
+                break
+                
+            if i % 10 == 0: print(f"Step {i}/{args.length}")
+
+            # Unpack Batch
+            images = batch['images'].to(device)
+            if images.dim() == 4: images = images.unsqueeze(0)
+                
+            proprio = batch['proprio'].to(device)
+            if proprio.dim() == 2: proprio = proprio.unsqueeze(0)
+                
+            goal = batch['goal'].to(device)
+            if goal.dim() == 1: goal = goal.unsqueeze(0)
             
-            # Construct Window
-            if t < W:
-                pad_len = W - 1 - t
-                curr_imgs = images[:, :t+1]
-                curr_props = simulated_proprio[:, :t+1]
-                pad_imgs = curr_imgs[:, 0:1].repeat(1, pad_len, 1, 1, 1)
-                pad_props = curr_props[:, 0:1].repeat(1, pad_len, 1)
-                win_imgs = torch.cat([pad_imgs, curr_imgs], dim=1)
-                win_props = torch.cat([pad_props, curr_props], dim=1)
+            # Initialize Prediction state if needed
+            if curr_pred_pose_13d is None:
+                # Start from the LAST proprio of the FIRST window?
+                # Actually, make_gif usually iterates sequential windows.
+                # The "current" state is the last item in the window input.
+                curr_pred_pose_13d = proprio[0, -1].cpu().numpy() # (13,)
+                
+                # Also store initial poses
+                pred_poses.append(curr_pred_pose_13d)
+            
+            # Collect GT Pose (current state at end of window)
+            gt_pose_curr = proprio[0, -1].cpu().numpy() # (13,)
+            gt_poses.append(gt_pose_curr)
+
+            # Determine Proprio Input
+            if args.closed_loop:
+                if current_proprio_window is None:
+                    # Initialize with GT from first batch
+                    current_proprio_window = proprio.clone()
+                proprio_input = current_proprio_window
             else:
-                win_imgs = images[:, t-W+1 : t+1]
-                win_props = simulated_proprio[:, t-W+1 : t+1]
+                proprio_input = proprio
             
             # Forward Pass
+            import time
             start_time = time.time()
-            # V2 forward returns (action_delta, requery)
-            action_delta, req_logit = model(win_imgs, win_props, goal_emb)
+            output = model(images, proprio_input, goal)
+            
+            if isinstance(output, tuple):
+                 pred_chunk, req_logit = output[0], output[1]
+            else:
+                 pred_chunk = output
+                 req_logit = torch.zeros(1, 1).to(device)
             end_time = time.time()
             inference_times.append(end_time - start_time)
             
-            # Update Simulation State (Apply Delta)
-            # action_delta is (1, 10)
-            current_pose = simulated_proprio[:, t, :] # (1, 10)
-            next_pose = current_pose + action_delta
+            # Action: (1, Chunk, 7). Take first step.
+            current_pred_action = pred_chunk[:, 0, :].cpu() # (1, 7)
+            current_req = torch.sigmoid(req_logit).cpu() # (1, 1)
             
-            # Store predictions
-            pred_actions.append(action_delta.cpu())
-            requery_preds.append(torch.sigmoid(req_logit).cpu())
+            pred_actions.append(current_pred_action)
+            requery_preds.append(current_req)
             
-            # Update next simulated input if available
-            if t + 1 < T:
-                simulated_proprio[:, t+1, :] = next_pose
+            # Integrate Prediction
+            # Update curr_pred_pose_13d from input state using predicted action
+            # If closed loop, input state is from our window. If teacher forcing, it's from GT.
+            input_state_13d = proprio_input[0, -1].cpu().numpy()
+            
+            # integrate_twist returns (H, 13), we pass (1, 7)
+            integrated = viz.integrate_twist(input_state_13d, current_pred_action)
+            next_pred_pose = integrated[0]
+            pred_poses.append(next_pred_pose)
+            
+            # Update state for next step
+            curr_pred_pose_13d = next_pred_pose
+            
+            if args.closed_loop:
+                # Update window for next step
+                # Shift left and append new pose
+                next_pose_t = torch.tensor(next_pred_pose, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
+                current_proprio_window = torch.cat([current_proprio_window[:, 1:, :], next_pose_t], dim=1)
+            
+            # Collect Visualization Data (Image)
+            last_img = images[0, -1].cpu() # (3, H, W)
+            images_collected.append(last_img)
+            
+            # GT Twist (Future)
+            if 'actions' in batch:
+                gt = batch['actions'][0, 0].cpu() # (7,)
+                gt_twists.append(gt)
+            else:
+                gt_twists.append(torch.zeros(7))
+    
+    if not images_collected:
+        print("No data collected.")
+        return
 
-    pred_actions = torch.stack(pred_actions, dim=1).squeeze(0) # (T, 10)
-    requery_preds = torch.stack(requery_preds, dim=1).squeeze(0) # (T, 1)
+    # Stack results
+    pred_actions = torch.cat(pred_actions, dim=0) 
+    requery_preds = torch.cat(requery_preds, dim=0)
+    images_stack = torch.stack(images_collected, dim=0) 
+    gt_stack = torch.stack(gt_twists, dim=0)
     
-    # Target Delta Actions (ShiftGT - GT)
-    # T steps, T-1 transitions + last static
-    # targets should be deltas for V2
-    proprio_gt = torch.tensor(proprio_np, dtype=torch.float32)
-    targets_delta = np.zeros_like(proprio_np)
+    # Poses
+    # gt_poses has T entries. pred_poses has T+1 entries (initial + T updates).
+    # We align them: pred_poses[0] is initial (same as gt_poses[0] roughly).
+    # Actually, iterate loop does T steps.
+    # gt_poses collected T times (current state).
+    # pred_poses collected T+1 times (initial + T nexts).
+    # visualizing step t:
+    # Image[t], Twist[t], Pose[t] (state AT t)
+    # We should match lengths.
+    gt_poses_stack = torch.tensor(np.array(gt_poses), dtype=torch.float32)
+    # Take first T predicted poses to match image count?
+    # Or start from 1?
+    # pred_poses[0] is state at start of step 0.
+    # pred_poses[1] is state at start of step 1 (result of action 0).
+    # We want to plot the trajectory. Matching lengths is best.
+    pred_poses_stack = torch.tensor(np.array(pred_poses[:-1]), dtype=torch.float32)
     
-    # Delta = Next - Curr
-    targets_delta[:-1] = proprio_np[1:] - proprio_np[:-1]
-    targets_delta[-1] = 0 # Last step delta is 0
-    targets = torch.tensor(targets_delta, dtype=torch.float32)
+    print(f"Collected {len(images_collected)} frames. Poses: {gt_poses_stack.shape}")
 
     # --- Generate GIF ---
     print("Generating GIF...")
-    viz = Visualizer(args.checkpoint_dir)
     viz.create_gif(
-        step, 
-        images[0], 
-        targets, 
-        pred_actions, 
-        requery_preds, 
+        0, 
+        images_stack, 
+        gt_stack, 
+        pred_actions,
+        gt_poses=gt_poses_stack,
+        pred_poses=pred_poses_stack,
+        requery_preds=requery_preds, 
         inference_times=inference_times, 
-        save_prefix='manual_episode_v2', 
+        save_prefix='episode_stream_viz', 
         dpi=100
     )
     print("Done!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='fractal20220817_data')
-    parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics')
+    parser.add_argument('--dataset', type=str, default='droid')
+    parser.add_argument('--data_dir', type=str, default=None)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    parser.add_argument('--random_weights', action='store_true', help="Use random weights")
+    parser.add_argument('--closed_loop', action='store_true', help="Use closed-loop proprioception feedback")
+    parser.add_argument('--length', type=int, default=100, help="Number of steps to visualize")
     
     args = parser.parse_args()
     make_gif(args)
