@@ -104,7 +104,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
         pose13 = np.zeros(13, dtype=np.float32)
         pose13[:9] = rotmat.flatten()  # Column-major flatten
-        pose13[9:12] = pos
+        pose13[9:12] = pos * 100.0  # Scale meters to centimeters for better gradients
         pose13[12] = g
         return pose13
     
@@ -265,6 +265,17 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
             
+            # Skip initial stalled frames where arm isn't moving
+            # Threshold: 0.1 cm (1mm) movement between frames (positions already scaled to cm)
+            if len(props) > 1:
+                pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
+                moving_mask = pos_deltas > 0.1
+                if moving_mask.any():
+                    first_moving = np.argmax(moving_mask)
+                    if first_moving > 0:
+                        imgs = imgs[first_moving:]
+                        props = props[first_moving:]
+            
             # Segment into subtasks BEFORE generating windows
             segments = segment_subtasks(props)
             
@@ -344,7 +355,7 @@ class RTXStreamLoader(IterableDataset):
     def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
                  loss_horizon=1, image_key=None, image_size=(128, 128), 
                  shuffle_buffer_size=1000, data_dir=None, repeat=True,
-                 use_subprocess=True, queue_size=32, shuffle_files=True):
+                 use_subprocess=True, queue_size=32, shuffle_files=True, max_episodes=0):
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -358,6 +369,7 @@ class RTXStreamLoader(IterableDataset):
         self.use_subprocess = use_subprocess
         self.queue_size = queue_size
         self.shuffle_files = shuffle_files
+        self.max_episodes = max_episodes  # 0 = unlimited
         
         self.oracle = GoalOracle(output_dim=38)
         
@@ -573,7 +585,7 @@ class RTXStreamLoader(IterableDataset):
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
         pose13 = np.zeros(13, dtype=np.float32)
         pose13[:9] = rotmat.flatten()
-        pose13[9:12] = pos
+        pose13[9:12] = pos * 100.0  # Scale meters to centimeters for better gradients
         pose13[12] = g
         return pose13
     
@@ -707,7 +719,15 @@ class RTXStreamLoader(IterableDataset):
         image_keys = [self.image_key] if self.image_key else fallback_keys
         buffer_size = self.window_size + self.loss_horizon
         
+        episode_count = 0
         for episode in ds:
+            # Check max_episodes limit (for overfit testing)
+            if self.max_episodes > 0 and episode_count >= self.max_episodes:
+                if not self.repeat:
+                    break
+                episode_count = 0  # Reset for repeat mode
+            
+            episode_count += 1
             # Extract full episode
             imgs = []
             props = []
@@ -754,6 +774,17 @@ class RTXStreamLoader(IterableDataset):
             
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
+            
+            # Skip initial stalled frames where arm isn't moving
+            # Threshold: 0.1 cm (1mm) movement between frames (positions already scaled to cm)
+            if len(props) > 1:
+                pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
+                moving_mask = pos_deltas > 0.1
+                if moving_mask.any():
+                    first_moving = np.argmax(moving_mask)
+                    if first_moving > 0:
+                        imgs = imgs[first_moving:]
+                        props = props[first_moving:]
             
             # Extract object properties from language instruction
             object_props = extract_object_properties(language_instruction)

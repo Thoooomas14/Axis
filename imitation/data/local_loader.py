@@ -44,6 +44,7 @@ class LocalDataLoader(IterableDataset):
         repeat: bool = True,
         split_start: float = 0.0,
         split_end: float = 1.0,
+        max_episodes: int = 0,
     ):
         """
         Args:
@@ -54,6 +55,7 @@ class LocalDataLoader(IterableDataset):
             repeat: Whether to repeat dataset infinitely
             split_start: Start of episode range (0.0 = first episode)
             split_end: End of episode range (1.0 = last episode)
+            max_episodes: Max episodes to use (0 = all). Useful for overfit testing.
             
         Example splits:
             Train: split_start=0.0, split_end=0.95 (first 95%)
@@ -78,6 +80,11 @@ class LocalDataLoader(IterableDataset):
             end_idx = int(total * split_end)
             
             self.episode_keys = all_keys[start_idx:end_idx]
+            
+            # Apply max_episodes limit (for overfit testing)
+            if max_episodes > 0:
+                self.episode_keys = self.episode_keys[:max_episodes]
+            
             self.num_episodes = len(self.episode_keys)
             
             # Load metadata from preprocessor
@@ -267,7 +274,22 @@ class LocalDataLoader(IterableDataset):
                     imgs = ep['images'][:]  # (T, 3, H, W) uint8
                     props = ep['proprio'][:]  # (T, 13) float32
                     
-                    # Load object properties if available (9D: size, color, shape)
+                    # Scale position from meters to centimeters for better gradients
+                    # Position is at indices 9:12 in the 13D pose [R_flat(9), pos(3), gripper(1)]
+                    # This increases loss by 10000x (100²) and gradients by 100x
+                    props[:, 9:12] *= 100.0
+                    
+                    # Skip initial stalled frames where arm isn't moving
+                    # Threshold: 0.1 cm (1mm) movement between frames
+                    if len(props) > 1:
+                        pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
+                        moving_mask = pos_deltas > 0.1  # 0.1 cm = 1mm threshold
+                        if moving_mask.any():
+                            first_moving = np.argmax(moving_mask)  # First frame with movement
+                            if first_moving > 0:
+                                imgs = imgs[first_moving:]
+                                props = props[first_moving:]
+                    
                     object_props = None
                     if 'object_props' in ep:
                         obj_vec = ep['object_props'][:]  # (9,)

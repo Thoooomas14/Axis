@@ -242,7 +242,7 @@ def train(args):
         
         # Use local loader if local_data_path is provided
         if args.local_data_path:
-            log.info(f"Creating LOCAL dataloader: batch_size={batch_size}, split=[{split_start:.0%}-{split_end:.0%}]")
+            log.info(f"Creating LOCAL dataloader: batch_size={batch_size}, split=[{split_start:.0%}-{split_end:.0%}], max_episodes={args.max_episodes}")
             stream = LocalDataLoader(
                 data_path=args.local_data_path,
                 window_size=config['window_size'],
@@ -251,11 +251,12 @@ def train(args):
                 repeat=(args.epochs == 0),
                 split_start=split_start,
                 split_end=split_end,
+                max_episodes=args.max_episodes,
             )
             # Local loader supports multi-worker
             effective_workers = num_workers
         else:
-            log.info(f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}")
+            log.info(f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}, max_episodes={args.max_episodes}")
             
             # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
             stream = RTXStreamLoader(
@@ -269,6 +270,7 @@ def train(args):
                 shuffle_buffer_size=shuffle_buffer,
                 use_subprocess=args.use_subprocess,
                 queue_size=64,
+                max_episodes=args.max_episodes,
             )
             # When use_subprocess=True, the loader handles parallelism internally
             effective_workers = 0 if args.use_subprocess else num_workers
@@ -831,6 +833,8 @@ if __name__ == "__main__":
     # Option 2: Load from preprocessed local file (overrides streaming)
     parser.add_argument('--local_data_path', type=str, default=None, 
                         help="Path to preprocessed HDF5 file. If set, uses LocalDROIDLoader instead of streaming.")
+    parser.add_argument('--max_episodes', type=int, default=0,
+                        help="Max episodes to use (0 = all). Set to 1 for overfit testing.")
     
     # Streaming-specific (ignored when using --local_data_path)
     parser.add_argument('--no_subprocess', action='store_true', 
