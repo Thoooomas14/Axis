@@ -21,6 +21,7 @@ from src.models.axis import AxisModel
 from imitation.utils.visualizer import Visualizer
 from imitation.data.goal_oracle import GoalOracle
 from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.local_loader import LocalDataLoader
 
 def make_gif(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -73,21 +74,32 @@ def make_gif(args):
         model.load_state_dict(state_dict, strict=False)
         print(f"Loaded model at step {checkpoint.get('step', 'unknown')}")
 
-    # --- Load Data (Using RTXStreamLoader) ---
-    print(f"Initializing RTXStreamLoader for {args.dataset}...")
-    # Use sequential settings
-    loader = RTXStreamLoader(
-        dataset_name=args.dataset,
-        split='train',
-        batch_size=1,
-        window_size=8,
-        image_size=(128, 128),
-        data_dir=args.data_dir,
-        repeat=False,
-        use_subprocess=False, # In-process for simple debug
-        shuffle_buffer_size=0, # No shuffle = sequential
-        shuffle_files=False    # Sequential files
-    )
+    # --- Load Data ---
+    if args.local_data_path:
+        print(f"Loading from LOCAL HDF5: {args.local_data_path}")
+        loader = LocalDataLoader(
+            data_path=args.local_data_path,
+            window_size=8,
+            loss_horizon=10,
+            shuffle=False,
+            repeat=False,
+            max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
+        )
+    else:
+        print(f"Initializing RTXStreamLoader for {args.dataset}...")
+        loader = RTXStreamLoader(
+            dataset_name=args.dataset,
+            split='train',
+            batch_size=1,
+            window_size=8,
+            image_size=(128, 128),
+            data_dir=args.data_dir,
+            repeat=False,
+            use_subprocess=False,
+            shuffle_buffer_size=0,
+            shuffle_files=False,
+            max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
+        )
     
     iterator = iter(loader)
 
@@ -258,6 +270,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='droid')
     parser.add_argument('--data_dir', type=str, default=None)
+    parser.add_argument('--local_data_path', type=str, default=None,
+                        help='Path to local HDF5 file (overrides streaming)')
+    parser.add_argument('--max_episodes', type=int, default=1,
+                        help='Max episodes to use (default: 1 for overfit testing)')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--random_weights', action='store_true', help="Use random weights")
     parser.add_argument('--closed_loop', action='store_true', help="Use closed-loop proprioception feedback")
