@@ -11,9 +11,10 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 | Feature | Description |
 |---------|-------------|
 | **SE(3) Twists** | Actions represented as 7D Lie algebra twists (`[ω, v, gripper]`) for geometrically consistent control |
+| **SE(3) State** | Proprioception as 13D SE(3) pose (`[R_flat(9), pos(3), gripper(1)]`) using PyPose |
 | **Action Chunking** | Predicts W future actions in parallel (no autoregressive rollout) |
 | **Temporal Ensembling** | Smooth action output via overlapping chunk averaging |
-| **Endpoint Loss** | Task-oriented geodesic loss on SE(3) manifold |
+| **Endpoint Chordal Loss** | Task-oriented SE(3) chordal loss (trig-free Frobenius norm) |
 | **Self-Supervised Confidence** | Learns to predict own accuracy (requery signal) |
 | **Local + Streaming Data** | Train from GCS or preprocessed HDF5 files |
 
@@ -22,8 +23,8 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 ```
 Inputs:
   - Images: (B, W, 3, 128, 128)     → ResNet-18 + TokenLearner → 256D
-  - Proprio: (B, W, 7)              → MLP → 128D  
-  - Goal: (B, 64)                   → MLP → 128D
+  - Proprio: (B, W, 13)             → MLP → 128D  
+  - Goal: (B, 38)                   → MLP → 128D
 
 Token: [Proprio | Vision | Goal] = 512D per timestep
 
@@ -88,7 +89,7 @@ Run `python imitation/train.py --help` for all options.
 
 | Doc | Description |
 |-----|-------------|
-| [Model Design](docs/model_design.md) | Architecture, 7D poses, 64D goals |
+| [Model Design](docs/model_design.md) | Architecture, 13D poses, 38D goals |
 | [Training Process](docs/training_process.md) | Loss functions, checkpointing, OOM recovery |
 | [Data Pipeline](docs/data_pipeline.md) | RTXStreamLoader, LocalDataLoader, preprocessing |
 | [Isaac Integration](docs/isaac_integration.md) | Simulation deployment |
