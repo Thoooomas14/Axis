@@ -137,31 +137,32 @@ def train(args):
              R_new = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
         return R_new
 
-    def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
+    def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon, discount=0.8, omega_rot=1.0, omega_trans=1.0):
         """
-        Compute SE(3) chordal loss on endpoint after twist rollout.
+        Compute SE(3) chordal loss at EVERY step using Normalized Geometric Weighting.
         
-        Uses Frobenius norm on rotation matrix difference - NO trigonometric functions!
+        Weights w_t = discount^t / sum(discount^i)
+        Sum of weights is exactly 1.0.
         
         Args:
             pred_twists: (B, W, 7) predicted twists [ω, v, gripper_delta] per step
-            start_poses: (B, 13) starting pose [R_flat, pos, gripper] - last frame of input window
-            target_poses: (B, 13) target pose at step t+horizon
-            horizon: Number of twist steps to apply (1 <= horizon <= W)
+            start_poses: (B, 13) starting pose [R_flat, pos, gripper]
+            target_poses: (B, H, 13) target poses for each step t=1...H
+            horizon: Number of twist steps to apply
+            discount: Geometric discount factor (0 < gamma <= 1)
             omega_rot: Weight for rotational component
             omega_trans: Weight for translational component
             
         Returns:
-            Scalar loss: chordal distance on SE(3) + gripper loss
+            Scalar loss: Weighted sum of step losses
         """
         B = pred_twists.shape[0]
         device = pred_twists.device
         dtype = pred_twists.dtype
         
         # 1. Build Predicted SE(3) Transform by rollout from 13D pose
-        # Extract R and p from 13D: [R_flat(9), pos(3), gripper(1)]
-        R_start = start_poses[:, :9].reshape(B, 3, 3)  # (B, 3, 3)
-        p_start = start_poses[:, 9:12]  # (B, 3)
+        R_start = start_poses[:, :9].reshape(B, 3, 3)  
+        p_start = start_poses[:, 9:12]
         
         T_pred = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
         
@@ -170,54 +171,59 @@ def train(args):
         T_pred[:, :3, :3] = R_start_clean
         T_pred[:, :3, 3] = p_start
         
-        # Initialize LieTensor state once
-        # check=False is acceptable here because we just sanitized it
+        # Initialize LieTensor
         T_pred_pp = pp.mat2SE3(T_pred, check=False) 
         
-        gripper_curr = start_poses[:, 12:13]  # (B, 1)
+        gripper_curr = start_poses[:, 12:13]
         
-        # Rollout: Apply predicted twists sequentially using PyPose
+        # Compute Normalized Weights
+        # w_t = gamma^t
+        steps = torch.arange(horizon, device=device, dtype=dtype)
+        raw_weights = discount ** steps
+        weights = raw_weights / raw_weights.sum()
+        
+        total_loss = 0.0
+        
+        # Rollout & Loss Accumulation
         for t in range(horizon):
-            twist_6d = pred_twists[:, t, :6]  # (B, 6) - [ω, v]
-            gripper_delta = pred_twists[:, t, 6:7]  # (B, 1)
+            twist_6d = pred_twists[:, t, :6]
+            gripper_delta = pred_twists[:, t, 6:7]
             
-            # Use PyPose for twist application
-            T_delta_pp = pp.Exp(pp.se3(twist_6d))  # SE(3) delta
-            
-            # Update state in Lie Group (No matrix conversion inside loop)
-            T_pred_pp = T_pred_pp @ T_delta_pp  # Body-frame composition
-            
+            # Apply twist
+            T_delta_pp = pp.Exp(pp.se3(twist_6d))
+            T_pred_pp = T_pred_pp @ T_delta_pp
             gripper_curr = gripper_curr + gripper_delta
             
-        # Final conversion to matrix for loss calculation
-        T_pred = T_pred_pp.matrix()
-        
-        # 2. Build Target SE(3) Transform from 13D pose
-        R_target = target_poses[:, :9].reshape(B, 3, 3)  # (B, 3, 3)
-        p_target = target_poses[:, 9:12]  # (B, 3)
-        
-        T_target = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, 4, 4).clone()
-        T_target[:, :3, :3] = R_target
-        T_target[:, :3, 3] = p_target
-        
-        # 3. Compute Chordal Loss (Frobenius norm - NO TRIG!)
-        R_pred = T_pred[:, :3, :3]
-        p_pred = T_pred[:, :3, 3]
-        
-        # Rotation loss: ||R_pred - R_target||^2_F
-        rot_diff = R_pred - R_target
-        rot_loss = torch.mean(torch.sum(rot_diff ** 2, dim=(-2, -1)))
-        
-        # Translation loss: ||p_pred - p_target||^2
-        trans_diff = p_pred - p_target
-        trans_loss = torch.mean(torch.sum(trans_diff ** 2, dim=-1))
-        
-        # 4. Gripper Loss (separate, not part of SE(3))
-        gripper_pred = torch.clamp(gripper_curr, 0.0, 1.0)
-        gripper_target = target_poses[:, 12:13]
-        grip_loss = torch.mean((gripper_pred - gripper_target)**2)
-        
-        return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
+            # --- Loss Calculation for Step t ---
+            # Predicted Pose
+            T_step = T_pred_pp.matrix()
+            R_pred = T_step[:, :3, :3]
+            p_pred = T_step[:, :3, 3]
+            
+            # Target Pose
+            target_step = target_poses[:, t, :]
+            R_target = target_step[:, :9].reshape(B, 3, 3)
+            p_target = target_step[:, 9:12]
+            
+            # Rotation
+            rot_diff = R_pred - R_target
+            rot_loss = torch.mean(torch.sum(rot_diff ** 2, dim=(-2, -1)))
+            
+            # Translation
+            trans_diff = p_pred - p_target
+            trans_loss = torch.mean(torch.sum(trans_diff ** 2, dim=-1))
+            
+            # Gripper
+            gripper_pred = torch.clamp(gripper_curr, 0.0, 1.0)
+            gripper_target = target_step[:, 12:13]
+            grip_loss = torch.mean((gripper_pred - gripper_target)**2)
+            
+            step_loss = omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
+            
+            # Weighted Accumulation
+            total_loss += weights[t] * step_loss
+            
+        return total_loss
 
     # --- Utilities ---
     training_logger = TrainingLogger(args.checkpoint_dir)
@@ -507,13 +513,12 @@ def train(args):
                             
                             # Target endpoint: directly from data loader at the horizon step
                             horizon = args.loss_horizon
-                            target_endpoint_f32 = target_poses[:, horizon - 1, :].float()  # (B, 13)
+                            # target_poses is (B, H, 13)
                             
-                            
-                            # Compute endpoint loss in float32 (chordal - trig-free!)
+                            # Compute trajectory loss
                             action_loss = endpoint_chordal_loss(
-                                pred_action_f32, start_poses_f32, target_endpoint_f32, 
-                                horizon, args.omega_rot, args.omega_trans
+                                pred_action_f32, start_poses_f32, target_poses.float(), 
+                                horizon, args.loss_discount, args.omega_rot, args.omega_trans
                             )
                         
                         # Compute per-sample loss for confidence (using endpoint error)
@@ -591,11 +596,9 @@ def train(args):
                                     v_pred_f32 = v_pred.float()
                                     v_start_poses_f32 = v_props[:, -1, :].float()
                                     horizon = args.loss_horizon
-                                    v_target_endpoint_f32 = v_target_poses[:, horizon - 1, :].float()
-                                    
                                     v_a_loss = endpoint_chordal_loss(
-                                        v_pred_f32, v_start_poses_f32, v_target_endpoint_f32,
-                                        horizon, args.omega_rot, args.omega_trans
+                                        v_pred_f32, v_start_poses_f32, v_target_poses.float(),
+                                        horizon, args.loss_discount, args.omega_rot, args.omega_trans
                                     )
                                     
                                     v_confidence_target = torch.exp(-v_a_loss.detach() / args.confidence_temperature).expand(B_val, 1)
@@ -865,6 +868,7 @@ if __name__ == "__main__":
     # === Loss Function ===
     parser.add_argument('--loss_horizon', type=int, default=1, 
                         help="Twist steps to rollout before loss (1 <= horizon <= window_size)")
+    parser.add_argument('--loss_discount', type=float, default=0.8, help='Geometric discount factor for horizon steps')
     parser.add_argument('--omega_rot', type=float, default=1.0, help="Rotation loss weight")
     parser.add_argument('--omega_trans', type=float, default=1.0, help="Translation loss weight")
     parser.add_argument('--requery_weight', type=float, default=1.0, help="Requery loss weight")
