@@ -251,7 +251,8 @@ def train(args):
                 data_path=args.local_data_path,
                 window_size=config['window_size'],
                 loss_horizon=args.loss_horizon,
-                shuffle=('train' in str(split_start) or split_start == 0.0),
+                # FORCE shuffle=False if filtering by max_episodes to ensure train/eval consistency
+                shuffle=(('train' in str(split_start) or split_start == 0.0) and args.max_episodes == 0),
                 repeat=(args.epochs == 0),
                 split_start=split_start,
                 split_end=split_end,

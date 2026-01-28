@@ -25,6 +25,11 @@ class Visualizer:
         
         # Twist Labels: Linear Velocity (3), Angular Velocity (3), Gripper (1)
         self.action_labels = ['vx', 'vy', 'vz', 'wx', 'wy', 'wz', 'g']
+        
+    def check_pypose(self):
+        if pp is None:
+            print("ERROR: PyPose not found! Trajectory integration will fail (stuck line).")
+            print("Please install pypose: pip install pypose")
 
     def orthonormalize_rotation(self, R):
         """
@@ -52,6 +57,7 @@ class Visualizer:
             trajectory_poses: (H, 13) integrated poses
         """
         if pp is None:
+            self.check_pypose()
             return np.tile(start_pose_13d, (len(twists_7d), 1))
 
         # 1. Convert start pose to SE(3) matrix
@@ -321,16 +327,16 @@ class Visualizer:
                         
                         if t == 0: ax.legend() # Only legend on first frame to save clutter/time? Or just always.
 
-                    # Indices: X=9, Y=10, Z=11
+                    start_t = 0
                     
                     # 2. XY (Top View)
-                    plot_projection(ax_xy, 9, 10, "X (m)", "Y (m)", "XY Projection (Top)", (xlim, ylim))
+                    plot_projection(ax_xy, 9, 10, "X (mm)", "Y (mm)", "XY Projection (Top)", (xlim, ylim))
                     
                     # 3. XZ (Front View)
-                    plot_projection(ax_xz, 9, 11, "X (m)", "Z (m)", "XZ Projection (Front)", (xlim, zlim))
+                    plot_projection(ax_xz, 9, 11, "X (mm)", "Z (mm)", "XZ Projection (Front)", (xlim, zlim))
                     
                     # 4. ZY (Side View - Z vs Y) - as requested
-                    plot_projection(ax_zy, 11, 10, "Z (m)", "Y (m)", "ZY Projection", (zlim, ylim))
+                    plot_projection(ax_zy, 11, 10, "Z (mm)", "Y (mm)", "ZY Projection", (zlim, ylim))
                 else:
                     ax_xy.text(0.5, 0.5, "Poses not provided", ha='center')
                 
