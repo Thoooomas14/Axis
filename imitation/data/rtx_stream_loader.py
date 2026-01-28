@@ -104,7 +104,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
         pose13 = np.zeros(13, dtype=np.float32)
         pose13[:9] = rotmat.flatten()  # Column-major flatten
-        pose13[9:12] = pos * 100.0  # Scale meters to centimeters for better gradients
+        pose13[9:12] = pos * 1000.0  # Scale meters to MILLIMETERS for better gradients
         pose13[12] = g
         return pose13
     
@@ -585,7 +585,7 @@ class RTXStreamLoader(IterableDataset):
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
         pose13 = np.zeros(13, dtype=np.float32)
         pose13[:9] = rotmat.flatten()
-        pose13[9:12] = pos * 100.0  # Scale meters to centimeters for better gradients
+        pose13[9:12] = pos * 1000.0  # m to mm
         pose13[12] = g
         return pose13
     

@@ -274,10 +274,10 @@ class LocalDataLoader(IterableDataset):
                     imgs = ep['images'][:]  # (T, 3, H, W) uint8
                     props = ep['proprio'][:]  # (T, 13) float32
                     
-                    # Scale position from meters to centimeters for better gradients
+                    # Scale position from meters to MILLIMETERS for better gradients
                     # Position is at indices 9:12 in the 13D pose [R_flat(9), pos(3), gripper(1)]
-                    # This increases loss by 10000x (100²) and gradients by 100x
-                    props[:, 9:12] *= 100.0
+                    # This increases loss by 1,000,000x (1000²) and gradients by 1000x
+                    props[:, 9:12] *= 1000.0
                     
                     # Skip initial stalled frames where arm isn't moving
                     # Threshold: 0.1 cm (1mm) movement between frames

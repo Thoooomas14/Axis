@@ -95,14 +95,18 @@ def analyze_positions(all_positions, all_grippers, all_position_deltas, all_twis
     
     if workspace < 2.0 and mean_step < 0.1:
         print("\n✓ Data appears to be in METERS")
-        print(f"  Workspace ~{workspace*100:.1f} cm (reasonable for robot arm)")
-        print(f"  Step movement ~{mean_step*1000:.2f} mm/step (reasonable)")
-        print("\n  RECOMMENDATION: Scale by 100x to convert to centimeters for better gradients")
-        print("  This will increase loss values by 10000x (100²) and gradients by 100x")
+        print(f"  Workspace ~{workspace*1000:.1f} mm (reasonable for robot arm)")
+        print(f"  Step movement ~{mean_step*1000:.2f} mm/step")
+        print("\n  Recommendation: Scale by 1000x to convert to MILLIMETERS")
     elif workspace < 200 and mean_step < 10:
         print("\n✓ Data appears to be in CENTIMETERS")
-        print(f"  Workspace ~{workspace:.1f} cm")
+        print(f"  Workspace ~{workspace*10:.1f} mm")
         print(f"  Step movement ~{mean_step*10:.2f} mm/step")
+        print("\n  Recommendation: Consider scaling x10 to MILLIMETERS")
+    elif workspace < 2000 and mean_step < 100:
+        print("\n✓ Data appears to be in MILLIMETERS")
+        print(f"  Workspace ~{workspace:.1f} mm")
+        print("  Scale looks correct for training.")
     else:
         print("\n⚠ Data scale is UNUSUAL")
         print(f"  Workspace seems too large for a robot arm")

@@ -882,7 +882,7 @@ if __name__ == "__main__":
     parser.add_argument('--val_batches', type=int, default=50, help="Batches per validation run")
     
     # === Logging ===
-    parser.add_argument('--verbose', type=int, default=2, help="Verbosity: 0=WARNING, 1=INFO, 2=DEBUG")
+    parser.add_argument('--verbose', type=int, default=1, help="Verbosity: 0=WARNING, 1=INFO, 2=DEBUG")
 
     args = parser.parse_args()
     
