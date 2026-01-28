@@ -184,43 +184,41 @@ def train(args):
         
         total_loss = 0.0
         
+        # Pre-process targets to avoid reshaping inside the loop
+        target_Rs = target_poses[..., :9].reshape(B, horizon, 3, 3)
+        target_ps = target_poses[..., 9:12]
+        target_gs = target_poses[..., 12:13]
+
         # Rollout & Loss Accumulation
         for t in range(horizon):
             twist_6d = pred_twists[:, t, :6]
             gripper_delta = pred_twists[:, t, 6:7]
             
-            # Apply twist
+            # Apply twist (Body frame assumption)
             T_delta_pp = pp.Exp(pp.se3(twist_6d))
             T_pred_pp = T_pred_pp @ T_delta_pp
-            gripper_curr = gripper_curr + gripper_delta
             
-            # --- Loss Calculation for Step t ---
-            # Predicted Pose
+            # FIX: Clamp state immediately to preserve gradients at boundaries
+            gripper_curr = torch.clamp(gripper_curr + gripper_delta, 0.0, 1.0)
+            
+            # --- Loss Calculation ---
             T_step = T_pred_pp.matrix()
             R_pred = T_step[:, :3, :3]
             p_pred = T_step[:, :3, 3]
             
-            # Target Pose
-            target_step = target_poses[:, t, :]
-            R_target = target_step[:, :9].reshape(B, 3, 3)
-            p_target = target_step[:, 9:12]
-            
-            # Rotation
-            rot_diff = R_pred - R_target
-            rot_loss = torch.mean(torch.sum(rot_diff ** 2, dim=(-2, -1)))
+            # Rotation (Chordal)
+            # ||R_pred - R_target||_F^2
+            rot_diff = R_pred - target_Rs[:, t]
+            rot_loss = torch.sum(rot_diff ** 2, dim=(-2, -1)).mean()
             
             # Translation
-            trans_diff = p_pred - p_target
-            trans_loss = torch.mean(torch.sum(trans_diff ** 2, dim=-1))
+            trans_diff = p_pred - target_ps[:, t]
+            trans_loss = torch.sum(trans_diff ** 2, dim=-1).mean()
             
-            # Gripper
-            gripper_pred = torch.clamp(gripper_curr, 0.0, 1.0)
-            gripper_target = target_step[:, 12:13]
-            grip_loss = torch.mean((gripper_pred - gripper_target)**2)
+            # Gripper (MSE)
+            grip_loss = torch.mean((gripper_curr - target_gs[:, t])**2)
             
             step_loss = omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
-            
-            # Weighted Accumulation
             total_loss += weights[t] * step_loss
             
         return total_loss
