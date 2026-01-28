@@ -4,11 +4,27 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 class TrainingLogger:
-    def __init__(self, log_dir):
+    def __init__(self, log_dir, resume=True):
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         self.log_path = os.path.join(log_dir, 'training_log.csv')
         self.plot_path = os.path.join(log_dir, 'training_plot.png')
+        
+        # Reset if not resuming (and file exists)
+        if not resume:
+            if os.path.exists(self.log_path):
+                try:
+                    os.remove(self.log_path)
+                    print(f"[Logger] Removed old log file: {self.log_path}")
+                except Exception as e:
+                    print(f"[Logger] Failed to remove old log: {e}")
+            
+            if os.path.exists(self.plot_path):
+                try:
+                    os.remove(self.plot_path)
+                    print(f"[Logger] Removed old plot file: {self.plot_path}")
+                except Exception as e:
+                    print(f"[Logger] Failed to remove old plot: {e}")
         
         # Initialize CSV with fallback for permission errors
         try:
@@ -16,6 +32,7 @@ class TrainingLogger:
                 with open(self.log_path, 'w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss', 'val_loss'])
+            
             # Verify writable
             with open(self.log_path, 'a', newline='') as f:
                 pass

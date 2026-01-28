@@ -224,7 +224,7 @@ def train(args):
         return total_loss
 
     # --- Utilities ---
-    training_logger = TrainingLogger(args.checkpoint_dir)
+    training_logger = TrainingLogger(args.checkpoint_dir, resume=args.resume)
     visualizer = Visualizer(args.checkpoint_dir)
 
     # --- Model ---
