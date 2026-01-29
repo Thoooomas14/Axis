@@ -77,13 +77,16 @@ def make_gif(args):
     # --- Load Data ---
     if args.local_data_path:
         print(f"Loading from LOCAL HDF5: {args.local_data_path}")
+        # If random, we load ALL episodes (max_episodes=0) and shuffle.
+        # Otherwise, we take the first N (usually 1).
+        local_max_episodes = 0 if args.random else (args.max_episodes if args.max_episodes > 0 else 1)
         loader = LocalDataLoader(
             data_path=args.local_data_path,
             window_size=8,
             loss_horizon=10,
-            shuffle=False,
+            shuffle=args.random,
             repeat=False,
-            max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
+            max_episodes=local_max_episodes,
         )
     else:
         print(f"Initializing RTXStreamLoader for {args.dataset}...")
@@ -97,7 +100,7 @@ def make_gif(args):
             repeat=False,
             use_subprocess=False,
             shuffle_buffer_size=0,
-            shuffle_files=False,
+            shuffle_files=args.random,
             max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
         )
     
@@ -276,6 +279,7 @@ if __name__ == "__main__":
                         help='Max episodes to use (default: 1 for overfit testing)')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--random_weights', action='store_true', help="Use random weights")
+    parser.add_argument('--random', action='store_true', help="Select from random episodes")
     parser.add_argument('--closed_loop', action='store_true', help="Use closed-loop proprioception feedback")
     parser.add_argument('--length', type=int, default=100, help="Number of steps to visualize")
     
