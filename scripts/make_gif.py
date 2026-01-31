@@ -23,6 +23,79 @@ from imitation.data.goal_oracle import GoalOracle
 from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 
+class TemporalEnsembler:
+    """
+    Simulates temporal ensembling by aggregating overlapping action chunks.
+    
+    Maintains a buffer of recent action chunks. For the current timestep t,
+    it gathers all predictions covering t made at previous steps (t, t-1, t-2...).
+    Then computes an exponentially weighted average.
+    """
+    def __init__(self, horizon, k=0.01):
+        self.horizon = horizon
+        self.k = k
+        # List of (start_step, chunk_tensor)
+        self.active_chunks = []
+    
+    def update(self, start_step, chunk):
+        """
+        Add a new chunk prediction starting at start_step.
+        chunk: (ChunkSize, ActionDim)
+        """
+        self.active_chunks.append((start_step, chunk))
+        
+        # Remove old chunks that no longer cover ANY future steps relative to start_step
+        # Actually, we just need to prune chunks that strictly ended before start_step?
+        # But we only query for 'current_step'.
+        # A chunk covers [start, start + horizon).
+        # We can clean up in get_action or here.
+        pass
+
+    def get_action(self, current_step):
+        """
+        Get the aggregated action for the current_step.
+        """
+        actions = []
+        weights = []
+        
+        # Filter relevant chunks
+        new_active = []
+        for start_t, chunk in self.active_chunks:
+            # Check if this chunk covers current_step
+            # Index in chunk = current_step - start_t
+            idx = current_step - start_t
+            
+            if idx >= 0 and idx < self.horizon:
+                # Valid overlap
+                actions.append(chunk[idx])
+                # Exponential weight based on "freshness" (how recent was the prediction?)
+                # Freshness = current_step - start_t (0 is freshest)
+                # w = exp(-k * idx)
+                w = np.exp(-self.k * idx)
+                weights.append(w)
+                new_active.append((start_t, chunk))
+            elif idx < 0:
+                # Future chunk? Should not happen in this streaming setup
+                new_active.append((start_t, chunk))
+            else:
+                # Expired chunk (current_step > start_t + horizon)
+                pass
+                
+        self.active_chunks = new_active
+        
+        if not actions:
+            # Fallback if no coverage (shouldn't happen once started)
+            return torch.zeros(7)
+            
+        # Weighted Average
+        actions_stack = torch.stack(actions, dim=0) # (N, 7)
+        weights_stack = torch.tensor(weights, device=actions_stack.device).unsqueeze(1) # (N, 1)
+        
+        weighted_sum = (actions_stack * weights_stack).sum(dim=0)
+        total_weight = weights_stack.sum()
+        
+        return weighted_sum / total_weight
+
 def make_gif(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -109,6 +182,9 @@ def make_gif(args):
     # --- Visualization Setup ---
     viz = Visualizer(args.checkpoint_dir)
 
+    # --- Temporal Ensembling ---
+    ensembler = TemporalEnsembler(horizon=config['chunk_size'], k=args.ensemble_k)
+
     # --- Inference Loop ---
     pred_actions = []
     requery_preds = []
@@ -146,6 +222,19 @@ def make_gif(args):
                 
             proprio = batch['proprio'].to(device)
             if proprio.dim() == 2: proprio = proprio.unsqueeze(0)
+            
+            # Check for discontinuity (new episode)
+            # The loader yields windows with step 1.
+            # So window[t][-1] (last frame) should equal window[t+1][-2] (second to last frame).
+            if i > 0:
+                 prev_last = prev_proprio[0, -1]
+                 curr_second_last = proprio[0, -2]
+                 # Compare
+                 if torch.linalg.norm(prev_last - curr_second_last) > 1e-3:
+                     print(f"Episode discontinuity detected at step {i} (Diff: {torch.linalg.norm(prev_last - curr_second_last)}). Stopping collection.")
+                     break
+            
+            prev_proprio = proprio
                 
             goal = batch['goal'].to(device)
             if goal.dim() == 1: goal = goal.unsqueeze(0)
@@ -186,8 +275,15 @@ def make_gif(args):
             end_time = time.time()
             inference_times.append(end_time - start_time)
             
-            # Action: (1, Chunk, 7). Take first step.
-            current_pred_action = pred_chunk[:, 0, :].cpu() # (1, 7)
+            # Action: Ensembling
+            # pred_chunk: (1, Chunk, 7)
+            # Update ensembler with this chunk starting at step i
+            current_chunk = pred_chunk[0].cpu() # (Chunk, 7)
+            ensembler.update(i, current_chunk)
+            
+            # Get aggregated action for NOW (step i)
+            current_pred_action = ensembler.get_action(i).unsqueeze(0) # (1, 7)
+            
             current_req = torch.sigmoid(req_logit).cpu() # (1, 1)
             
             pred_actions.append(current_pred_action)
@@ -282,6 +378,7 @@ if __name__ == "__main__":
     parser.add_argument('--random', action='store_true', help="Select from random episodes")
     parser.add_argument('--closed_loop', action='store_true', help="Use closed-loop proprioception feedback")
     parser.add_argument('--length', type=int, default=100, help="Number of steps to visualize")
+    parser.add_argument('--ensemble_k', type=float, default=0.01, help="Exponential weighting decay for ensembling")
     
     args = parser.parse_args()
     make_gif(args)

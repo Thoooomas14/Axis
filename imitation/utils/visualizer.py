@@ -268,18 +268,13 @@ class Visualizer:
             
             T = images.shape[0]
             
-            # Limit frames
-            if T > 200:
-                print(f"Truncating GIF from {T} to 200 frames.")
-                T = 200
-            
-            # Layout: 2x2 grid (Image, XY, XZ, ZY)
+            # Layout: 2x2 grid (Image, XY, XZ, YZ)
             fig = plt.figure(figsize=(12, 10))
             
             ax_img = fig.add_subplot(2, 2, 1)
             ax_xy = fig.add_subplot(2, 2, 2)
-            ax_xz = fig.add_subplot(2, 2, 3)
-            ax_zy = fig.add_subplot(2, 2, 4)
+            ax_yz = fig.add_subplot(2, 2, 3)
+            ax_xz = fig.add_subplot(2, 2, 4)
             
             # Pre-calculate limits for all plots if poses exist
             pass_poses = (gt_poses is not None and pred_poses is not None)
@@ -296,8 +291,8 @@ class Visualizer:
             def update(t):
                 ax_img.clear()
                 ax_xy.clear()
+                ax_yz.clear()
                 ax_xz.clear()
-                ax_zy.clear()
                 
                 # 1. Image
                 ax_img.imshow(images[t])
@@ -332,11 +327,12 @@ class Visualizer:
                     # 2. XY (Top View)
                     plot_projection(ax_xy, 9, 10, "X (mm)", "Y (mm)", "XY Projection (Top)", (xlim, ylim))
                     
-                    # 3. XZ (Front View)
+                    # 3. YZ (Side View - Y vs Z)
+                    plot_projection(ax_yz, 10, 11, "Y (mm)", "Z (mm)", "YZ Projection", (ylim, zlim))
+                    
+                    # 4. XZ (Front View)
                     plot_projection(ax_xz, 9, 11, "X (mm)", "Z (mm)", "XZ Projection (Front)", (xlim, zlim))
                     
-                    # 4. ZY (Side View - Z vs Y) - as requested
-                    plot_projection(ax_zy, 11, 10, "Z (mm)", "Y (mm)", "ZY Projection", (zlim, ylim))
                 else:
                     ax_xy.text(0.5, 0.5, "Poses not provided", ha='center')
                 

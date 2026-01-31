@@ -31,6 +31,15 @@ for p in possible_extension_paths:
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
 
+# Add local extension path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+isaac_sim_path = os.path.join(project_root, "isaac_sim")
+
+if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
+    print(f"Adding to sys.path: {isaac_sim_path}")
+    sys.path.append(isaac_sim_path)
+
 try:
     from omni.isaac.lab.app import AppLauncher
 except ImportError:
@@ -59,8 +68,11 @@ def main():
     parser.add_argument('--steps', type=int, default=1000, help="Max steps")
     parser.add_argument('--video', action='store_true', help="Record video")
     parser.add_argument('--model_refresh', type=int, default=30, help="Control frequency Hz")
-    parser.add_argument('--chunk_size', type=int, default=1, help="Action chunk size used in model")
+    parser.add_argument('--chunk_size', type=int, default=10, help="Action chunk size used in model")
     parser.add_argument('--random_weights', action='store_true', help="Use random weights (no checkpoint)")
+    parser.add_argument('--ignore_requery', action='store_true', help="Ignore model requery requests")
+    
+    parser.add_argument('--ensemble_k', type=float, default=0.01, help="Exponential weighting decay for ensembling")
     
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -85,17 +97,18 @@ def main():
     print(f"Loading AxisInference from {args.checkpoint}...")
     config = {
         'device': device,
-        'proprio_dim': 13, # 13D: [R(9), p(3), g(1)]
+        'proprio_dim': 13, # 13D: [R_flat(9), p(3), g(1)]
         'action_dim': 7,   # 7D: [v(3), w(3), g(1)] Twist
+        'goal_dim': 38,    # 38D Goal
         'embed_dim': 256,
         'window_size': 8,
         'chunk_size': args.chunk_size, 
-        'max_pos_delta': 0.05,
+        'max_pos_delta': 10.0, # mm/step limit (approx 20cm/s at 20Hz)
         'max_rot_delta': 0.1
     }
     
     try:
-        agent = AxisInference(args.checkpoint, config, device=device, random_weights=args.random_weights)
+        agent = AxisInference(args.checkpoint, config, device=device, random_weights=args.random_weights, ensemble_k=args.ensemble_k)
         print("Model loaded successfully.")
     except Exception as e:
         print(f"Failed to load agent: {e}")
@@ -160,7 +173,7 @@ def main():
                 
                 # Goal Target: Cube Pos (converted to Model Frame)
                 target_pos_model = cube_pos.copy()
-                target_pos_model[1] *= -1.0 # Mirror Y
+                # target_pos_model[1] *= -1.0 # Mirror Y (Disabled)
                 
                 # Goal Pose: Target Pos + Fixed Downward Orientation
                 # Construct 13D Target Pose
@@ -172,7 +185,7 @@ def main():
                 target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
                 
                 target_pose_13d[:9] = target_rot
-                target_pose_13d[9:12] = target_pos_model
+                target_pose_13d[9:12] = target_pos_model * 1000.0 # Meters -> Millimeters
                 target_pose_13d[12] = 1.0 # Close gripper
                 
                 # Encode Goal
@@ -192,20 +205,32 @@ def main():
                 goal_vector[0] # (38,)
             )
             
-            requery_flag = batch_result.get('requery', False)
+            # requery_prob = torch.sigmoid(requery_logit).item() if 'requery' in batch_result else 0.0
+            # Note: Inference.predict returns a dict with 'requery' boolean actually?
+            # Let's check src/inference.py.
+            # It returns 'requery': bool.
+            requery_flag_model = batch_result.get('requery', False)
+            
+            if i % 10 == 0:
+                 print(f"Requery Flag: {requery_flag_model}")
+            
+            if args.ignore_requery:
+                requery_flag = False
+            else:
+                requery_flag = requery_flag_model
             
             # 5. Execute
             # Model Output: 'action_absolute' is what Inference class returns.
-            # If the model outputs twist, Inference class should handle integration.
-            # Assuming Inference class returns *Absolute* action for Step (pos, quat, grip)
+            # Inference now returns 13D absolute pose in mm.
             
-            act_pos = batch_result['position']
-            act_quat_xyzw = batch_result['quaternion']
+            act_pos_mm = batch_result['position'] # (3,) mm
+            act_quat_xyzw = batch_result['quaternion'] # (4,)
             act_grip = batch_result['gripper']
             
             # Flip Y for Sim (Model -> Sim)
-            act_pos_sim = act_pos.copy()
-            act_pos_sim[1] *= -1.0
+            # AND Convert mm -> meters
+            act_pos_sim = act_pos_mm.copy() / 1000.0
+            # act_pos_sim[1] *= -1.0 (Disabled)
             
             # Quat conversion xyzw -> wxyz for Isaac
             act_quat_wxyz = np.array([act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]])
@@ -221,14 +246,21 @@ def main():
             obs, reward, terminated, truncated, info = env.step(env_action_t)
             
             if i % 10 == 0:
-                print(f"Step {i} | Pos:{current_pose_13d[9:12].round(3)} | Grip:{current_pose_13d[12]:.2f}")
-                
-            if terminated.any() or truncated.any():
-                print("Reset triggered.")
-                obs, info = env.reset()
-                agent.reset() # Reset inference state
-                initial_pose_13d = None
-                requery_flag = True
+                print(f"Step {i} --------------------------------------------------")
+                print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
+                print(f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}")
+                print(f"  Target  Pos (m) : {act_pos_sim.round(3)}")
+                print(f"  Requery Flag    : {requery_flag_model}")
+                if terminated.any() or truncated.any():
+                    print(f"!!! RESET TRIGGERED (Step {i}) !!!", flush=True)
+                    print(f"  Terminated: {terminated}", flush=True)
+                    print(f"  Truncated: {truncated}", flush=True)
+                    print(f"  Info: {info}", flush=True)
+                    
+                    obs, info = env.reset()
+                    agent.reset() # Reset inference state
+                    initial_pose_13d = None
+                    requery_flag = True
 
         print("Evaluation Complete.")
         

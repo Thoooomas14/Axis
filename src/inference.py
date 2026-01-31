@@ -13,82 +13,91 @@ from src.models.axis import AxisModel
 from src.utils.rotation_utils import rotation_6d_to_quaternion, quaternion_to_matrix, matrix_to_quaternion, matrix_to_rotation_6d
 import torch.nn.functional as F
 
-class ActionChunkEnsembler:
+class TemporalEnsembler:
     """
-    Temporal Ensembling for Action Chunking.
+    Simulates temporal ensembling by aggregating overlapping action chunks.
     
-    Maintains a buffer of recent action predictions and averages overlapping
-    chunks to produce smooth, consistent actions.
-    
-    Algorithm:
-    1.  Receive a new chunk of size `k` at time `t`.
-    2.  Add this chunk to the buffer at positions `[t, t+k]`.
-    3.  For time `t`, gather all valid predictions from past chunks covering `t`.
-    4.  Average them to get the final action for `t`.
+    Maintains a buffer of recent action chunks. For the current timestep t,
+    it gathers all predictions covering t made at previous steps (t, t-1, t-2...).
+    Then computes an exponentially weighted average.
     """
-    def __init__(self, action_dim: int, chunk_size: int, max_history: int = 100):
-        self.action_dim = action_dim
-        self.chunk_size = chunk_size
-        self.max_history = max_history
-        
-        # Buffer to store predictions for each future timestep
-        # Key: absolute_timestep (int), Value: list of np.ndarray actions
-        self.prediction_buffer = {}
-        self.current_step = 0
-        
+    def __init__(self, horizon, k=0.01):
+        self.horizon = horizon
+        self.k = k
+        # List of (start_step, chunk_tensor)
+        self.active_chunks = []
+    
     def reset(self):
-        self.prediction_buffer = {}
-        self.current_step = 0
-        
-    def update(self, action_chunk: np.ndarray) -> np.ndarray:
+        self.active_chunks = []
+
+    def update(self, start_step, chunk):
         """
-        Register a new action chunk and return the ensembled action for the current step.
-        
-        Args:
-            action_chunk: (chunk_size, action_dim) array
-            
-        Returns:
-            ensembled_action: (action_dim,) array
+        Add a new chunk prediction starting at start_step.
+        chunk: (ChunkSize, ActionDim) tensor
         """
-        # 1. Add new chunk to buffer
-        for i in range(self.chunk_size):
-            future_step = self.current_step + i
-            if future_step not in self.prediction_buffer:
-                self.prediction_buffer[future_step] = []
+        if not isinstance(chunk, torch.Tensor):
+            chunk = torch.tensor(chunk, dtype=torch.float32)
             
-            # The i-th element of the chunk corresponds to future_step
-            self.prediction_buffer[future_step].append(action_chunk[i])
+        self.active_chunks.append((start_step, chunk))
+        
+    def get_action(self, current_step):
+        """
+        Get the aggregated action for the current_step.
+        """
+        actions = []
+        weights = []
+        
+        # Filter relevant chunks
+        new_active = []
+        for start_t, chunk in self.active_chunks:
+            # Check if this chunk covers current_step
+            # Index in chunk = current_step - start_t
+            idx = current_step - start_t
             
-        # 2. Ensemble prediction for current_step
-        if self.current_step in self.prediction_buffer:
-            candidates = self.prediction_buffer[self.current_step]
-            # Simple average of all overlapping predictions
-            # TODO: Could implement weighted averaging (linear decay, exponential, etc.)
-            ensembled_action = np.mean(candidates, axis=0)
+            if idx >= 0 and idx < self.horizon:
+                # Valid overlap
+                actions.append(chunk[idx])
+                # Exponential weight based on "freshness"
+                w = np.exp(-self.k * idx)
+                weights.append(w)
+                new_active.append((start_t, chunk))
+            elif idx < 0:
+                # Future chunk? 
+                new_active.append((start_t, chunk))
+            else:
+                # Expired chunk
+                pass
+                
+        self.active_chunks = new_active
+        
+        if not actions:
+            return torch.zeros(chunk.shape[-1], device=chunk.device) if chunk is not None else torch.zeros(7)
             
-            # Cleanup: Remove old steps to prevent memory leak
-            del self.prediction_buffer[self.current_step]
-        else:
-            # Fallback if no prediction exists (should not happen with regular updates)
-            ensembled_action = np.zeros(self.action_dim)
-            
-        self.current_step += 1
-        return ensembled_action
+        # Weighted Average
+        actions_stack = torch.stack(actions, dim=0) # (N, 7)
+        weights_stack = torch.tensor(weights, device=actions_stack.device).unsqueeze(1) # (N, 1)
+        
+        weighted_sum = (actions_stack * weights_stack).sum(dim=0)
+        total_weight = weights_stack.sum()
+        
+        return weighted_sum / total_weight
 
 
 class AxisInference:
     """Production inference wrapper with safety features, KV-caching, and temporal ensembling."""
     
-    def __init__(self, checkpoint_path: str, config: dict, device: str = 'cuda', random_weights=False):
+    def __init__(self, checkpoint_path: str, config: dict, device: str = 'cuda', random_weights=False, ensemble_k=0.01):
         """
         Args:
             checkpoint_path: Path to .pt checkpoint
             config: Model configuration dict
             device: 'cuda' or 'cpu'
+            ensemble_k: Exponential weighting factor for ensembling
         """
         self.device = device
         self.config = config
         self.random_weights = random_weights
+        self.ensemble_k = ensemble_k
         
         # Initialize Model
         self.model = AxisModel(config).to(device)
@@ -100,33 +109,33 @@ class AxisInference:
             self._load_checkpoint(checkpoint_path)
             
         # State History (for windowing)
-        self.image_history = deque(maxlen=config.get('window_size', 1)) # Default to 1 if not in config
-        self.proprio_history = deque(maxlen=config.get('window_size', 1)) # Default to 1 if not in config
-        self.goal_embedding = None # Set by reset()
+        self.image_history = deque(maxlen=config.get('window_size', 1))
+        self.proprio_history = deque(maxlen=config.get('window_size', 1))
         
         self.cached_tokens = None
-        self.action_queue = deque()
         
         # Action Chunking Ensembler
-        self.chunk_size = config.get('action_dim', 1) # Fallback to 1 if not chunked, though typically it is
-        # Note: If passing 'chunk_size' explicitly in config would be better. 
-        # Checking AxisModel output shape dynamically or config parameter.
-        # Assuming config has 'chunk_size', default to 10 based on context if missing.
         self.chunk_size = config.get('chunk_size', 10) 
         self.action_dim = config.get('action_dim', 7) # Twist dim
         
-        self.ensembler = ActionChunkEnsembler(
-            action_dim=self.action_dim, 
-            chunk_size=self.chunk_size
+        self.ensembler = TemporalEnsembler(
+            horizon=self.chunk_size,
+            k=self.ensemble_k
         )
         
-        # State for KV Caching
-        self.cached_tokens = None
+        self.current_step = 0
         
+    def _load_checkpoint(self, path):
+        if not path: return
+        print(f"Loading checkpoint {path}...")
+        ckpt = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(ckpt.get('model_state_dict', ckpt), strict=False)
+
     def reset(self):
         """Reset stateful components (caching, ensembling)."""
         self.cached_tokens = None
         self.ensembler.reset()
+        self.current_step = 0
     
     @torch.no_grad()
     def predict(self, images: np.ndarray, proprio: np.ndarray, 
@@ -135,19 +144,9 @@ class AxisInference:
         Run inference with KV-caching and Temporal Ensembling.
         
         Args:
-            images: (W, C, H, W) or (W, H, W, C) - window of images
-            proprio: (W, 10) - window of 10D poses (3 pos, 6 rot, 1 gripper)
-            goal: (64,) - goal vector
-        
-        Returns:
-            dict with:
-                - 'action_delta': (10,) smoothed predicted twist (converted to state-like format for compat)
-                  Wait, standard is usually returning the *next* absolute pose.
-                - 'action_absolute': (10,) absolute target pose (Integrated)
-                - 'position': (3,) target position
-                - 'quaternion': (4,) target rotation as [x,y,z,w]
-                - 'gripper': float target gripper state
-                - 'requery': bool whether to request new goal
+            images: (W, C, H, W) - window of images
+            proprio: (W, 13) - window of 13D poses [R_flat(9), pos(3), grip(1)] in MILLIMETERS
+            goal: (38,) - goal vector
         """
         # Convert to tensors and add batch dim
         images_t = torch.tensor(images, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -162,122 +161,120 @@ class AxisInference:
             return_tokens=True
         )
         
-        # Update Cache (shift window mechanism implies we keep simplest cache strategy: 
-        # usually KV cache grows, but here AxisModel manages fixed window.
-        # AxisModel V2 implementation suggests returning full tokens.
-        # We need to slice to keep the valid history for the *next* step.
-        # If model outputs (B, W, D), we keep last W-1 for next step input.
+        # Update Cache
         W = images_t.shape[1]
         self.cached_tokens = new_tokens[:, 1:, ...] if W > 1 else new_tokens
         
         # --- Process Action ---
         # 1. Get raw chunk: (1, Chunk, 7) -> (Chunk, 7)
-        action_chunk_np = action_chunk.squeeze(0).cpu().numpy()
+        action_chunk_prev = action_chunk.squeeze(0).cpu() # Keep as tensor for ensembler
         
         # 2. Ensemble
-        # Returns (7,) twist: [omg_x, omg_y, omg_z, v_x, v_y, v_z, g]
-        action_twist_smooth = self.ensembler.update(action_chunk_np)
+        self.ensembler.update(self.current_step, action_chunk_prev)
+        action_twist_smooth = self.ensembler.get_action(self.current_step).numpy() # (7,)
+        
+        # Increment internal step counter
+        self.current_step += 1
         
         # 3. Safety Clean (Clamp Twist)
-        # Angular Velocity (0:3)
-        action_twist_smooth[:3] = np.clip(action_twist_smooth[:3], -self.max_rot_delta, self.max_rot_delta)
-        # Linear Velocity (3:6)
-        action_twist_smooth[3:6] = np.clip(action_twist_smooth[3:6], -self.max_pos_delta, self.max_pos_delta)
+        # Linear Velocity (0:3) - PyPose Convention
+        action_twist_smooth[:3] = np.clip(action_twist_smooth[:3], -self.config.get('max_pos_delta', 10.0), self.config.get('max_pos_delta', 10.0))
+        # Angular Velocity (3:6)
+        action_twist_smooth[3:6] = np.clip(action_twist_smooth[3:6], -self.config.get('max_rot_delta', 0.1), self.config.get('max_rot_delta', 0.1))
         
         # 4. Integrate to Absolute Pose
-        current_pose = proprio[-1] # (10,)
-        action_absolute = self._integrate_action(current_pose, action_twist_smooth)
+        # Current pose is the last one in the window
+        current_pose = proprio[-1] # (13,)
+        action_absolute = self._integrate_action_13d(current_pose, action_twist_smooth)
         
-        # Convert to output formats
-        rot_6d = torch.tensor(action_absolute[3:9])
-        quat = rotation_6d_to_quaternion(rot_6d).numpy()
+        # Output is 13D pose in mm
+        # Extract Quaternion for Isaac Sim compat if needed
+        # But Isaac script will likely need to handle conversion.
+        # We return the 13D absolute pose.
+        
+        # Recover quaternion for convenience
+        rot_mat = action_absolute[:9].reshape(3, 3)
+        quat = matrix_to_quaternion(torch.tensor(rot_mat).unsqueeze(0)).squeeze(0).numpy() # (4,) [x,y,z,w]
         
         return {
             'action_twist': action_twist_smooth,
-            'action_absolute': action_absolute,
-            'position': action_absolute[:3],
-            'quaternion': quat,
-            'gripper': float(action_absolute[9]),
+            'action_absolute': action_absolute, # 13D
+            'position': action_absolute[9:12], # mm
+            'quaternion': quat, # [x,y,z,w]
+            'gripper': float(action_absolute[12]),
             'requery': torch.sigmoid(requery_logit).item() > 0.5
         }
 
-    def _integrate_action(self, current_pose: np.ndarray, action_twist: np.ndarray) -> np.ndarray:
+    def _integrate_action_13d(self, current_pose: np.ndarray, action_twist: np.ndarray) -> np.ndarray:
         """
-        Integrate 7D Twist (angular_vel, linear_vel, gripper_vel) into 10D Pose.
+        Integrate 7D Twist into 13D Pose (Millimeters).
         
         Args:
-            current_pose: (10,) [pos(3), rot6d(6), gripper(1)]
-            action_twist: (7,) [ang_vel(3), lin_vel(3), gripper_prob/vel(1)]
+            current_pose: (13,) [R_flat(9), pos(3), gripper(1)]
+            action_twist: (7,) [ang_vel(3), lin_vel(3), gripper_prob(1)]
             
         Returns:
-            next_pose: (10,)
+            next_pose: (13,)
         """
-        # 1. Position: Simple addition
-        # Twist: 0-2 (ang), 3-5 (lin)
-        pos_curr = current_pose[:3]
-        lin_vel = action_twist[3:6]
-        pos_new = pos_curr + lin_vel
-        
         # 2. Rotation: Exponential map integration
         # Current rotation matrix
-        rot6d_curr = torch.tensor(current_pose[3:9]).unsqueeze(0) # (1, 6)
-        mat_curr = quaternion_to_matrix(rotation_6d_to_quaternion(rot6d_curr)).squeeze(0) # (3, 3)
+        mat_curr = torch.tensor(current_pose[:9].reshape(3, 3), dtype=torch.float32)
+
+        # 1. Position: Body Frame Twist -> World Frame Update
+        # T_next = T_curr * Exp(xi)
+        # p_next = p_curr + R_curr * v_body
+        # PyPose Convention: [Linear(3), Angular(3)]
+        pos_curr = torch.tensor(current_pose[9:12], dtype=torch.float32)
+        lin_vel_mm = torch.tensor(action_twist[:3], dtype=torch.float32) # Linear is first 3
+        
+        # Rotate linear velocity to world frame
+        lin_vel_world = mat_curr @ lin_vel_mm
+        pos_new = pos_curr + lin_vel_world
+        
+        pos_new = pos_new.numpy()
         
         # Delta rotation matrix from axis-angle
-        ang_vel = action_twist[:3]
+        ang_vel = action_twist[3:6] # Angular is next 3
         angle = np.linalg.norm(ang_vel)
         if angle < 1e-6:
-            mat_delta = torch.eye(3)
+            mat_delta = torch.eye(3, dtype=torch.float32)
         else:
-            axis = torch.tensor(ang_vel / angle)
-            # Rodrigues formula for per-step integration
-            # R = I + sin(theta)K + (1-cos(theta))K^2
+            axis = torch.tensor(ang_vel / angle, dtype=torch.float32)
             K = torch.tensor([
                 [0, -axis[2], axis[1]],
                 [axis[2], 0, -axis[0]],
                 [-axis[1], axis[0], 0]
-            ])
-            mat_delta = torch.eye(3) + torch.sin(torch.tensor(angle)) * K + (1 - torch.cos(torch.tensor(angle))) * (K @ K)
+            ], dtype=torch.float32)
+            angle_t = torch.tensor(angle, dtype=torch.float32)
+            mat_delta = torch.eye(3, dtype=torch.float32) + torch.sin(angle_t) * K + (1 - torch.cos(angle_t)) * (K @ K)
             
-        # Apply delta: R_new = R_delta @ R_curr (Global frame logic? Or local?)
-        # Usually twist is local or global depending on training. 
-        # Assuming Global Frame twist for simplicity unless specified.
-        # If prediction is dR in world frame: R_new = dR @ R_old
-        mat_new = mat_delta @ mat_curr
-        
-        # Convert rotation matrix to 6D using proper utility
-        d6_new = matrix_to_rotation_6d(mat_new.unsqueeze(0)).squeeze(0)  # (6,)
-
+        # Apply delta: R_new = R_curr @ R_delta (Body Frame Twist)
+        # Training used: T_curr.Inv() @ T_next -> Delta is in Body Frame
+        # So integration must be R_new = R_curr @ R_delta
+        mat_new = mat_curr @ mat_delta
         
         # 3. Gripper
-        # Assuming twist output is logits or delta?
-        # Usually simpler to treat as absolute logit for boolean, or linear delta.
-        # Task says "7D Twist ... gripper state". 
-        # If it's `gripper_state` (prob), then direct replacement.
-        # If it's velocity, add.
-        # Let's assume absolute probability for now as is common in ACT/Diffusion, 
-        # BUT `Twist` implies velocity. 
-        # "Twist output... plus the gripper state" - User prompt in history (Conv e8c...).
-        # "Output dimension 7 (3 trans + 3 rot + 1 gripper)". 
-        # Let's treat gripper as direct value (state) not delta, unless specified.
-        # Standard Axis convention: Gripper is usually absolute [0, 1].
-        grip_new = action_twist[6] # Direct assignment
+        # Model output is delta (from rtx_stream_loader logic)
+        grip_curr = current_pose[12]
+        grip_delta = action_twist[6]
+        grip_new = np.clip(grip_curr + grip_delta, 0.0, 1.0)
         
-        # Assemble
-        return np.concatenate([pos_new, d6_new.numpy(), [grip_new]])
-
-if __name__ == "__main__":
-    # Test Ensembler
-    ensembler = ActionChunkEnsembler(action_dim=1, chunk_size=3)
-    
-    # t=0, predict [1, 2, 3] -> t0=1, t1=2, t2=3
-    a0 = ensembler.update(np.array([[1], [2], [3]])) 
-    print(f"t=0: {a0} (Expect 1.0)")
-    
-    # t=1, predict [4, 5, 6] -> t1=4, t2=5, t3=6
-    # Buffer at t1 has: 2 (from prev), 4 (from curr) -> avg=3
-    a1 = ensembler.update(np.array([[4], [5], [6]]))
-    print(f"t=1: {a1} (Expect 3.0)")
-    
-    print("Inference wrapper ready")
+        # Re-orthonormalize rotation matrix using SVD to prevent drift
+        # R = U @ V.T
+        u, s, v = torch.svd(mat_new)
+        # Check determinant to prevent reflection
+        rot_maybe = u @ v.T
+        if torch.det(rot_maybe) < 0:
+            u[:, -1] *= -1
+            mat_new = u @ v.T
+        else:
+            mat_new = rot_maybe
+        
+        # Assemble 13D
+        pose_new = np.zeros(13, dtype=np.float32)
+        pose_new[:9] = mat_new.flatten().numpy()
+        pose_new[9:12] = pos_new
+        pose_new[12] = grip_new
+        
+        return pose_new
 

@@ -373,6 +373,14 @@ def train(args):
                 
         model.load_state_dict(filtered_state_dict, strict=False)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        if 'ema_state_dict' in checkpoint:
+            ema.load_state_dict(checkpoint['ema_state_dict'])
+            log.info("Loaded EMA state.")
+        
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            log.info("Loaded Scaler state.")
         start_step = checkpoint['step']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch']
@@ -768,7 +776,9 @@ def train(args):
                     'step': step,
                     'epoch': epoch + 1, # Save as next epoch start
                     'model_state_dict': model.state_dict(),
+                    'ema_state_dict': ema.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
                     'loss': loss.item(),
                 }, checkpoint_path)
                 training_logger.plot_progress()

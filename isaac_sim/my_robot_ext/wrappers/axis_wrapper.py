@@ -40,7 +40,7 @@ class AxisObservationWrapper(gym.Wrapper):
         self.image_buffer = None
         self.proprio_buffer = None
         self.num_envs = getattr(env, "num_envs", 1)
-        self.proprio_dim = 10 # Axis V2 uses 10D
+        self.proprio_dim = 13 # Axis V2 uses 13D
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -91,7 +91,7 @@ class AxisObservationWrapper(gym.Wrapper):
         
         # --- MIRROR IMAGE ---
         # Flip Width (dim=3) to match Y-inversion
-        rgb = torch.flip(rgb, [3])
+        # rgb = torch.flip(rgb, [3])
         # --------------------
 
         return rgb
@@ -106,30 +106,52 @@ class AxisObservationWrapper(gym.Wrapper):
             return torch.zeros(self.num_envs, self.proprio_dim, device=self.device)
             
         # 1. Wrist Data
-        pos_wrist = ee_pose[:, :3]
+        pos_wrist = ee_pose[:, :3] # Meters
         quat_wxyz = ee_pose[:, 3:7] 
         
         # --- CALCULATE TIP POSITION ---
         # Apply offset (0.107m in Z) to Wrist Frame
         offset = torch.tensor([0.0, 0.0, 0.107], device=self.device).repeat(pos_wrist.shape[0], 1)
         pos_delta = math_utils.quat_apply(quat_wxyz, offset)
-        pos_tip = pos_wrist + pos_delta
+        pos_tip = pos_wrist + pos_delta # Meters
         
         # --- MIRROR PROPRIO Y (Tip Frame) ---
-        pos_tip[:, 1] = -pos_tip[:, 1]
+        # pos_tip[:, 1] = -pos_tip[:, 1]
         # ------------------------
+        
+        # --- SCALING: METERS -> MILLIMETERS ---
+        pos_tip_mm = pos_tip * 1000.0
         
         # Permute to xyzw for internal processing
         quat_xyzw = torch.cat([quat_wxyz[:, 1:], quat_wxyz[:, 0:1]], dim=1)
         
-        # Convert to 6D Rotation
-        rot6d = _quat_to_rot6d(quat_xyzw) # (B, 6)
+        # Convert to Rotation Matrix (9D)
+        # Using math_utils if available or torch ops
+        # math_utils.quat_to_rot_matrix likely exists but we can use our helper or simple logic
+        # Isaac Lab math_utils uses wxyz usually.
+        # Let's use robust manual computation from xyzw to avoid dependency issues within wrapper
+        x, y, z, w = quat_xyzw[..., 0], quat_xyzw[..., 1], quat_xyzw[..., 2], quat_xyzw[..., 3]
+        
+        r00 = 1 - 2 * (y*y + z*z)
+        r01 = 2 * (x*y - z*w)
+        r02 = 2 * (x*z + y*w)
+        
+        r10 = 2 * (x*y + z*w)
+        r11 = 1 - 2 * (x*x + z*z)
+        r12 = 2 * (y*z - x*w)
+        
+        r20 = 2 * (x*z - y*w)
+        r21 = 2 * (y*z + x*w)
+        r22 = 1 - 2 * (x*x + y*y)
+        
+        # Stack to (B, 9) flat
+        rot9 = torch.stack([r00, r01, r02, r10, r11, r12, r20, r21, r22], dim=-1)
         
         # Gripper
         g_meters = gripper_pos.mean(dim=1, keepdim=True)
         g_norm = 1.0 - (g_meters / 0.04)
         g_norm = torch.clamp(g_norm, 0.0, 1.0)
         
-        # Output: [Pos(3), Rot6D(6), Gripper(1)] -> 10D
-        proprio = torch.cat([pos_tip, rot6d, g_norm], dim=1)
+        # Output: [Rot9(9), Pos_mm(3), Gripper(1)] -> 13D
+        proprio = torch.cat([rot9, pos_tip_mm, g_norm], dim=1)
         return proprio
