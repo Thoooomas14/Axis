@@ -155,7 +155,7 @@ def make_gif(args):
         local_max_episodes = 0 if args.random else (args.max_episodes if args.max_episodes > 0 else 1)
         loader = LocalDataLoader(
             data_path=args.local_data_path,
-            window_size=8,
+            window_size=10,
             loss_horizon=10,
             shuffle=args.random,
             repeat=False,
@@ -167,7 +167,7 @@ def make_gif(args):
             dataset_name=args.dataset,
             split='train',
             batch_size=1,
-            window_size=8,
+            window_size=10,
             image_size=(128, 128),
             data_dir=args.data_dir,
             repeat=False,
@@ -194,6 +194,7 @@ def make_gif(args):
     # Store Poses
     gt_poses = []
     pred_poses = []
+    subtask_goal_poses = []
     
     inference_times = []
     
@@ -206,6 +207,10 @@ def make_gif(args):
     curr_pred_pose_13d = None
     current_proprio_window = None
     
+    # Initialize KV-Cache and Subtask Collection
+    cached_tokens = None
+    subtask_goal_poses_collected = []
+
     with torch.no_grad():
         for i in range(args.length):
             try:
@@ -252,7 +257,7 @@ def make_gif(args):
             # Collect GT Pose (current state at end of window)
             gt_pose_curr = proprio[0, -1].cpu().numpy() # (13,)
             gt_poses.append(gt_pose_curr)
-
+            
             # Determine Proprio Input
             if args.closed_loop:
                 if current_proprio_window is None:
@@ -262,52 +267,56 @@ def make_gif(args):
             else:
                 proprio_input = proprio
             
-            # Forward Pass
+            # Collect Subtask Goal from Input Vector (Indices 16-29)
+            # goal is (B, 38)
+            current_subtask_goal = goal[0, 16:29].cpu().numpy() # (13,)
+            subtask_goal_poses_collected.append(current_subtask_goal)
+
+            # Forward Pass with Caching
             import time
             start_time = time.time()
-            output = model(images, proprio_input, goal)
             
-            if isinstance(output, tuple):
-                 pred_chunk, req_logit = output[0], output[1]
+            pred_chunk, req_logit, cached_tokens = model(images, proprio_input, goal, cached_tokens=cached_tokens, return_tokens=True)
+            
+            # Update KV-Cache: Keep last (W-1) tokens to form window for NEXT step
+            # cached_tokens is (B, W, 512). We want (B, W-1, 512) representing indices 1..W
+            if cached_tokens.shape[1] > 1:
+                cached_tokens = cached_tokens[:, 1:, :] 
             else:
-                 pred_chunk = output
-                 req_logit = torch.zeros(1, 1).to(device)
+                cached_tokens = cached_tokens # Should not happen if W=8
+            
             end_time = time.time()
             inference_times.append(end_time - start_time)
             
+            # Debug Requery (First 5 steps)
+            if i % 10 == 0:
+                 print(f"DEBUG: Step {i} Raw Requery Logit from Model: {req_logit}")
+
             # Action: Ensembling
-            # pred_chunk: (1, Chunk, 7)
-            # Update ensembler with this chunk starting at step i
             current_chunk = pred_chunk[0].cpu() # (Chunk, 7)
             ensembler.update(i, current_chunk)
             
             # Get aggregated action for NOW (step i)
             current_pred_action = ensembler.get_action(i).unsqueeze(0) # (1, 7)
             
-            current_req = torch.sigmoid(req_logit).cpu() # (1, 1)
+            # Use raw logit as requested by user
+            current_req = req_logit.cpu() # (1, 1)
             
             pred_actions.append(current_pred_action)
             requery_preds.append(current_req)
             
             # Integrate Prediction
-            # Update curr_pred_pose_13d from PREVIOUS PREDICTED STATE using predicted action
-            # This ensures we visualize the smooth accumulated trajectory (rollout),
-            # even if the model input (proprio_input) was reset to GT (Teacher Forcing).
             integration_start_state = curr_pred_pose_13d
-            
-            # integrate_twist returns (H, 13), we pass (1, 7)
             integrated = viz.integrate_twist(integration_start_state, current_pred_action)
             next_pred_pose = integrated[0]
-            pred_poses.append(next_pred_pose)
             
-            # Update state for next step
             curr_pred_pose_13d = next_pred_pose
+            pred_poses.append(curr_pred_pose_13d)
             
+            # Update proprio window for Closed Loop
             if args.closed_loop:
-                # Update window for next step
-                # Shift left and append new pose
-                next_pose_t = torch.tensor(next_pred_pose, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
-                current_proprio_window = torch.cat([current_proprio_window[:, 1:, :], next_pose_t], dim=1)
+                 next_pose_tensor = torch.tensor(next_pred_pose, device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                 current_proprio_window = torch.cat([current_proprio_window[:, 1:], next_pose_tensor], dim=1)
             
             # Collect Visualization Data (Image)
             last_img = images[0, -1].cpu() # (3, H, W)
@@ -325,29 +334,24 @@ def make_gif(args):
         return
 
     # Stack results
-    pred_actions = torch.cat(pred_actions, dim=0) 
-    requery_preds = torch.cat(requery_preds, dim=0)
+    pred_actions_stack = torch.cat(pred_actions, dim=0) 
+    requery_preds_stack = torch.cat(requery_preds, dim=0)
     images_stack = torch.stack(images_collected, dim=0) 
     gt_stack = torch.stack(gt_twists, dim=0)
-    
-    # Poses
-    # gt_poses has T entries. pred_poses has T+1 entries (initial + T updates).
-    # We align them: pred_poses[0] is initial (same as gt_poses[0] roughly).
-    # Actually, iterate loop does T steps.
-    # gt_poses collected T times (current state).
-    # pred_poses collected T+1 times (initial + T nexts).
-    # visualizing step t:
+
     # Image[t], Twist[t], Pose[t] (state AT t)
-    # We should match lengths.
     gt_poses_stack = torch.tensor(np.array(gt_poses), dtype=torch.float32)
-    # Take first T predicted poses to match image count?
-    # Or start from 1?
-    # pred_poses[0] is state at start of step 0.
-    # pred_poses[1] is state at start of step 1 (result of action 0).
-    # We want to plot the trajectory. Matching lengths is best.
     pred_poses_stack = torch.tensor(np.array(pred_poses[:-1]), dtype=torch.float32)
+    subtask_goal_poses_tensor = torch.tensor(np.stack(subtask_goal_poses_collected), dtype=torch.float32)
     
     print(f"Collected {len(images_collected)} frames. Poses: {gt_poses_stack.shape}")
+    
+    # Debug Requery Stats
+    if len(requery_preds) > 0:
+        req_tensor = torch.stack(requery_preds)
+        print(f"DEBUG: Requery Stats - Min: {req_tensor.min().item():.4f}, Max: {req_tensor.max().item():.4f}, Mean: {req_tensor.mean().item():.4f}")
+        if (req_tensor.max() - req_tensor.min()) < 1e-6:
+             print("DEBUG: Requery signal is static (model is likely outputting constant 0 logit).")
 
     # --- Generate GIF ---
     print("Generating GIF...")
@@ -355,11 +359,12 @@ def make_gif(args):
         0, 
         images_stack, 
         gt_stack, 
-        pred_actions,
+        pred_actions_stack,
         gt_poses=gt_poses_stack,
         pred_poses=pred_poses_stack,
-        requery_preds=requery_preds, 
-        inference_times=inference_times, 
+        requery_preds=requery_preds_stack, 
+        inference_times=inference_times,
+        subtask_goal_poses=subtask_goal_poses_tensor,
         save_prefix='episode_stream_viz', 
         dpi=100
     )
