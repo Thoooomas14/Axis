@@ -3,7 +3,7 @@
 Axis is a PyTorch transformer-based robot learning framework for end-effector control using SE(3) Lie group representations. Trained on DROID and Fractal datasets via imitation learning.
 
 ## Latest Results
-![DROID Eval](images/V2_latest.GIF)
+![DROID Eval](images/V2_latest.gif)
 
 ## Key Features
 
