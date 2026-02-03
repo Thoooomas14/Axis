@@ -104,6 +104,18 @@ def train(args):
     log.info(f"Using device: {device}")
     log.debug("Script started. Initializing...")
 
+    # --- Pre-process Checkpoint Arguments ---
+    # Must be done BEFORE TrainingLogger/Visualizer initialization
+    if args.checkpoint_dir.endswith('.pt'):
+        load_checkpoint_path = args.checkpoint_dir
+        # Ensure dir arg is actually a dir for other usages (Logger, Visualizer)
+        args.checkpoint_dir = os.path.dirname(args.checkpoint_dir) 
+    else:
+        load_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+
+    # Always save to standard name, regardless of input resume file
+    save_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+
     config = {
         'device': device,
         'goal_dim': 38, 
@@ -361,14 +373,7 @@ def train(args):
     start_step = 0
     start_epoch = 0
 
-    if args.checkpoint_dir.endswith('.pt'):
-        load_checkpoint_path = args.checkpoint_dir
-        args.checkpoint_dir = os.path.dirname(args.checkpoint_dir) # Ensure dir arg is actually a dir for other usages
-    else:
-        load_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
-
-    # Always save to standard name, regardless of input file
-    save_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+    # Path logic moved to top of function to fix Logger initialization
     
     if args.resume and os.path.exists(load_checkpoint_path):
         log.info(f"Resuming from checkpoint: {load_checkpoint_path}")
