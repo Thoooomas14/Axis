@@ -381,9 +381,23 @@ def train(args):
         if 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
             log.info("Loaded Scaler state.")
+
         start_step = checkpoint['step']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch']
+
+        # Scheduler Load Logic
+            log.warning("No scheduler state in checkpoint. Fast-forwarding scheduler to step %d...", start_step)
+            scheduler.step(start_step)
+
+        # Force override LR if args.lr differs from saved/initialized state
+        # This ensures user can change LR on resume
+        if scheduler.base_max_lr != args.lr:
+            log.info(f"Overriding scheduler saved LR ({scheduler.base_max_lr}) with new LR ({args.lr})")
+            scheduler.base_max_lr = args.lr
+            # Recompute max_lr for current cycle
+            scheduler.max_lr = scheduler.base_max_lr * (scheduler.gamma**scheduler.cycle)
+            
         log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
     elif os.path.exists(checkpoint_path):
         log.warning(f"Checkpoint found at {checkpoint_path} but --resume was not provided.")
@@ -638,6 +652,7 @@ def train(args):
                             'model_state_dict': model.state_dict(),
                             'ema_state_dict': ema.state_dict(), # Save EMA
                             'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict(), # Save Scheduler
                             'scaler_state_dict': scaler.state_dict(), # Save Scaler
                             'loss': loss.item(),
                         }
@@ -778,6 +793,7 @@ def train(args):
                     'model_state_dict': model.state_dict(),
                     'ema_state_dict': ema.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
                     'loss': loss.item(),
                 }, checkpoint_path)
