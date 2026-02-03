@@ -360,11 +360,19 @@ def train(args):
     # --- Resume from Checkpoint ---
     start_step = 0
     start_epoch = 0
-    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+
+    if args.checkpoint_dir.endswith('.pt'):
+        load_checkpoint_path = args.checkpoint_dir
+        args.checkpoint_dir = os.path.dirname(args.checkpoint_dir) # Ensure dir arg is actually a dir for other usages
+    else:
+        load_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+
+    # Always save to standard name, regardless of input file
+    save_checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
     
-    if args.resume and os.path.exists(checkpoint_path):
-        log.info(f"Resuming from latest checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if args.resume and os.path.exists(load_checkpoint_path):
+        log.info(f"Resuming from checkpoint: {load_checkpoint_path}")
+        checkpoint = torch.load(load_checkpoint_path, map_location=device)
         
         # Filter state dict
         state_dict = checkpoint['model_state_dict']
@@ -399,8 +407,9 @@ def train(args):
             scheduler.max_lr = scheduler.base_max_lr * (scheduler.gamma**scheduler.cycle)
             
         log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
-    elif os.path.exists(checkpoint_path):
-        log.warning(f"Checkpoint found at {checkpoint_path} but --resume was not provided.")
+        log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
+    elif os.path.exists(load_checkpoint_path):
+        log.warning(f"Checkpoint found at {load_checkpoint_path} but --resume was not provided.")
         log.warning("Starting from scratch. Use --resume to continue training.")
     else:
         log.info("No checkpoint found. Starting from scratch.")
@@ -659,10 +668,10 @@ def train(args):
                         
                         try:
                             # Try primary save (latest)
-                            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-                            torch.save(ckpt_data, checkpoint_path)
+                            os.makedirs(os.path.dirname(save_checkpoint_path), exist_ok=True)
+                            torch.save(ckpt_data, save_checkpoint_path)
                         except Exception as e:
-                            log.error(f"Failed to save primary checkpoint '{checkpoint_path}': {e}")
+                            log.error(f"Failed to save primary checkpoint '{save_checkpoint_path}': {e}")
                             
                             # Fallback save (timestamped/step-based)
                             try:
@@ -796,7 +805,7 @@ def train(args):
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
                     'loss': loss.item(),
-                }, checkpoint_path)
+                }, save_checkpoint_path)
                 training_logger.plot_progress()
                 
                 if args.viz:
@@ -824,7 +833,7 @@ def train(args):
         # Archival: Always save a fresh checkpoint to avoid losing data if 'latest' is locked
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"run_{timestamp}_{args.dataset}_steps{step}.pt"
+            run_name = f"run_{timestamp}_{args.dataset}_steps{step}_epoch{epoch}.pt"
             run_path = os.path.join(args.checkpoint_dir, run_name)
             
             # Save fresh - do NOT rely on copying 'checkpoint_latest.pt'
@@ -851,7 +860,7 @@ if __name__ == "__main__":
     
     # === Data Source Args ===
     # Option 1: Stream from GCS (default)
-    parser.add_argument('--dataset', type=str, default='fractal20220817_data', 
+    parser.add_argument('--dataset', type=str, default='droid', 
                         help="Dataset name for streaming: droid, fractal20220817_data, etc.")
     parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics', 
                         help="TFDS data directory for streaming (default: GCS)")
