@@ -372,8 +372,6 @@ def train(args):
     # --- Resume from Checkpoint ---
     start_step = 0
     start_epoch = 0
-
-    # Path logic moved to top of function to fix Logger initialization
     
     if args.resume and os.path.exists(load_checkpoint_path):
         log.info(f"Resuming from checkpoint: {load_checkpoint_path}")
@@ -411,7 +409,6 @@ def train(args):
             # Recompute max_lr for current cycle
             scheduler.max_lr = scheduler.base_max_lr * (scheduler.gamma**scheduler.cycle)
             
-        log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
         log.info(f"Resumed at step {start_step}, epoch {start_epoch}")
     elif os.path.exists(load_checkpoint_path):
         log.warning(f"Checkpoint found at {load_checkpoint_path} but --resume was not provided.")
