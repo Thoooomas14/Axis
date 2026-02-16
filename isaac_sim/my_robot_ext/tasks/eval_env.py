@@ -42,22 +42,44 @@ class AxisSceneCfg(InteractiveSceneCfg):
     )
 
     # 2. Table
+    # 2. Table (Replaced with specific Matte Material)
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.8, 1.0, 0.05), # Approximate table size
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=10.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.1, 0.1, 0.1), # Dark Grey
+                metallic=0.0, # No metal
+                roughness=1.0, # Fully matte
+            ),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.55, 0.0, 0.0), rot=(0.70711, 0.0, 0.0, 0.70711)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, -0.025)), # Top surface at Z=0
     )
 
     # 3. Lights
     light = AssetBaseCfg(
         prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=5000.0),
     )
 
     # 4. Robot
     robot: ArticulationCfg = FrankaCfg().replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot.init_state.pos = (0.0, 0.0, 0.0)
+    robot.init_state.rot = (1.0, 0.0, 0.0, 0.0) # Identity
+    robot.init_state.joint_pos = {
+        "panda_joint1": 0.0,
+        "panda_joint2": -1.2,   # Lower shoulder
+        "panda_joint3": 0.0,
+        "panda_joint4": -2.0,   # Adjust elbow
+        "panda_joint5": 0.0,
+        "panda_joint6": 1.571,  # 90 deg
+        "panda_joint7": 0.785,  # 45 deg
+        "panda_finger_joint1": 0.04,
+        "panda_finger_joint2": 0.04,
+    }
 
     # 5. Target Cube
     cube = RigidObjectCfg(
@@ -78,9 +100,9 @@ class AxisSceneCfg(InteractiveSceneCfg):
         height=128,
         width=128,
         data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(),
+        spawn=sim_utils.PinholeCameraCfg(focal_length=14.0, horizontal_aperture=20.955),
         offset=CameraCfg.OffsetCfg(
-            pos=(-0.3, 0.3, 0.3),
+            pos=(-0.5, 0.35, 0.4), # Moved back to match training distribution?
             rot=(0.37527, -0.46577, 0.62404, -0.50279),
         ),
     )
@@ -137,10 +159,10 @@ class ObservationsCfg:
 class EventCfg:
     """Configuration for events."""
     reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "position_range": (0.5, 1.5),
+            "position_range": (-0.05, 0.05),
             "velocity_range": (0.0, 0.0),
         },
     )

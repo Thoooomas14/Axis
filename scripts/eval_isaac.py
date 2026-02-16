@@ -4,6 +4,8 @@ import argparse
 import os
 import sys
 import time
+
+from sympy import false
 import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
 from scipy.spatial.transform import Rotation as R
@@ -67,7 +69,7 @@ def main():
     parser.add_argument('--robot', type=str, default='franka', choices=['franka', 'google'], help="Robot type")
     parser.add_argument('--steps', type=int, default=1000, help="Max steps")
     parser.add_argument('--video', action='store_true', help="Record video")
-    parser.add_argument('--model_refresh', type=int, default=30, help="Control frequency Hz")
+    parser.add_argument('--model_refresh', type=float, default=30, help="Control frequency Hz")
     parser.add_argument('--chunk_size', type=int, default=10, help="Action chunk size used in model")
     parser.add_argument('--random_weights', action='store_true', help="Use random weights (no checkpoint)")
     parser.add_argument('--ignore_requery', action='store_true', help="Ignore model requery requests")
@@ -101,7 +103,7 @@ def main():
         'action_dim': 7,   # 7D: [v(3), w(3), g(1)] Twist
         'goal_dim': 38,    # 38D Goal
         'embed_dim': 256,
-        'window_size': 8,
+        'window_size': 10,
         'chunk_size': args.chunk_size, 
         'max_pos_delta': 10.0, # mm/step limit (approx 20cm/s at 20Hz)
         'max_rot_delta': 0.1
@@ -131,7 +133,7 @@ def main():
             env = RecordVideo(env, video_folder=video_folder, step_trigger=lambda step: step == 0, video_length=args.steps, name_prefix="eval_v2")
             
         # Wrapper now returns 13D proprio
-        env = AxisObservationWrapper(env, window_size=8, device=device)
+        env = AxisObservationWrapper(env, window_size=10, device=device)
     except Exception as e:
         print(f"Error initializing environment: {e}")
         simulation_app.close()
@@ -149,7 +151,11 @@ def main():
         target_pos_sim = None 
         goal_vector = np.zeros((B, 38), dtype=np.float32) # 38D
         requery_flag = True
-        
+        requery_prob = 0.0
+        last_pred_time = 0
+        delta_pred_time = (1/args.model_refresh)*1000
+        model_run = False
+        last_goal_time = -100
         print("Starting Control Loop...")
         
         for i in range(args.steps):
@@ -173,15 +179,14 @@ def main():
                 
                 # Goal Target: Cube Pos (converted to Model Frame)
                 target_pos_model = cube_pos.copy()
-                # target_pos_model[1] *= -1.0 # Mirror Y (Disabled)
                 
                 # Goal Pose: Target Pos + Fixed Downward Orientation
                 # Construct 13D Target Pose
                 target_pose_13d = np.zeros(13, dtype=np.float32)
                 
-                # Rotation: Downward [0,0,1,0] xyzw -> 3x3 Mat -> Flatten
-                # Scipy uses scalar LAST [x,y,z,w] for from_quat
-                target_quat_xyzw = np.array([0.0, 0.0, 1.0, 0.0]) 
+                # Rotation: Downward [0,1,0,0] xyzw -> 180 deg around Y
+                # This aligns the gripper opposite to X?
+                target_quat_xyzw = np.array([0.0, 1.0, 0.0, 0.0]) 
                 target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
                 
                 target_pose_13d[:9] = target_rot
@@ -191,33 +196,66 @@ def main():
                 # Encode Goal
                 # Task 1: Pick
                 # Oracle handles 13D logic internally now
-                g_emb = oracle.encode_goal(1, initial_pose_13d, target_pose_13d)
+                # Define Object Props for Red Cube
+                # These must match the simulated object in AxisSceneCfg
+                obj_props = {
+                    'color': np.array([1.0, 0.0, 0.0], dtype=np.float32), # Red
+                    'shape': np.array([1.0, 0.0, 0.0], dtype=np.float32), # Cube
+                    'size': np.array([0.05, 0.05, 0.05], dtype=np.float32) # 5cm
+                }
+                g_emb = oracle.encode_goal(1, initial_pose_13d, target_pose_13d, object_props=obj_props)
                 goal_vector[0] = g_emb.numpy()
                 
                 print(f"Goal Updated! Target: {target_pos_model.round(3)}")
                 requery_flag = False
+                last_goal_time = i
 
             # 4. Predict
             # Call agent with single sample (remove batch dim)
-            batch_result = agent.predict(
-                images_np[0], # (W, C, H, W)
-                proprio_13d_np[0], # (W, 13)
-                goal_vector[0] # (38,)
-            )
+            current_time = int(time.time() * 1000)
+            model_run = False
             
-            # requery_prob = torch.sigmoid(requery_logit).item() if 'requery' in batch_result else 0.0
-            # Note: Inference.predict returns a dict with 'requery' boolean actually?
-            # Let's check src/inference.py.
-            # It returns 'requery': bool.
-            requery_flag_model = batch_result.get('requery', False)
+            if (current_time - last_pred_time) >= delta_pred_time or last_pred_time == 0:
+                print("Model Prediction Called!", flush=True)
+                model_run = True
+                last_pred_time = current_time
+                batch_result = agent.predict(
+                    images_np[0], # (W, C, H, W)
+                    proprio_13d_np[0], # (W, 13)
+                    goal_vector[0] # (38,)
+                )
+                requery_flag_model = batch_result.get('requery', False)
+                requery_prob = batch_result.get('requery_prob', 0.0)
+                # print(f" Position: {batch_result['position']}")
+                
+            
+            if i == 0:
+                # Debug: Save what the model sees
+                import cv2
+                # Image is (C, H, W) float 0-1. Convert to (H, W, C) uint8 0-255
+                debug_img = images_np[0, -1].transpose(1, 2, 0)
+                debug_img = (debug_img * 255).astype(np.uint8)
+                # RGB -> BGR for OpenCV
+                debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite("debug_view.png", debug_img)
+                print(f"Saved debug view to {os.path.abspath('debug_view.png')}")
+                print(f"Image Stats: Min={images_np.min()}, Max={images_np.max()}, Mean={images_np.mean()}, Shape={images_np.shape}")
             
             if i % 10 == 0:
-                 print(f"Requery Flag: {requery_flag_model}")
+                 print(f"Requery Flag: {requery_flag_model} (Prob: {requery_prob:.3f})")
             
             if args.ignore_requery:
                 requery_flag = False
             else:
-                requery_flag = requery_flag_model
+                # Debounce Goal Updates to prevent loops
+                # Only update if probability is high (>0.8) OR if we haven't updated in 50 steps
+                # And ensure we don't spam updates every frame
+                time_since_last_goal = i - last_goal_time
+                
+                if requery_flag_model and time_since_last_goal > 150:
+                    requery_flag = True
+                else:
+                    requery_flag = False
             
             # 5. Execute
             # Model Output: 'action_absolute' is what Inference class returns.
@@ -243,13 +281,16 @@ def main():
             env_action_t = torch.tensor(env_action, device=device).unsqueeze(0) # (1, 8)
             
             # Step
-            obs, reward, terminated, truncated, info = env.step(env_action_t)
+            obs, reward, terminated, truncated, info = env.step(env_action_t, model_run)
             
             if i % 10 == 0:
                 print(f"Step {i} --------------------------------------------------")
                 print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
+                r_euler = R.from_quat(act_quat_xyzw).as_euler('xyz', degrees=True)
                 print(f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}")
                 print(f"  Target  Pos (m) : {act_pos_sim.round(3)}")
+                print(f"  Target  Rot (deg): {r_euler.round(1)} (XYZ)")
+                print(f"  Target  Grip    : {act_grip:.3f} ({'Close' if act_grip > 0.5 else 'Open'})")
                 print(f"  Requery Flag    : {requery_flag_model}")
                 if terminated.any() or truncated.any():
                     print(f"!!! RESET TRIGGERED (Step {i}) !!!", flush=True)

@@ -60,17 +60,18 @@ class AxisObservationWrapper(gym.Wrapper):
         
         return self._get_obs(), info
 
-    def step(self, action):
+    def step(self, action, model_run = True):
         obs, rew, terminated, truncated, info = self.env.step(action)
-        img_current = self._process_image(obs)
-        prop_current = self._process_proprio(obs)
+        if model_run:
+            img_current = self._process_image(obs)
+            prop_current = self._process_proprio(obs)
         
-        # Shift buffer and append new
-        self.image_buffer = torch.roll(self.image_buffer, shifts=-1, dims=1)
-        self.image_buffer[:, -1] = img_current
-        
-        self.proprio_buffer = torch.roll(self.proprio_buffer, shifts=-1, dims=1)
-        self.proprio_buffer[:, -1] = prop_current
+            # Shift buffer and append new
+            self.image_buffer = torch.roll(self.image_buffer, shifts=-1, dims=1)
+            self.image_buffer[:, -1] = img_current
+            
+            self.proprio_buffer = torch.roll(self.proprio_buffer, shifts=-1, dims=1)
+            self.proprio_buffer[:, -1] = prop_current
         
         return self._get_obs(), rew, terminated, truncated, info
 
@@ -85,12 +86,27 @@ class AxisObservationWrapper(gym.Wrapper):
         if rgb is None: return torch.zeros(self.num_envs, 3, 128, 128, device=self.device)
         if rgb.shape[-1] == 4: rgb = rgb[..., :3]
         rgb = rgb.permute(0, 3, 1, 2)
-        if rgb.dtype == torch.uint8: rgb = rgb.float() / 255.0
+        if rgb.dtype == torch.uint8:
+            rgb = rgb.float() / 255.0
+        else:
+            # Assume float input. Check range and normalize if needed.
+            # Isaac Lab sometimes returns [-1, 1] or [0, 1] or [0, 255] float.
+            # If we see negative values, likely [-1, 1] or zero-centered.
+            if rgb.min() < 0.0:
+                # Assuming [-1, 1] -> [0, 1]
+                rgb = (rgb + 1.0) / 2.0
+            elif rgb.max() > 1.1: 
+                # Assuming [0, 255] float
+                rgb = rgb / 255.0
+            
+            # Clamp to safe [0, 1]
+            rgb = torch.clamp(rgb, 0.0, 1.0)
+
         if rgb.shape[-2:] != (128, 128):
              rgb = torch.nn.functional.interpolate(rgb, size=(128, 128), mode='bilinear', align_corners=False)
         
         # --- MIRROR IMAGE ---
-        # Flip Width (dim=3) to match Y-inversion
+        # Flip Width (dim=3) to match Y-inversion or Camera Mirroring
         # rgb = torch.flip(rgb, [3])
         # --------------------
 
@@ -123,6 +139,8 @@ class AxisObservationWrapper(gym.Wrapper):
         pos_tip_mm = pos_tip * 1000.0
         
         # Permute to xyzw for internal processing
+        # Isaac Sim/Lab uses wxyz (scalar first)
+        # Axis/PyPose uses xyzw (scalar last)
         quat_xyzw = torch.cat([quat_wxyz[:, 1:], quat_wxyz[:, 0:1]], dim=1)
         
         # Convert to Rotation Matrix (9D)

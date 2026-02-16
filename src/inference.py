@@ -12,6 +12,7 @@ from collections import deque
 from src.models.axis import AxisModel
 from src.utils.rotation_utils import rotation_6d_to_quaternion, quaternion_to_matrix, matrix_to_quaternion, matrix_to_rotation_6d
 import torch.nn.functional as F
+import pypose as pp
 
 class TemporalEnsembler:
     """
@@ -202,79 +203,70 @@ class AxisInference:
             'position': action_absolute[9:12], # mm
             'quaternion': quat, # [x,y,z,w]
             'gripper': float(action_absolute[12]),
-            'requery': torch.sigmoid(requery_logit).item() > 0.5
+            'requery': torch.sigmoid(requery_logit).item() > 0.5,
+            'requery_prob': torch.sigmoid(requery_logit).item()
         }
 
     def _integrate_action_13d(self, current_pose: np.ndarray, action_twist: np.ndarray) -> np.ndarray:
         """
-        Integrate 7D Twist into 13D Pose (Millimeters).
+        Integrate 7D Twist into 13D Pose (Millimeters) using PyPose.
+        Matches logic in imitation/train.py: endpoint_chordal_loss.
         
         Args:
             current_pose: (13,) [R_flat(9), pos(3), gripper(1)]
-            action_twist: (7,) [ang_vel(3), lin_vel(3), gripper_prob(1)]
+            action_twist: (7,) [lin_vel(3), ang_vel(3), gripper_prob(1)]
             
         Returns:
             next_pose: (13,)
         """
-        # 2. Rotation: Exponential map integration
-        # Current rotation matrix
-        mat_curr = torch.tensor(current_pose[:9].reshape(3, 3), dtype=torch.float32)
-
-        # 1. Position: Body Frame Twist -> World Frame Update
-        # T_next = T_curr * Exp(xi)
-        # p_next = p_curr + R_curr * v_body
-        # PyPose Convention: [Linear(3), Angular(3)]
-        pos_curr = torch.tensor(current_pose[9:12], dtype=torch.float32)
-        lin_vel_mm = torch.tensor(action_twist[:3], dtype=torch.float32) # Linear is first 3
+        device = self.device
+        dtype = torch.float32
         
-        # Rotate linear velocity to world frame
-        lin_vel_world = mat_curr @ lin_vel_mm
-        pos_new = pos_curr + lin_vel_world
+        # Prepare inputs: (1, 13) and (1, 7)
+        current_pose_t = torch.tensor(current_pose, device=device, dtype=dtype).unsqueeze(0)
+        action_twist_t = torch.tensor(action_twist, device=device, dtype=dtype).unsqueeze(0)
         
-        pos_new = pos_new.numpy()
+        # 1. Build Current SE(3) Transform
+        R_curr = current_pose_t[:, :9].reshape(1, 3, 3)
+        p_curr = current_pose_t[:, 9:12]
         
-        # Delta rotation matrix from axis-angle
-        ang_vel = action_twist[3:6] # Angular is next 3
-        angle = np.linalg.norm(ang_vel)
-        if angle < 1e-6:
-            mat_delta = torch.eye(3, dtype=torch.float32)
-        else:
-            axis = torch.tensor(ang_vel / angle, dtype=torch.float32)
-            K = torch.tensor([
-                [0, -axis[2], axis[1]],
-                [axis[2], 0, -axis[0]],
-                [-axis[1], axis[0], 0]
-            ], dtype=torch.float32)
-            angle_t = torch.tensor(angle, dtype=torch.float32)
-            mat_delta = torch.eye(3, dtype=torch.float32) + torch.sin(angle_t) * K + (1 - torch.cos(angle_t)) * (K @ K)
-            
-        # Apply delta: R_new = R_curr @ R_delta (Body Frame Twist)
-        # Training used: T_curr.Inv() @ T_next -> Delta is in Body Frame
-        # So integration must be R_new = R_curr @ R_delta
-        mat_new = mat_curr @ mat_delta
+        T_curr = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)
         
-        # 3. Gripper
-        # Model output is delta (from rtx_stream_loader logic)
-        grip_curr = current_pose[12]
-        grip_delta = action_twist[6]
-        grip_new = np.clip(grip_curr + grip_delta, 0.0, 1.0)
+        # Sanitize input rotation (Orthonormalize)
+        # Matches orthonormalize_rotation in train.py
+        U, S, V = torch.svd(R_curr)
+        with torch.no_grad():
+             det = torch.det(U @ V.transpose(-2, -1))
+             diag = torch.ones_like(S)
+             diag[:, -1] = det
+             R_curr_clean = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
+             
+        T_curr[:, :3, :3] = R_curr_clean
+        T_curr[:, :3, 3] = p_curr
         
-        # Re-orthonormalize rotation matrix using SVD to prevent drift
-        # R = U @ V.T
-        u, s, v = torch.svd(mat_new)
-        # Check determinant to prevent reflection
-        rot_maybe = u @ v.T
-        if torch.det(rot_maybe) < 0:
-            u[:, -1] *= -1
-            mat_new = u @ v.T
-        else:
-            mat_new = rot_maybe
+        # Initialize LieTensor
+        T_curr_pp = pp.mat2SE3(T_curr, check=False)
         
-        # Assemble 13D
+        # 2. Apply Twist (Exponential Map on SE(3))
+        twist_6d = action_twist_t[:, :6]
+        gripper_delta = action_twist_t[:, 6:7]
+        
+        T_delta_pp = pp.Exp(pp.se3(twist_6d))
+        T_next_pp = T_curr_pp @ T_delta_pp
+        
+        # 3. Handle Gripper
+        grip_curr = current_pose_t[:, 12:13]
+        grip_next = torch.clamp(grip_curr + gripper_delta, 0.0, 1.0)
+        
+        # 4. Extract and Assemble Result
+        T_next = T_next_pp.matrix() # (1, 4, 4)
+        R_next = T_next[:, :3, :3]
+        p_next = T_next[:, :3, 3]
+        
         pose_new = np.zeros(13, dtype=np.float32)
-        pose_new[:9] = mat_new.flatten().numpy()
-        pose_new[9:12] = pos_new
-        pose_new[12] = grip_new
+        pose_new[:9] = R_next.flatten().cpu().numpy()
+        pose_new[9:12] = p_next.flatten().cpu().numpy()
+        pose_new[12] = grip_next.item()
         
         return pose_new
 
