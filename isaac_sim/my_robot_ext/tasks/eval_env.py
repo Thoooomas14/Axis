@@ -34,11 +34,21 @@ from scipy.spatial.transform import Rotation
 class AxisSceneCfg(InteractiveSceneCfg):
     """Scene configuration for the evaluation environment."""
 
-    # 1. Ground Plane
-    ground = AssetBaseCfg(
-        prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
+    # 1. Ground Plane (Replaced by Room Floor)
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/ground",
+    #     spawn=sim_utils.GroundPlaneCfg(),
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
+    # )
+
+    # 1. Room Environment
+    room = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Room",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Room/simple_room.usd",
+            scale=(1.0, 1.0, 1.0),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05), rot=(0.70711, 0.0, 0.0, 0.70711)),
     )
 
     # 2. Table
@@ -97,12 +107,12 @@ class AxisSceneCfg(InteractiveSceneCfg):
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Camera",
         update_period=0.1,
-        height=128,
-        width=128,
+        height=256,
+        width=256,
         data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(focal_length=14.0, horizontal_aperture=20.955),
+        spawn=sim_utils.PinholeCameraCfg(focal_length=35.0, horizontal_aperture=20.955),
         offset=CameraCfg.OffsetCfg(
-            pos=(-0.5, 0.35, 0.4), # Moved back to match training distribution?
+            pos=(-0.7, 0.5, 0.4), # Moved back to match training distribution?
             rot=(0.37527, -0.46577, 0.62404, -0.50279),
         ),
     )

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from .encoders import VisionEncoder, ProprioEncoder, GoalEncoder
-from .token_learner import TokenLearner
 from .transformer import AxisTransformer
 from .decoders import ActionDecoder, RequeryDecoder, SafeActionDecoder
 
@@ -42,12 +41,6 @@ class AxisModel(nn.Module):
         
         self.vision_encoder = VisionEncoder(
             feature_dim=self.vision_dim
-        )
-        
-        # Extracts 1 token per image to act as the global vision vector
-        self.token_learner = TokenLearner(
-            input_channels=self.vision_dim,
-            num_tokens=1 
         )
         
         self.proprio_encoder = ProprioEncoder(
@@ -109,9 +102,8 @@ class AxisModel(nn.Module):
             # Encode NEWEST vision frame
             # images slice: (B, 1, C, H, W) -> flatten to (B*1, C, H, W)
             images_new = images[:, -1:, ...].reshape(B, C, H, -1)
-            vision_feat_new = self.vision_encoder(images_new) # (B, 256, H', W')
-            vision_tokens_new = self.token_learner(vision_feat_new) # (B, 1, 256)
-            # No reshape needed as it is (B, 1, 256)
+            vision_tokens_new = self.vision_encoder(images_new) # (B, 256)
+            vision_tokens_new = vision_tokens_new.unsqueeze(1) # (B, 1, 256)
             
             # Encode NEWEST proprio frame
             proprio_new = proprio[:, -1:, ...].reshape(B, -1) # (B, 10)
@@ -132,9 +124,8 @@ class AxisModel(nn.Module):
         
             # 2. Encode vision
             images_flat = images.reshape(B*W, C, H, -1)
-            vision_features = self.vision_encoder(images_flat)  # (B*W, 256, H', W')
-            vision_tokens = self.token_learner(vision_features)  # (B*W, 1, 256)
-            vision_tokens = vision_tokens.reshape(B, W, 256)     # (B, W, 256)
+            vision_tokens = self.vision_encoder(images_flat)  # (B*W, 256)
+            vision_tokens = vision_tokens.reshape(B, W, 256)  # (B, W, 256)
             
             # 3. Encode proprio
             proprio_flat = proprio.reshape(B*W, -1)

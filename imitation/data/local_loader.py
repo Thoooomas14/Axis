@@ -240,12 +240,24 @@ class LocalDataLoader(IterableDataset):
             pose_end = pose_start + self.loss_horizon
             target_poses = props[pose_start : pose_end] # (H, 13)
             
+            # Object props vector
+            object_props_vec = np.zeros(9, dtype=np.float32)
+            if object_props:
+                object_props_vec = np.concatenate([
+                    object_props['size'],
+                    object_props['color'],
+                    object_props['shape']
+                ]).astype(np.float32)
+
             yield {
                 'images': torch.tensor(w_imgs, dtype=torch.float32) / 255.0,
                 'proprio': torch.tensor(w_props, dtype=torch.float32),
                 'goal': goal_emb,
                 'actions': torch.tensor(target_twists, dtype=torch.float32),
                 'target_poses': torch.tensor(target_poses, dtype=torch.float32),
+                # Critical values for vision pre-training
+                'subtask_end_pose': torch.tensor(seg['end_pose'], dtype=torch.float32),
+                'object_props': torch.tensor(object_props_vec, dtype=torch.float32),
             }
     
     def __iter__(self):

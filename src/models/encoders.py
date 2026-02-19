@@ -7,7 +7,8 @@ from torchvision.models import resnet18, ResNet18_Weights
 class VisionEncoder(nn.Module):
     """
     Encodes RGB images using a pretrained ResNet-18 backbone.
-    Outputs feature map (B, C, H, W).
+    Outputs a 256D latent vector that explains the image content.
+    Includes probe heads for pre-training (Reconstruction, Proprio, Object Props).
     """
     def __init__(self, input_channels=3, feature_dim=256, pretrained=True):
         super().__init__()
@@ -27,28 +28,98 @@ class VisionEncoder(nn.Module):
             backbone.conv1,
             backbone.bn1,
             backbone.relu,
-            backbone.maxpool,
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4
+            backbone.maxpool, # -> /4
+            backbone.layer1,  # -> /4
+            backbone.layer2,  # -> /8
+            backbone.layer3,  # -> /16
+            backbone.layer4   # -> /32 (B, 512, H/32, W/32)
         )
         
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        
         # Project 512 channels from layer4 to feature_dim
-        self.proj = nn.Conv2d(512, feature_dim, kernel_size=1)
-        self.bn_proj = nn.BatchNorm2d(feature_dim)
+        self.proj = nn.Linear(512, feature_dim)
+        self.ln_proj = nn.LayerNorm(feature_dim)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, x):
+        # --- Pre-training Heads ---
+        # 1. Image Reconstruction Decoder (Latent -> Image)
+        # Reconstructs from 1D latent to force compression of "Environment/Obstacles"
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(feature_dim, 256, kernel_size=4, stride=1, padding=0), # 1x1 -> 4x4
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1), # 4x4 -> 8x8
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1), # 8x8 -> 16x16
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1), # 16x16 -> 32x32
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1), # 32x32 -> 64x64
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, input_channels, kernel_size=4, stride=2, padding=1), # 64x64 -> 128x128
+            nn.Sigmoid() # Pixel values [0, 1]
+        )
+        
+        # 2. Proprioception Probe (Latent -> 13D)
+        # "Where am I?"
+        self.proprio_head = nn.Sequential(
+            nn.Linear(feature_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 13)
+        )
+        
+        # 3. Subtask End Pose Probe (Latent -> 13D)
+        # "Where is the object/target?" (Proxy)
+        self.end_pose_head = nn.Sequential(
+            nn.Linear(feature_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 13)
+        )
+        
+        # 4. Object Properties Probe (Latent -> 9D)
+        # "What is it?" (Size, Color, Shape)
+        self.obj_props_head = nn.Sequential(
+            nn.Linear(feature_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 9)
+        )
+
+    def forward(self, x, return_preds=False):
         """
         Args:
             x: Images (B, C, H, W)
+            return_preds: If True, return reconstruction and probe predictions.
         Returns:
-            Feature map (B, feature_dim, H_out, W_out)
+            latent: (B, feature_dim)
+            preds: Dict of predictions (if return_preds=True)
         """
-        x = self.backbone(x)
-        x = self.act(self.bn_proj(self.proj(x)))
-        return x
+        features = self.backbone(x) # (B, 512, H/32, W/32)
+        
+        # Global Pooling -> (B, 512, 1, 1) -> (B, 512)
+        pooled = self.pool(features).flatten(1)
+        
+        # Project to Latent
+        latent = self.act(self.ln_proj(self.proj(pooled))) # (B, 256)
+        
+        if return_preds:
+            # Decode for reconstruction
+            # Reshape latent to (B, 256, 1, 1) for ConvTranspose
+            latent_spatial = latent.view(latent.size(0), latent.size(1), 1, 1)
+            reconstruction = self.decoder(latent_spatial)
+            
+            # Predict probes
+            pred_proprio = self.proprio_head(latent)
+            pred_end_pose = self.end_pose_head(latent)
+            pred_obj_props = self.obj_props_head(latent)
+            
+            return latent, {
+                'reconstruction': reconstruction,
+                'proprio': pred_proprio,
+                'end_pose': pred_end_pose,
+                'object_props': pred_obj_props
+            }
+            
+        return latent
 
 class ProprioEncoder(nn.Module):
     """

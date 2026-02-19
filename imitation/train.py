@@ -243,6 +243,17 @@ def train(args):
     model = AxisModel(config).to(device)
     log.info("Model initialized.")
 
+    # --- Vision Encoder Checkpoint Loading ---
+    # 1. Init model (random weights)
+    # 2. Resume full checkpoint (if exists) -> overwrites all weights
+    # 3. Load Vision Checkpoint (if provided) -> overwrites vision weights
+    
+    # Freezing logic should happen here though, as optimizer needs to know what requires grad.
+    if args.freeze_vision:
+        log.info("Freezing Vision Encoder...")
+        for param in model.vision_encoder.parameters():
+            param.requires_grad = False
+
     # Dataset
     # If epochs > 0, we do NOT repeat the dataset (finite epoch).
     # If steps > 0 (and epochs=0), we repeat the dataset (infinite stream).
@@ -415,6 +426,31 @@ def train(args):
         log.warning("Starting from scratch. Use --resume to continue training.")
     else:
         log.info("No checkpoint found. Starting from scratch.")
+
+    # --- Vision Checkpoint Override (Post-Resume) ---
+    if args.vision_checkpoint and os.path.exists(args.vision_checkpoint):
+        log.info(f"LOADING VISION ENCODER FROM: {args.vision_checkpoint}")
+        if args.resume:
+            log.warning("Overwriting vision encoder weights from full checkpoint with external vision checkpoint!")
+            
+        vision_ckpt = torch.load(args.vision_checkpoint, map_location=device)
+        
+        # Determine if it's a full state dict or just model state
+        if 'model_state_dict' in vision_ckpt:
+            vision_state = vision_ckpt['model_state_dict']
+        else:
+            vision_state = vision_ckpt
+                   
+        try:
+            # Load directly into the submodule
+            msg = model.vision_encoder.load_state_dict(vision_state, strict=False)
+            log.info(f"Vision Encoder loaded. Missing: {msg.missing_keys}, Unexpected: {msg.unexpected_keys}")
+            
+        except RuntimeError as e:
+            log.error(f"Failed to load vision checkpoint directly: {e}")
+            log.info("Attempting mismatched key cleaning...")
+            pass
+
 
     # Determine total steps/epochs
     if args.epochs > 0:
@@ -895,6 +931,12 @@ if __name__ == "__main__":
     parser.add_argument('--save_interval', type=int, default=1000, help="Steps between checkpoints")
     parser.add_argument('--resume', action='store_true', help="Resume from latest checkpoint")
     parser.add_argument('--time_limit_min', type=float, default=0.0, help='Stop after N minutes (0=no limit)')
+    
+    # === Vision Pre-training ===
+    parser.add_argument('--vision_checkpoint', type=str, default=None, 
+                        help="Path to pre-trained vision encoder weights (overrides checkpoint weights if provided)")
+    parser.add_argument('--freeze_vision', action='store_true', 
+                        help="Freeze vision encoder backbone during training")
     
     # === Visualization ===
     parser.add_argument('--viz', action='store_true', help="Enable visualization")

@@ -527,6 +527,9 @@ class RTXStreamLoader(IterableDataset):
                     'goal': goal_emb,
                     'actions': torch.tensor(data['actions'], dtype=torch.float32),
                     'target_poses': torch.tensor(data['target_poses'], dtype=torch.float32),
+                    # Expose critical values for vision pre-training
+                    'subtask_end_pose': torch.tensor(data['subtask_end_pose'], dtype=torch.float32),
+                    'object_props': torch.tensor(data['object_props'], dtype=torch.float32),
                 }
                 
         finally:
@@ -659,16 +662,17 @@ class RTXStreamLoader(IterableDataset):
             segments.append({
                 'start': start,
                 'end': boundaries[i + 1],
-                'goal': goal
+                'goal': goal,
+                'end_pose': end_pose
             })
         return segments
     
-    def _get_goal_for_frame(self, segments, frame_idx):
-        """Get goal for a given frame index."""
+    def _get_goal_for_frame(self, segments, frame_idx, key='goal'):
+        """Get goal (or other key) for a given frame index."""
         for seg in segments:
             if seg['start'] <= frame_idx < seg['end']:
-                return seg['goal']
-        return segments[-1]['goal'] if segments else None
+                return seg[key]
+        return segments[-1][key] if segments else None
     
     
     def _iter_inprocess(self):
@@ -788,6 +792,11 @@ class RTXStreamLoader(IterableDataset):
             
             # Extract object properties from language instruction
             object_props = extract_object_properties(language_instruction)
+            object_props_vec = np.concatenate([
+                object_props['size'],
+                object_props['color'],
+                object_props['shape']
+            ]).astype(np.float32)
             
             # Segment into subtasks (with object_props)
             segments = self._segment_subtasks(props, object_props)
@@ -800,7 +809,7 @@ class RTXStreamLoader(IterableDataset):
                 w_props = props[w : w + self.window_size]
                 
                 current_frame = w + self.window_size - 1
-                goal_emb = self._get_goal_for_frame(segments, current_frame)
+                goal_emb = self._get_goal_for_frame(segments, current_frame, key='goal')
                 
                 if goal_emb is None:
                     continue
@@ -823,6 +832,9 @@ class RTXStreamLoader(IterableDataset):
                     'goal': goal_emb,
                     'actions': torch.tensor(np.array(target_twists), dtype=torch.float32),
                     'target_poses': torch.tensor(np.array(target_poses), dtype=torch.float32),
+                    # Expose critical values for vision pre-training
+                    'subtask_end_pose': torch.tensor(self._get_goal_for_frame(segments, current_frame, key='end_pose'), dtype=torch.float32) if segments else torch.tensor(w_props[-1], dtype=torch.float32), 
+                    'object_props': torch.tensor(object_props_vec, dtype=torch.float32),
                 }
             
             # Cleanup
