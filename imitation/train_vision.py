@@ -12,7 +12,6 @@ import logging
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.encoders import VisionEncoder
-from src.models.encoders import VisionEncoder
 from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 
@@ -177,7 +176,7 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--save_interval', type=int, default=1000)
-    parser.add_argument('--save_dir', type=str, default='./checkpoints_vision')
+    parser.add_argument('--save_dir', type=str, default='./checkpoints/vision', help="Directory to save checkpoints")
     parser.add_argument('--use_subprocess', action='store_true', help="Use subprocess for data loading")
     parser.add_argument('--shuffle_buffer_size', type=int, default=1000)
     parser.add_argument('--local_data_path', type=str, default=None, help="Path to local HDF5 file (overrides streaming)")
