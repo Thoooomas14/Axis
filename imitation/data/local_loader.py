@@ -276,42 +276,43 @@ class LocalDataLoader(IterableDataset):
         
         # Optimize HDF5 cache for SSD reading
         # rdcc_nbytes: 4MB cache (default is 1MB)
-        with h5py.File(self.data_path, 'r', rdcc_nbytes=4 * 1024 * 1024) as f:
-            while True:
-                if self.shuffle:
-                    random.shuffle(episode_keys)
-                
-                for key in episode_keys:
-                    ep = f[key]
-                    imgs = ep['images'][:]  # (T, 3, H, W) uint8
-                    props = ep['proprio'][:]  # (T, 13) float32
+        try:
+            with h5py.File(self.data_path, 'r', rdcc_nbytes=4 * 1024 * 1024, libver='latest', swmr=True) as f:
+                while True:
+                    if self.shuffle:
+                        random.shuffle(episode_keys)
                     
-                    # Scale position from meters to MILLIMETERS for better gradients
-                    # Position is at indices 9:12 in the 13D pose [R_flat(9), pos(3), gripper(1)]
-                    # This increases loss by 1,000,000x (1000²) and gradients by 1000x
-                    props[:, 9:12] *= 1000.0
+                    for key in episode_keys:
+                        ep = f[key]
+                        imgs = ep['images'][:]  # (T, 3, H, W) uint8
+                        props = ep['proprio'][:]  # (T, 13) float32
+                        
+                        # Scale position from meters to MILLIMETERS
+                        props[:, 9:12] *= 1000.0
+                        
+                        # Skip initial stalled frames
+                        if len(props) > 1:
+                            pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
+                            moving_mask = pos_deltas > 0.1
+                            if moving_mask.any():
+                                first_moving = np.argmax(moving_mask)
+                                if first_moving > 0:
+                                    imgs = imgs[first_moving:]
+                                    props = props[first_moving:]
+                        
+                        object_props = None
+                        if 'object_props' in ep:
+                            obj_vec = ep['object_props'][:]
+                            object_props = {
+                                'size': obj_vec[:3],
+                                'color': obj_vec[3:6],
+                                'shape': obj_vec[6:9]
+                            }
+                        
+                        yield from self._process_episode(imgs, props, object_props)
                     
-                    # Skip initial stalled frames where arm isn't moving
-                    # Threshold: 0.1 cm (1mm) movement between frames
-                    if len(props) > 1:
-                        pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
-                        moving_mask = pos_deltas > 0.1  # 0.1 cm = 1mm threshold
-                        if moving_mask.any():
-                            first_moving = np.argmax(moving_mask)  # First frame with movement
-                            if first_moving > 0:
-                                imgs = imgs[first_moving:]
-                                props = props[first_moving:]
-                    
-                    object_props = None
-                    if 'object_props' in ep:
-                        obj_vec = ep['object_props'][:]  # (9,)
-                        object_props = {
-                            'size': obj_vec[:3],
-                            'color': obj_vec[3:6],
-                            'shape': obj_vec[6:9]
-                        }
-                    
-                    yield from self._process_episode(imgs, props, object_props)
-                
-                if not self.repeat:
-                    break
+                    if not self.repeat:
+                        break
+        except Exception as e:
+            print(f"Error in worker: {e}")
+            raise e

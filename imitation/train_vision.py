@@ -33,6 +33,10 @@ def train_vision(args):
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log.info(f"Using device: {device}")
+    
+    # Enable TF32 for faster float32 math
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # --- Data Loader ---
     # --- Data Loader ---
@@ -66,8 +70,9 @@ def train_vision(args):
     dataloader = torch.utils.data.DataLoader(
         stream_loader,
         batch_size=args.batch_size, # Let torch collate
-        num_workers=0,
-        pin_memory=True
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0)
     )
     
     # --- Model ---
@@ -75,6 +80,7 @@ def train_vision(args):
     log.info("VisionEncoder initialized.")
     
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scaler = torch.cuda.amp.GradScaler()
     
     # --- Losses ---
     criterion_mse = nn.MSELoss()
@@ -103,11 +109,11 @@ def train_vision(args):
         # Torch collates them into tensors.
         # With window_size=1, we expect images to be (B, 1, 3, 128, 128).
         
-        images = batch['images'].to(device) # (B, 1, 3, 128, 128)
-        proprio = batch['proprio'].to(device) # (B, 1, 13)
+        images = batch['images'].to(device, non_blocking=True) # (B, 1, 3, 128, 128)
+        proprio = batch['proprio'].to(device, non_blocking=True) # (B, 1, 13)
         
-        subtask_end_pose = batch['subtask_end_pose'].to(device) # (B, 13)
-        object_props = batch['object_props'].to(device) # (B, 9)
+        subtask_end_pose = batch['subtask_end_pose'].to(device, non_blocking=True) # (B, 13)
+        object_props = batch['object_props'].to(device, non_blocking=True) # (B, 9)
         
         # Squeeze window dimension if present
         if images.dim() == 5:
@@ -116,32 +122,36 @@ def train_vision(args):
         if proprio.dim() == 3:
             proprio = proprio.squeeze(1) # (B, 13)
             
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
-        # Forward
-        latent, preds = model(images, return_preds=True)
+        # Mixed Precision Forward
+        with torch.cuda.amp.autocast():
+            latent, preds = model(images, return_preds=True)
+            
+            # 1. Reconstruction Loss
+            recon_loss = criterion_mse(preds['reconstruction'], images)
+            
+            # 2. Proprioception Loss (Where am I?)
+            proprio_loss = criterion_mse(preds['proprio'], proprio)
+            
+            # 3. Subtask End Pose Loss (Where is the target?)
+            end_pose_loss = criterion_mse(preds['end_pose'], subtask_end_pose)
+            
+            # 4. Object Properties Loss (What is it?)
+            obj_props_loss = criterion_mse(preds['object_props'], object_props)
+            
+            # Total Loss
+            loss = (alpha_recon * recon_loss +
+                    alpha_proprio * proprio_loss +
+                    alpha_end * end_pose_loss +
+                    alpha_obj * obj_props_loss)
         
-        # 1. Reconstruction Loss
-        recon_loss = criterion_mse(preds['reconstruction'], images)
-        
-        # 2. Proprioception Loss (Where am I?)
-        proprio_loss = criterion_mse(preds['proprio'], proprio)
-        
-        # 3. Subtask End Pose Loss (Where is the target?)
-        end_pose_loss = criterion_mse(preds['end_pose'], subtask_end_pose)
-        
-        # 4. Object Properties Loss (What is it?)
-        obj_props_loss = criterion_mse(preds['object_props'], object_props)
-        
-        # Total Loss
-        loss = (alpha_recon * recon_loss +
-                alpha_proprio * proprio_loss +
-                alpha_end * end_pose_loss +
-                alpha_obj * obj_props_loss)
-        
-        loss.backward()
-        cursor_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        # Scaled Backward
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         
         running_loss += loss.item()
         step += 1
