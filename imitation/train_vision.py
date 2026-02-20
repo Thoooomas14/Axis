@@ -89,11 +89,11 @@ def train_vision(args):
     # --- Losses ---
     criterion_mse = nn.MSELoss()
     
-    # Weights for different explainable targets
-    alpha_recon = 1.0 # Reconstruction
-    alpha_proprio = 1.0 # Current State
-    alpha_end = 1.0 # Subtask End State (Target)
-    alpha_obj = 1.0 # Object Properties
+    # Weights for different explainable targets (Balanced for magnitude)
+    alpha_recon = 1000.0 # Reconstruction is small MSE
+    alpha_proprio = 0.1  # Poses have large magnitudes
+    alpha_end = 0.1
+    alpha_obj = 1000.0
     
     model.train()
     
@@ -102,25 +102,32 @@ def train_vision(args):
     
     os.makedirs(args.save_dir, exist_ok=True)
     
-    running_loss = 0.0
+    # Running statistics for target normalization (to balance loss)
+    # We normalize targets [Proprio, EndPose] to roughly zero-mean unit-variance
+    target_mean = torch.zeros(13).to(device)
+    target_std = torch.ones(13).to(device)
+    alpha_ema = 0.01 
     
     for batch in dataloader:
         if step >= args.steps:
             break
             
         # Unpack Data
-        # Loader yields dicts where each value is (B, W, ...) or (B, ...).
-        # Torch collates them into tensors.
-        # With window_size=1, we expect images to be (B, 1, 3, 128, 128).
-        
-        # Data is yielded as (1, W, ...) where W = args.batch_size
         images = batch['images'].to(device, non_blocking=True).squeeze(0) # (W, 3, 128, 128)
-        proprio = batch['proprio'].to(device, non_blocking=True).squeeze(0) # (W, 13)
-        subtask_end_pose = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(0) # (W, 13)
+        proprio_raw = batch['proprio'].to(device, non_blocking=True).squeeze(0) # (W, 13)
+        end_pose_raw = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(0) # (W, 13)
         object_props = batch['object_props'].to(device, non_blocking=True).squeeze(0) # (W, 9)
         
-        # Flattening not needed as we squeezed the B=1 dimension
-        # and images is now (W, 3, 128, 128) which matches model input.
+        # 1. Update/Apply Target Normalization
+        with torch.no_grad():
+            batch_mean = proprio_raw.mean(0)
+            batch_std = proprio_raw.std(0).clamp(min=1e-3)
+            target_mean = (1 - alpha_ema) * target_mean + alpha_ema * batch_mean
+            target_std = (1 - alpha_ema) * target_std + alpha_ema * batch_std
+            
+        # Normalize targets
+        proprio = (proprio_raw - target_mean) / target_std
+        end_pose = (end_pose_raw - target_mean) / target_std
             
         optimizer.zero_grad(set_to_none=True)
         
@@ -135,16 +142,19 @@ def train_vision(args):
             proprio_loss = criterion_mse(preds['proprio'], proprio)
             
             # 3. Subtask End Pose Loss (Where is the target?)
-            end_pose_loss = criterion_mse(preds['end_pose'], subtask_end_pose)
+            end_pose_loss = criterion_mse(preds['end_pose'], end_pose)
             
             # 4. Object Properties Loss (What is it?)
             obj_props_loss = criterion_mse(preds['object_props'], object_props)
             
+            # Weighted components
+            w_recon = alpha_recon * recon_loss
+            w_proprio = alpha_proprio * proprio_loss
+            w_end = alpha_end * end_pose_loss
+            w_obj = alpha_obj * obj_props_loss
+            
             # Total Loss
-            loss = (alpha_recon * recon_loss +
-                    alpha_proprio * proprio_loss +
-                    alpha_end * end_pose_loss +
-                    alpha_obj * obj_props_loss)
+            loss = w_recon + w_proprio + w_end + w_obj
         
         # Scaled Backward
         scaler.scale(loss).backward()
@@ -153,15 +163,15 @@ def train_vision(args):
         scaler.step(optimizer)
         scaler.update()
         
-        running_loss += loss.item()
         step += 1
         pbar.update(1)
+        # Log the WEIGHTED values to monitor balance
         pbar.set_postfix({
-            'L': f"{loss.item():.4f}", 
-            'R': f"{recon_loss.item():.4f}",
-            'P': f"{proprio_loss.item():.4f}",
-            'E': f"{end_pose_loss.item():.4f}",
-            'O': f"{obj_props_loss.item():.4f}"
+            'L': f"{loss.item():.2f}", 
+            'wR': f"{w_recon.item():.2f}",
+            'wP': f"{w_proprio.item():.2f}",
+            'wE': f"{w_end.item():.2f}",
+            'wO': f"{w_obj.item():.2f}"
         })
         
         # Save Checkpoint
