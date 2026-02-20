@@ -89,15 +89,18 @@ class AxisModel(nn.Module):
         """
         B, W, C, H, _ = images.shape
         
-        # 1. Encode goal
-        goal_feat = self.goal_encoder(goal_embedding) # (B, 128)
-        
-        # Determine if we can use cached tokens
         if cached_tokens is not None and cached_tokens.shape[1] == W - 1:
             # OPTIMIZED PATH: Process only the NEWEST frame (index -1)
             
-            # Replicate goal only for the new frame
-            goal_new = goal_feat.unsqueeze(1) # (B, 1, 128)
+            # Encode NEWEST goal
+            # goal_embedding is (B, W, D) or (B, D)
+            if goal_embedding.dim() == 3:
+                goal_new = goal_embedding[:, -1, :] # (B, D)
+            else:
+                goal_new = goal_embedding # (B, D) assumed constant
+                
+            goal_feat_new = self.goal_encoder(goal_new) # (B, 128)
+            goal_tokens_new = goal_feat_new.unsqueeze(1) # (B, 1, 128)
             
             # Encode NEWEST vision frame
             # images slice: (B, 1, C, H, W) -> flatten to (B*1, C, H, W)
@@ -111,7 +114,7 @@ class AxisModel(nn.Module):
             proprio_tokens_new = proprio_tokens_new.unsqueeze(1) # (B, 1, 128)
             
             # Concatenate for the new frame
-            new_tokens = torch.cat([proprio_tokens_new, vision_tokens_new, goal_new], dim=-1) # (B, 1, 512)
+            new_tokens = torch.cat([proprio_tokens_new, vision_tokens_new, goal_tokens_new], dim=-1) # (B, 1, 512)
             
             # Combine with cache
             input_tokens = torch.cat([cached_tokens, new_tokens], dim=1) # (B, W, 512)
@@ -119,8 +122,16 @@ class AxisModel(nn.Module):
         else:
             # STANDARD PATH: Process FULL window
             
-            # Replicate goal for each timestep
-            goal_tokens = goal_feat.unsqueeze(1).expand(B, W, -1) # (B, W, 128)
+            # 1. Encode Goal (Per Frame)
+            if goal_embedding.dim() == 3:
+                # (B, W, D) -> Flatten -> Encode -> Reshape
+                goal_flat = goal_embedding.reshape(B*W, -1)
+                goal_tokens = self.goal_encoder(goal_flat) # (B*W, 128)
+                goal_tokens = goal_tokens.reshape(B, W, 128)
+            else:
+                # Legacy: (B, D) -> Encode -> Expand
+                goal_feat = self.goal_encoder(goal_embedding) # (B, 128)
+                goal_tokens = goal_feat.unsqueeze(1).expand(B, W, -1) # (B, W, 128)
         
             # 2. Encode vision
             images_flat = images.reshape(B*W, C, H, -1)

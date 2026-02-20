@@ -217,29 +217,6 @@ class LocalDataLoader(IterableDataset):
             if seg is None:
                 continue
             
-            # Compute goal (with object properties)
-            goal_emb = self.oracle.encode_goal(
-                seg['task_type'],
-                seg['start_pose'],
-                seg['end_pose'],
-                object_props
-            )
-            
-            # Get Targets
-            # Twist at index t is step t -> t+1
-            # We want twists starting from current_frame_idx
-            twist_start = current_frame_idx
-            twist_end = twist_start + self.loss_horizon
-            
-            target_twists = all_twists[twist_start : twist_end] # (H, 7)
-            
-            # Target poses are the poses REACHED by the twists
-            # If twist[t] goes t -> t+1, the target pose is t+1
-            # So targets are props from current+1 to current+horizon+1
-            pose_start = current_frame_idx + 1
-            pose_end = pose_start + self.loss_horizon
-            target_poses = props[pose_start : pose_end] # (H, 13)
-            
             # Object props vector
             object_props_vec = np.zeros(9, dtype=np.float32)
             if object_props:
@@ -249,14 +226,42 @@ class LocalDataLoader(IterableDataset):
                     object_props['shape']
                 ]).astype(np.float32)
 
+            window_end_poses = []
+            window_goals = []
+            
+            for i in range(self.window_size):
+                frame_idx = w + i
+                frame_seg = self._get_segment_for_frame(segments, frame_idx)
+                
+                if frame_seg:
+                    window_end_poses.append(frame_seg['end_pose'])
+                    
+                    # Compute goal for this specific frame's subtask
+                    g = self.oracle.encode_goal(
+                        frame_seg['task_type'],
+                        frame_seg['start_pose'],
+                        frame_seg['end_pose'],
+                        object_props
+                    )
+                    window_goals.append(g)
+                else:
+                    # Fallback (should be rare)
+                    window_end_poses.append(props[frame_idx]) 
+                    # Fallback goal: use last known or zero? Use current frame as start/end (Move 0)
+                    g_fallback = self.oracle.encode_goal(0, props[frame_idx], props[frame_idx], object_props)
+                    window_goals.append(g_fallback)
+            
+            subtask_end_pose_arr = np.array(window_end_poses, dtype=np.float32) # (W, 13)
+            window_goals_arr = np.array(window_goals, dtype=np.float32) # (W, 38)
+
             yield {
                 'images': torch.tensor(w_imgs, dtype=torch.float32) / 255.0,
                 'proprio': torch.tensor(w_props, dtype=torch.float32),
-                'goal': goal_emb,
+                'goal': torch.tensor(window_goals_arr, dtype=torch.float32), # (W, 38)
                 'actions': torch.tensor(target_twists, dtype=torch.float32),
                 'target_poses': torch.tensor(target_poses, dtype=torch.float32),
                 # Critical values for vision pre-training
-                'subtask_end_pose': torch.tensor(seg['end_pose'], dtype=torch.float32),
+                'subtask_end_pose': torch.tensor(subtask_end_pose_arr, dtype=torch.float32),
                 'object_props': torch.tensor(object_props_vec, dtype=torch.float32),
             }
     

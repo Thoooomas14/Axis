@@ -46,9 +46,13 @@ def train_vision(args):
         # We need individual frames or just treat windows as batch?
         # Vision pre-training treats every frame as independent.
         # Window size 1 effectively gives us independent frames (mostly).
+        
+        # Optimization: Load larger chunks (windows) to reduce HDF5 I/O overhead
+        CHUNK_WINDOW = 50 
+        
         stream_loader = LocalDataLoader(
             data_path=args.local_data_path,
-            window_size=1, 
+            window_size=CHUNK_WINDOW, 
             loss_horizon=1,
             shuffle=True,
             repeat=True,
@@ -72,7 +76,8 @@ def train_vision(args):
         batch_size=args.batch_size, # Let torch collate
         num_workers=args.num_workers,
         pin_memory=True,
-        persistent_workers=(args.num_workers > 0)
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None
     )
     
     # --- Model ---
@@ -109,18 +114,14 @@ def train_vision(args):
         # Torch collates them into tensors.
         # With window_size=1, we expect images to be (B, 1, 3, 128, 128).
         
-        images = batch['images'].to(device, non_blocking=True) # (B, 1, 3, 128, 128)
-        proprio = batch['proprio'].to(device, non_blocking=True) # (B, 1, 13)
+        # Data is yielded as (1, W, ...) where W = args.batch_size
+        images = batch['images'].to(device, non_blocking=True).squeeze(0) # (W, 3, 128, 128)
+        proprio = batch['proprio'].to(device, non_blocking=True).squeeze(0) # (W, 13)
+        subtask_end_pose = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(0) # (W, 13)
+        object_props = batch['object_props'].to(device, non_blocking=True).squeeze(0) # (W, 9)
         
-        subtask_end_pose = batch['subtask_end_pose'].to(device, non_blocking=True) # (B, 13)
-        object_props = batch['object_props'].to(device, non_blocking=True) # (B, 9)
-        
-        # Squeeze window dimension if present
-        if images.dim() == 5:
-            images = images.squeeze(1) # (B, 3, 128, 128)
-        
-        if proprio.dim() == 3:
-            proprio = proprio.squeeze(1) # (B, 13)
+        # Flattening not needed as we squeezed the B=1 dimension
+        # and images is now (W, 3, 128, 128) which matches model input.
             
         optimizer.zero_grad(set_to_none=True)
         

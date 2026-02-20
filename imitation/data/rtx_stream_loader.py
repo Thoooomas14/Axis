@@ -305,16 +305,44 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                     target_twists.append(twist)
                     target_poses.append(props[next_idx])
                 
+                # Compute GOAL for each frame in the window (and subtask_end_pose)
+                from imitation.data.goal_oracle import GoalOracle
+                # Re-instantiate Oracle in worker (stateless)
+                oracle = GoalOracle(output_dim=38) 
+                
+                window_goals = []
+                window_end_poses = []
+                
+                for i in range(window_size):
+                    frame_idx = w + i
+                    frame_seg = get_segment_for_frame(segments, frame_idx)
+                    
+                    if frame_seg:
+                        g = oracle.encode_goal(
+                            frame_seg['task_type'],
+                            frame_seg['start_pose'],
+                            frame_seg['end_pose'],
+                            object_props
+                        )
+                        window_end_poses.append(frame_seg['end_pose'])
+                    else:
+                        # Fallback
+                        g = oracle.encode_goal(0, props[frame_idx], props[frame_idx], object_props)
+                        window_end_poses.append(props[frame_idx])
+                        
+                    window_goals.append(g)
+                    
+                window_goals_arr = np.array(window_goals, dtype=np.float32)
+                window_end_poses_arr = np.array(window_end_poses, dtype=np.float32)
+
                 # Send window via queue (blocks if queue full)
                 result_queue.put({
                     'images': w_imgs,
                     'proprio': w_props,
+                    'goal': window_goals_arr, # (W, 38)
                     'actions': np.array(target_twists, dtype=np.float32),
                     'target_poses': np.array(target_poses, dtype=np.float32),
-                    # Subtask info for goal computation in main process
-                    'subtask_start_pose': seg['start_pose'] if seg else props[0],
-                    'subtask_end_pose': seg['end_pose'] if seg else props[-1],
-                    'subtask_type': seg['task_type'] if seg else 0,
+                    'subtask_end_pose': window_end_poses_arr, # (W, 13)
                     'object_props': object_props_vec,
                 })
             
