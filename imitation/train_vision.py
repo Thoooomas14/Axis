@@ -47,12 +47,11 @@ def train_vision(args):
         # Vision pre-training treats every frame as independent.
         # Window size 1 effectively gives us independent frames (mostly).
         
-        # Optimization: Load larger chunks (windows) to reduce HDF5 I/O overhead
-        CHUNK_WINDOW = 50 
-        
+        # Optimization: Use window_size = batch_size to minimize HDF5 reads.
+        # This makes exactly ONE read per training step for the entire batch.
         stream_loader = LocalDataLoader(
             data_path=args.local_data_path,
-            window_size=CHUNK_WINDOW, 
+            window_size=args.batch_size, 
             loss_horizon=1,
             shuffle=True,
             repeat=True,
@@ -73,7 +72,7 @@ def train_vision(args):
     
     dataloader = torch.utils.data.DataLoader(
         stream_loader,
-        batch_size=args.batch_size, # Let torch collate
+        batch_size=1, # One batch = one window of size args.batch_size
         num_workers=args.num_workers,
         pin_memory=True,
         persistent_workers=(args.num_workers > 0),

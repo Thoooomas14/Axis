@@ -203,7 +203,7 @@ class GoalOracle:
             if 'shape' in object_props and object_props['shape'] is not None:
                 goal[35:38] = object_props['shape']
         
-        return torch.tensor(goal, dtype=torch.float32)
+        return goal
 
 
 if __name__ == '__main__':
