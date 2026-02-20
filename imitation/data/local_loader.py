@@ -254,6 +254,21 @@ class LocalDataLoader(IterableDataset):
             subtask_end_pose_arr = np.array(window_end_poses, dtype=np.float32) # (W, 13)
             window_goals_arr = np.array(window_goals, dtype=np.float32) # (W, 38)
 
+            # Get Targets
+            # Twist at index t is step t -> t+1
+            # We want twists starting from current_frame_idx (last frame of history)
+            twist_start = current_frame_idx
+            twist_end = twist_start + self.loss_horizon
+            
+            target_twists = all_twists[twist_start : twist_end] # (H, 7)
+            
+            # Target poses are the poses REACHED by the twists
+            # If twist[t] goes t -> t+1, the target pose is t+1
+            # So targets are props from current+1 to current+horizon+1
+            pose_start = current_frame_idx + 1
+            pose_end = pose_start + self.loss_horizon
+            target_poses = props[pose_start : pose_end] # (H, 13)
+
             yield {
                 'images': torch.tensor(w_imgs, dtype=torch.float32) / 255.0,
                 'proprio': torch.tensor(w_props, dtype=torch.float32),
