@@ -128,6 +128,7 @@ def train_vision(args):
             
         # Normalize targets
         proprio = (proprio_raw - target_mean) / target_std
+        end_pose = (end_pose_raw - target_mean) / target_std
             
         # The dataloader directly provides the encoded 38D 'goal' using GoalOracle
         raw_goal = batch['goal'].to(device, non_blocking=True).squeeze(0) # (W, 38)
