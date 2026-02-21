@@ -80,9 +80,10 @@ def train_vision(args):
     )
     
     # --- Model ---
-    model = VisionEncoder(feature_dim=256, pretrained=True).to(device)
+    model = VisionEncoder(feature_dim=256, goal_dim=38, pretrained=True).to(device)
     log.info("VisionEncoder initialized.")
     
+    # Optimize
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.cuda.amp.GradScaler()
     
@@ -90,7 +91,7 @@ def train_vision(args):
     criterion_mse = nn.MSELoss()
     
     # Weights for different explainable targets (Balanced for magnitude)
-    alpha_recon = 1000.0 # Reconstruction is small MSE
+    alpha_recon = 10000.0 # Reconstruction is small MSE
     alpha_proprio = 0.1  # Poses have large magnitudes
     alpha_end = 0.1
     alpha_obj = 1000.0
@@ -127,24 +128,45 @@ def train_vision(args):
             
         # Normalize targets
         proprio = (proprio_raw - target_mean) / target_std
-        end_pose = (end_pose_raw - target_mean) / target_std
             
+        # The dataloader directly provides the encoded 38D 'goal' using GoalOracle
+        raw_goal = batch['goal'].to(device, non_blocking=True).squeeze(0) # (W, 38)
+        
+        # --- NOISY GOAL DROPOUT (Prevent Information Leak) ---
+        # Goal indices: 3-15 (Start Pose), 16-28 (Target Pose), 29-37 (Object properties)
+        # We want the VisionEncoder to guess the exact properties and pose from the IMAGE,
+        # so we degrade the `raw_goal` query to force it to look at the image features.
+        noisy_goal = raw_goal.clone()
+        
+        # Add uniform noise to the target pose query (indices 16-28) to simulate a rough/flawed real-world goal
+        # Position noise: +/- 10cm, Rotation noise: +/- small amount
+        pose_noise = (torch.rand_like(noisy_goal[:, 16:29]) * 2 - 1) * 0.1 
+        noisy_goal[:, 16:29] += pose_noise
+        
+        # Completely drop out (zero) the object properties 50% of the time
+        # This forces the obj_props_head to literally learn what the object looks like from the image
+        mask = (torch.rand(noisy_goal.size(0), 1, device=device) > 0.5).float()
+        noisy_goal[:, 29:38] = noisy_goal[:, 29:38] * mask
+        # -----------------------------------------------------
+        
         optimizer.zero_grad(set_to_none=True)
         
         # Mixed Precision Forward
         with torch.cuda.amp.autocast():
-            latent, preds = model(images, return_preds=True)
+            # Process Vision using the NOISY GOAL
+            latent, preds = model(images, raw_goal=noisy_goal, return_preds=True)
             
+            # Losses are calculated against the PERFECT targets
             # 1. Reconstruction Loss
             recon_loss = criterion_mse(preds['reconstruction'], images)
             
             # 2. Proprioception Loss (Where am I?)
             proprio_loss = criterion_mse(preds['proprio'], proprio)
             
-            # 3. Subtask End Pose Loss (Where is the target?)
-            end_pose_loss = criterion_mse(preds['end_pose'], end_pose)
+            # 3. Subtask End Pose Loss (Where is the exact target?)
+            end_pose_loss = criterion_mse(preds['end_pose'], end_pose) # 'end_pose' targets are normalized
             
-            # 4. Object Properties Loss (What is it?)
+            # 4. Object Properties Loss (What EXACTLY is it?)
             obj_props_loss = criterion_mse(preds['object_props'], object_props)
             
             # Weighted components
@@ -168,10 +190,10 @@ def train_vision(args):
         # Log the WEIGHTED values to monitor balance
         pbar.set_postfix({
             'L': f"{loss.item():.2f}", 
-            'wR': f"{w_recon.item():.2f}",
-            'wP': f"{w_proprio.item():.2f}",
-            'wE': f"{w_end.item():.2f}",
-            'wO': f"{w_obj.item():.2f}"
+            'Reconst': f"{w_recon.item():.2f}",
+            'Proprio': f"{w_proprio.item():.2f}",
+            'EndPose': f"{w_end.item():.2f}",
+            'ObjProps': f"{w_obj.item():.2f}"
         })
         
         # Save Checkpoint

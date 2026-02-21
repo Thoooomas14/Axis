@@ -40,7 +40,8 @@ class AxisModel(nn.Module):
         )
         
         self.vision_encoder = VisionEncoder(
-            feature_dim=self.vision_dim
+            feature_dim=self.vision_dim,
+            goal_dim=config.get('goal_dim', 38)
         )
         
         self.proprio_encoder = ProprioEncoder(
@@ -71,14 +72,14 @@ class AxisModel(nn.Module):
         self.action_decoder = SafeActionDecoder(base_decoder)
         self.requery_decoder = RequeryDecoder(embed_dim=self.embed_dim)
     
-    def forward(self, images, proprio, goal_embedding, cached_tokens=None, return_tokens=False):
+    def forward(self, images, proprio, raw_goal, cached_tokens=None, return_tokens=False):
         """
         Forward pass for Axis V2.
         
         Args:
             images: (B, W, C, H, W) - window of RGB images
             proprio: (B, W, 10) - window of 10D proprioceptive states
-            goal_embedding: (B, 64) - standardized goal vector
+            raw_goal: (B, 38) or (B, W, 38) - standardized raw goal vector
             cached_tokens: (B, W-1, 512) - optional cached tokens from previous step
             return_tokens: bool - whether to return input tokens for caching
             
@@ -92,20 +93,20 @@ class AxisModel(nn.Module):
         if cached_tokens is not None and cached_tokens.shape[1] == W - 1:
             # OPTIMIZED PATH: Process only the NEWEST frame (index -1)
             
-            # Encode NEWEST goal
-            # goal_embedding is (B, W, D) or (B, D)
-            if goal_embedding.dim() == 3:
-                goal_new = goal_embedding[:, -1, :] # (B, D)
+            # Extract NEWEST raw goal first to pass to VisionEncoder
+            if raw_goal.dim() == 3:
+                goal_raw_new = raw_goal[:, -1, :] # (B, 38)
             else:
-                goal_new = goal_embedding # (B, D) assumed constant
+                goal_raw_new = raw_goal # (B, 38) assumed constant
                 
-            goal_feat_new = self.goal_encoder(goal_new) # (B, 128)
+            # Encode NEWEST goal for transformer backbone
+            goal_feat_new = self.goal_encoder(goal_raw_new) # (B, 128)
             goal_tokens_new = goal_feat_new.unsqueeze(1) # (B, 1, 128)
             
-            # Encode NEWEST vision frame
+            # Encode NEWEST vision frame (passing RAW goal)
             # images slice: (B, 1, C, H, W) -> flatten to (B*1, C, H, W)
             images_new = images[:, -1:, ...].reshape(B, C, H, -1)
-            vision_tokens_new = self.vision_encoder(images_new) # (B, 256)
+            vision_tokens_new = self.vision_encoder(images_new, raw_goal=goal_raw_new) # pass RAW goal!
             vision_tokens_new = vision_tokens_new.unsqueeze(1) # (B, 1, 256)
             
             # Encode NEWEST proprio frame
@@ -122,20 +123,25 @@ class AxisModel(nn.Module):
         else:
             # STANDARD PATH: Process FULL window
             
-            # 1. Encode Goal (Per Frame)
-            if goal_embedding.dim() == 3:
-                # (B, W, D) -> Flatten -> Encode -> Reshape
-                goal_flat = goal_embedding.reshape(B*W, -1)
-                goal_tokens = self.goal_encoder(goal_flat) # (B*W, 128)
-                goal_tokens = goal_tokens.reshape(B, W, 128)
+            # 1. Process Raw Goal & Encode for Backbone
+            if raw_goal.dim() == 3:
+                # Need raw goal sequence for vision encoder
+                goal_raw_flat = raw_goal.reshape(B*W, -1) # (B*W, 38)
+                
+                # Encode for backbone
+                goal_tokens_flat = self.goal_encoder(goal_raw_flat) # (B*W, 128)
+                goal_tokens = goal_tokens_flat.reshape(B, W, 128)
             else:
-                # Legacy: (B, D) -> Encode -> Expand
-                goal_feat = self.goal_encoder(goal_embedding) # (B, 128)
+                # Raw goal is constant across window
+                goal_raw_flat = raw_goal.repeat_interleave(W, dim=0) # (B*W, 38)
+                
+                # Encode for backbone
+                goal_feat = self.goal_encoder(raw_goal) # (B, 128)
                 goal_tokens = goal_feat.unsqueeze(1).expand(B, W, -1) # (B, W, 128)
         
-            # 2. Encode vision
+            # 2. Encode vision (passing RAW goal)
             images_flat = images.reshape(B*W, C, H, -1)
-            vision_tokens = self.vision_encoder(images_flat)  # (B*W, 256)
+            vision_tokens = self.vision_encoder(images_flat, raw_goal=goal_raw_flat)  # (B*W, 256)
             vision_tokens = vision_tokens.reshape(B, W, 256)  # (B, W, 256)
             
             # 3. Encode proprio

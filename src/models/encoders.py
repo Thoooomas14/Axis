@@ -10,7 +10,7 @@ class VisionEncoder(nn.Module):
     Outputs a 256D latent vector that explains the image content.
     Includes probe heads for pre-training (Reconstruction, Proprio, Object Props).
     """
-    def __init__(self, input_channels=3, feature_dim=256, pretrained=True):
+    def __init__(self, input_channels=3, feature_dim=256, goal_dim=38, pretrained=True):
         super().__init__()
         
         # Load ResNet-18
@@ -36,6 +36,10 @@ class VisionEncoder(nn.Module):
         )
         
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # --- Cross Attention for Goal ---
+        self.goal_proj = nn.Linear(goal_dim, 512)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=512, num_heads=4, batch_first=True)
         
         # Project 512 channels from layer4 to feature_dim
         self.proj = nn.Linear(512, feature_dim)
@@ -84,10 +88,11 @@ class VisionEncoder(nn.Module):
             nn.Linear(64, 9)
         )
 
-    def forward(self, x, return_preds=False):
+    def forward(self, x, raw_goal=None, return_preds=False):
         """
         Args:
             x: Images (B, C, H, W)
+            raw_goal: Optional (B, goal_dim) for spatial cross-attention (raw 38D vector)
             return_preds: If True, return reconstruction and probe predictions.
         Returns:
             latent: (B, feature_dim)
@@ -95,9 +100,22 @@ class VisionEncoder(nn.Module):
         """
         features = self.backbone(x) # (B, 512, H/32, W/32)
         
-        # Global Pooling -> (B, 512, 1, 1) -> (B, 512)
-        pooled = self.pool(features).flatten(1)
-        
+        if raw_goal is not None:
+            B, C_f, H_f, W_f = features.shape
+            # Reshape features to sequence: (B, HW, 512)
+            feat_seq = features.view(B, C_f, -1).transpose(1, 2)
+            
+            # Prepare Query from Goal: (B, 1, 512)
+            query = self.goal_proj(raw_goal).unsqueeze(1)
+            
+            # Cross Attention (batch_first=True)
+            # Query: (B, 1, 512), Key/Value: (B, HW, 512)
+            attn_out, _ = self.cross_attn(query, feat_seq, feat_seq)
+            pooled = attn_out.squeeze(1) # (B, 512)
+        else:
+            # Global Pooling -> (B, 512, 1, 1) -> (B, 512)
+            pooled = self.pool(features).flatten(1)
+            
         # Project to Latent
         latent = self.act(self.ln_proj(self.proj(pooled))) # (B, 256)
         
