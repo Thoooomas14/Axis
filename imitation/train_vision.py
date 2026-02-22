@@ -93,6 +93,9 @@ def train_vision(args):
         {'params': log_vars, 'lr': args.lr, 'weight_decay': 0.0} # No weight decay on log_vars
     ], lr=args.lr, weight_decay=1e-4)
     
+    scaler = torch.cuda.amp.GradScaler()
+    criterion_mse = nn.MSELoss()
+    
     model.train()
     
     step = 0
