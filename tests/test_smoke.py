@@ -35,13 +35,14 @@ def test_model_dimensions():
     
     images = torch.randn(B, W, C, H, W_img)
     proprio = torch.randn(B, W, 13)  # 13D Proprio
-    goal = torch.randn(B, 64)  # 64D Goal
+    goal = torch.randn(B, 38)  # 38D Goal
     
     # Forward Pass
     action, requery = model(images, proprio, goal)
     
-    # Assertions - Model outputs (B, W, action_dim) due to chunking
-    assert action.shape == (B, W, 7), f"Expected Action (B, W, 7), got {action.shape}"
+    # Assertions - Model outputs (B, ChunkSize, action_dim) 
+    chunk_size = config.get('chunk_size', 10)
+    assert action.shape == (B, chunk_size, 7), f"Expected Action (B, {chunk_size}, 7), got {action.shape}"
     assert requery.shape == (B, 1), f"Expected Requery (B, 1), got {requery.shape}"
 
 def test_model_instantiation():

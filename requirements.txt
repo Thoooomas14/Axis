@@ -19,3 +19,4 @@ toml
 gymnasium
 pypose>=0.6.0
 h5py
+sympy

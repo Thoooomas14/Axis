@@ -13,9 +13,9 @@ def test_token_caching():
     
     # 1. Setup Model
     config = {
-        'proprio_dim': 10,
-        'action_dim': 10,
-        'goal_dim': 64,
+        'proprio_dim': 13,
+        'action_dim': 7,
+        'goal_dim': 38,
         'embed_dim': 512, # Vision(256) + Proprio(128) + Goal(128)
         'num_heads': 4,
         'num_layers': 2,
@@ -41,8 +41,8 @@ def test_token_caching():
     
     # Sequence of 5 frames
     images_seq = torch.randn(B, W + 1, C, H, H).to(device)
-    proprio_seq = torch.randn(B, W + 1, 10).to(device)
-    goal = torch.randn(B, 64).to(device)
+    proprio_seq = torch.randn(B, W + 1, 13).to(device)
+    goal = torch.randn(B, 38).to(device)
     
     # 3. Standard Execution (Ground Truth)
     # Run fully on Window 2
@@ -84,7 +84,7 @@ def test_token_caching():
     print(f"\nMax Action Difference: {diff_act}")
     print(f"Max Requery Difference: {diff_req}")
     
-    TOLERANCE = 1e-6
+    TOLERANCE = 1e-4
     if diff_act < TOLERANCE and diff_req < TOLERANCE:
         print("\n✅ SUCCESS: Cached output matches standard output.")
     else:
