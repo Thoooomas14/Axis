@@ -84,6 +84,15 @@ def evaluate_vision(args):
             print("Running forward pass...")
             # We don't apply noisy dropout during evaluation, pass the clean goal
             latent, preds = model(images, raw_goal=raw_goal, return_preds=True)
+            
+            # --- DEBUG ---
+            print(f"Latent shape: {latent.shape}")
+            print(f"Latent Mean (per channel limit): min={latent.mean(0).min().item():.4f}, max={latent.mean(0).max().item():.4f}")
+            print(f"Latent Std (per channel): {latent.std(0).mean().item():.4f} (Average over channels)")
+            print(f"Latent Std (across batch): {latent.std(dim=0).mean().item():.4f}")
+            print(f"Image Min: {images.min().item():.4f}, Max: {images.max().item():.4f}")
+            print(f"Recon Min: {preds['reconstruction'].min().item():.4f}, Max: {preds['reconstruction'].max().item():.4f}")
+            # -------------
 
     # Calculate MSE vs Ground Truth
     criterion_mse = torch.nn.MSELoss()

@@ -125,7 +125,7 @@ class VisionEncoder(nn.Module):
             pooled = self.pool(features).flatten(1)
             
         # Project to Latent
-        latent = self.act(self.ln_proj(self.proj(pooled))) # (B, 256)
+        latent = self.ln_proj(self.proj(pooled)) # (B, 256)
         
         if return_preds:
             # Decode for reconstruction
