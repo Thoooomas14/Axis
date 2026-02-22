@@ -83,18 +83,15 @@ def train_vision(args):
     model = VisionEncoder(feature_dim=256, goal_dim=38, pretrained=True).to(device)
     log.info("VisionEncoder initialized.")
     
-    # Optimize
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scaler = torch.cuda.amp.GradScaler()
+    # --- Dynamic Loss Weighting (Uncertainty) ---
+    # We initialize 4 log-variances for 4 tasks: [recon, proprio, end_pose, obj_props]
+    log_vars = nn.Parameter(torch.zeros(4, device=device))
     
-    # --- Losses ---
-    criterion_mse = nn.MSELoss()
-    
-    # Weights for different explainable targets (Balanced for magnitude)
-    alpha_recon = 10000.0 # Reconstruction is small MSE
-    alpha_proprio = 0.1  # Poses have large magnitudes
-    alpha_end = 0.1
-    alpha_obj = 1000.0
+    # Add log_vars to the optimizer so they can be learned alongside the model!
+    optimizer = optim.AdamW([
+        {'params': model.parameters()},
+        {'params': log_vars, 'lr': args.lr, 'weight_decay': 0.0} # No weight decay on log_vars
+    ], lr=args.lr, weight_decay=1e-4)
     
     model.train()
     
@@ -173,40 +170,51 @@ def train_vision(args):
             # 4. Object Properties Loss (What EXACTLY is it?)
             obj_props_loss = criterion_mse(preds['object_props'], object_props)
             
-            # Weighted components
-            w_recon = alpha_recon * recon_loss
-            w_proprio = alpha_proprio * proprio_loss
-            w_end = alpha_end * end_pose_loss
-            w_obj = alpha_obj * obj_props_loss
+            # Total Loss = sum( 1 / (2*sigma^2) * MSE + log(sigma) )
+            # We use formulation exp(-log_var) for stability, and learn log_var directly.
+            loss = 0.0
             
-            # Total Loss
-            loss = w_recon + w_proprio + w_end + w_obj
+            w_recon = torch.exp(-log_vars[0]) * recon_loss + log_vars[0]
+            w_proprio = torch.exp(-log_vars[1]) * proprio_loss + log_vars[1]
+            w_end = torch.exp(-log_vars[2]) * end_pose_loss + log_vars[2]
+            w_obj = torch.exp(-log_vars[3]) * obj_props_loss + log_vars[3]
+            
+            # Note: factor of 0.5 is mathematically standard but empirically often absorbed into lr,
+            # so we just directly sum the scaled components for simplicity.
+            loss = sum([w_recon, w_proprio, w_end, w_obj])
         
         # Scaled Backward
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        # Clip max norm, including log_vars
+        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [log_vars], max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         
         step += 1
         pbar.update(1)
-        # Log the WEIGHTED values to monitor balance
+        # Calculate visible sigma = exp(0.5 * log_var) for easy monitoring
+        with torch.no_grad():
+            sigmas = torch.exp(0.5 * log_vars)
+            
+        # Log the dynamic standard deviations to monitor balance
         pbar.set_postfix({
             'L': f"{loss.item():.2f}", 
-            'Reconst': f"{w_recon.item():.2f}",
-            'Proprio': f"{w_proprio.item():.2f}",
-            'EndPose': f"{w_end.item():.2f}",
-            'ObjProps': f"{w_obj.item():.2f}"
+            'Reconst': f"{sigmas[0].item():.2f}",
+            'Proprio': f"{sigmas[1].item():.2f}",
+            'EndPose': f"{sigmas[2].item():.2f}",
+            'ObjProps': f"{sigmas[3].item():.2f}"
         })
         
-        # Save Checkpoint
+        # Save Checkpoint, including the learned log_vars
         if step % args.save_interval == 0 or step == args.steps:
             save_path = os.path.join(args.save_dir, 'vision_encoder_latest.pt')
             torch.save({
                 'step': step,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'log_vars': log_vars.data,
                 'loss': loss.item()
             }, save_path)
             # log.info(f"Saved checkpoint to {save_path}")
