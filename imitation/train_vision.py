@@ -117,7 +117,10 @@ def train_vision(args):
         images = batch['images'].to(device, non_blocking=True).squeeze(0) # (W, 3, 128, 128)
         proprio_raw = batch['proprio'].to(device, non_blocking=True).squeeze(0) # (W, 13)
         end_pose_raw = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(0) # (W, 13)
-        object_props = batch['object_props'].to(device, non_blocking=True).squeeze(0) # (W, 9)
+        object_props = batch['object_props'].to(device, non_blocking=True).squeeze(0) # (9,)
+        
+        # Expand episode-level object_props to match the window batch dimension
+        object_props = object_props.unsqueeze(0).expand(images.size(0), -1) # (W, 9)
         
         # 1. Update/Apply Target Normalization
         with torch.no_grad():
