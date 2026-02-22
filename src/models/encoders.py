@@ -108,11 +108,19 @@ class VisionEncoder(nn.Module):
             # Prepare Query from Goal: (B, 1, 512)
             query = self.goal_proj(raw_goal).unsqueeze(1)
             
-            # Cross Attention (batch_first=True)
+            # 1. Goal-driven spatial attention (Where is the goal target?)
             # Query: (B, 1, 512), Key/Value: (B, HW, 512)
             attn_out, _ = self.cross_attn(query, feat_seq, feat_seq)
-            pooled = attn_out.squeeze(1) # (B, 512)
+            goal_context = attn_out.squeeze(1) # (B, 512)
+            
+            # 2. Global spatial pooling (What is the whole scene doing?)
+            # Global Pooling -> (B, 512, 1, 1) -> (B, 512)
+            global_context = self.pool(features).flatten(1)
+            
+            # 3. Combine them (addition preserves the 512D shape for existing checkpoints)
+            pooled = global_context + goal_context
         else:
+            # Fallback for inference without goals (if needed)
             # Global Pooling -> (B, 512, 1, 1) -> (B, 512)
             pooled = self.pool(features).flatten(1)
             

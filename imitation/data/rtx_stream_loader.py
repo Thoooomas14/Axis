@@ -533,26 +533,10 @@ class RTXStreamLoader(IterableDataset):
                         worker = self._start_worker(ctx, result_queue, stop_event)
                     continue
                 
-                # Compute goal using subtask poses (from worker)
-                # Convert object_props_vec back to dict
-                obj_props_vec = data.get('object_props', np.zeros(9, dtype=np.float32))
-                object_props = {
-                    'size': obj_props_vec[:3],
-                    'color': obj_props_vec[3:6],
-                    'shape': obj_props_vec[6:9]
-                }
-                
-                goal_emb = self.oracle.encode_goal(
-                    data['subtask_type'],
-                    data['subtask_start_pose'],
-                    data['subtask_end_pose'],
-                    object_props
-                )
-                
                 yield {
                     'images': torch.tensor(data['images'], dtype=torch.float32) / 255.0,
                     'proprio': torch.tensor(data['proprio'], dtype=torch.float32),
-                    'goal': goal_emb,
+                    'goal': torch.tensor(data['goal'], dtype=torch.float32),
                     'actions': torch.tensor(data['actions'], dtype=torch.float32),
                     'target_poses': torch.tensor(data['target_poses'], dtype=torch.float32),
                     # Expose critical values for vision pre-training

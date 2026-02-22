@@ -104,9 +104,11 @@ def train_vision(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
     # Running statistics for target normalization (to balance loss)
-    # We normalize targets [Proprio, EndPose] to roughly zero-mean unit-variance
-    target_mean = torch.zeros(13).to(device)
-    target_std = torch.ones(13).to(device)
+    # We normalize targets [Proprio, EndPose] independently to roughly zero-mean unit-variance
+    target_mean_p = torch.zeros(13).to(device)
+    target_std_p = torch.ones(13).to(device)
+    target_mean_e = torch.zeros(13).to(device)
+    target_std_e = torch.ones(13).to(device)
     alpha_ema = 0.01 
     
     for batch in dataloader:
@@ -124,14 +126,19 @@ def train_vision(args):
         
         # 1. Update/Apply Target Normalization
         with torch.no_grad():
-            batch_mean = proprio_raw.mean(0)
-            batch_std = proprio_raw.std(0).clamp(min=1e-3)
-            target_mean = (1 - alpha_ema) * target_mean + alpha_ema * batch_mean
-            target_std = (1 - alpha_ema) * target_std + alpha_ema * batch_std
+            batch_mean_p = proprio_raw.mean(0)
+            batch_std_p = proprio_raw.std(0).clamp(min=1e-3)
+            target_mean_p = (1 - alpha_ema) * target_mean_p + alpha_ema * batch_mean_p
+            target_std_p = (1 - alpha_ema) * target_std_p + alpha_ema * batch_std_p
             
-        # Normalize targets
-        proprio = (proprio_raw - target_mean) / target_std
-        end_pose = (end_pose_raw - target_mean) / target_std
+            batch_mean_e = end_pose_raw.mean(0)
+            batch_std_e = end_pose_raw.std(0).clamp(min=1e-3)
+            target_mean_e = (1 - alpha_ema) * target_mean_e + alpha_ema * batch_mean_e
+            target_std_e = (1 - alpha_ema) * target_std_e + alpha_ema * batch_std_e
+            
+        # Normalize targets independently
+        proprio = (proprio_raw - target_mean_p) / target_std_p
+        end_pose = (end_pose_raw - target_mean_e) / target_std_e
             
         # The dataloader directly provides the encoded 38D 'goal' using GoalOracle
         raw_goal = batch['goal'].to(device, non_blocking=True).squeeze(0) # (W, 38)
