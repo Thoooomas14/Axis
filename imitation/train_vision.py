@@ -201,13 +201,13 @@ def train_vision(args):
         with torch.no_grad():
             sigmas = torch.exp(0.5 * log_vars)
             
-        # Log the dynamic standard deviations to monitor balance
+        # Log the components AND standard deviations to monitor balance
         pbar.set_postfix({
             'L': f"{loss.item():.2f}", 
-            'Reconst': f"{sigmas[0].item():.2f}",
-            'Proprio': f"{sigmas[1].item():.2f}",
-            'EndPose': f"{sigmas[2].item():.2f}",
-            'ObjProps': f"{sigmas[3].item():.2f}"
+            'Reconst': f"{w_recon.item():.2f} (s={sigmas[0].item():.2f})",
+            'Proprio': f"{w_proprio.item():.2f} (s={sigmas[1].item():.2f})",
+            'EndPose': f"{w_end.item():.2f} (s={sigmas[2].item():.2f})",
+            'ObjProps': f"{w_obj.item():.2f} (s={sigmas[3].item():.2f})"
         })
         
         # Save Checkpoint, including the learned log_vars
