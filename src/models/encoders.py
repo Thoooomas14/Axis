@@ -43,8 +43,9 @@ class VisionEncoder(nn.Module):
         
         # Project 512 channels from layer4 to feature_dim
         self.proj = nn.Linear(512, feature_dim)
-        self.ln_proj = nn.LayerNorm(feature_dim)
-        self.act = nn.ReLU(inplace=True)
+        # We purposely do not use LayerNorm or ReLU here. 
+        # LayerNorm forces the mean to be 0 across the latent vector, which
+        # disables its ability to store global intensity (like overall brightness/color).
 
         # --- Pre-training Heads ---
         # 1. Image Reconstruction Decoder (Latent -> Image)
@@ -98,7 +99,16 @@ class VisionEncoder(nn.Module):
             latent: (B, feature_dim)
             preds: Dict of predictions (if return_preds=True)
         """
-        features = self.backbone(x) # (B, 512, H/32, W/32)
+        # ImageNet normalization for the pretrained ResNet backbone.
+        # Without this, the backbone sees a completely wrong input distribution.
+        if x.size(1) == 3:
+            mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+            x_norm = (x - mean) / std
+        else:
+            x_norm = x
+
+        features = self.backbone(x_norm) # (B, 512, H/32, W/32)
         
         if raw_goal is not None:
             B, C_f, H_f, W_f = features.shape
@@ -125,7 +135,7 @@ class VisionEncoder(nn.Module):
             pooled = self.pool(features).flatten(1)
             
         # Project to Latent
-        latent = self.ln_proj(self.proj(pooled)) # (B, 256)
+        latent = self.proj(pooled) # (B, 256)
         
         if return_preds:
             # Decode for reconstruction
