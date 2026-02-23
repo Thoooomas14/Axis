@@ -14,6 +14,27 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.encoders import VisionEncoder
 from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
+import pypose as pp
+
+def se3_pose_loss(pred_13d: torch.Tensor, target_13d: torch.Tensor, omega_rot=1.0, omega_trans=1.0) -> torch.Tensor:
+    """
+    Computes SE(3) chordal loss between predicted and target 13D poses.
+    Args:
+        pred_13d: (B, 13) [R_flat(9), pos(3), gripper(1)]
+        target_13d: (B, 13) [R_flat(9), pos(3), gripper(1)]
+    """
+    # 1. Rotation (Chordal distance: ||R_pred - R_target||_F^2)
+    R_pred = pred_13d[:, :9].reshape(-1, 3, 3)
+    R_targ = target_13d[:, :9].reshape(-1, 3, 3)
+    rot_loss = torch.sum((R_pred - R_targ) ** 2, dim=(-2, -1)).mean()
+    
+    # 2. Translation (MSE)
+    trans_loss = torch.sum((pred_13d[:, 9:12] - target_13d[:, 9:12]) ** 2, dim=-1).mean()
+    
+    # 3. Gripper (MSE)
+    grip_loss = torch.mean((pred_13d[:, 12] - target_13d[:, 12]) ** 2)
+    
+    return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
 
 # Setup Logging
 def setup_logging(verbose=True):
@@ -55,7 +76,8 @@ def train_vision(args):
             loss_horizon=1,
             shuffle=True,
             repeat=True,
-            max_episodes=args.max_episodes
+            max_episodes=args.max_episodes,
+            random_frames=True
         )
     else:
         log.info(f"Initializing Streaming DataLoader: {args.dataset}")
@@ -64,10 +86,11 @@ def train_vision(args):
             dataset_name=args.dataset,
             split='train',
             batch_size=args.batch_size,
-            window_size=1,
+            window_size=args.batch_size, # Random frames use window_size as batch size to yield
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
-            shuffle_buffer_size=args.shuffle_buffer_size
+            shuffle_buffer_size=args.shuffle_buffer_size,
+            random_frames=True
         )
     
     dataloader = torch.utils.data.DataLoader(
@@ -136,9 +159,10 @@ def train_vision(args):
             target_mean_e = (1 - alpha_ema) * target_mean_e + alpha_ema * batch_mean_e
             target_std_e = (1 - alpha_ema) * target_std_e + alpha_ema * batch_std_e
             
-        # Normalize targets independently
-        proprio = (proprio_raw - target_mean_p) / target_std_p
-        end_pose = (end_pose_raw - target_mean_e) / target_std_e
+        # NO NORMALIZATION FOR SE(3) CHORDAL TARGETS
+        # Chordal loss mathematically requires raw SO(3) matrices and unscaled translations
+        proprio = proprio_raw  
+        end_pose = end_pose_raw 
             
         # The dataloader directly provides the encoded 38D 'goal' using GoalOracle
         raw_goal = batch['goal'].to(device, non_blocking=True).squeeze(0) # (W, 38)
@@ -171,11 +195,11 @@ def train_vision(args):
             # 1. Reconstruction Loss
             recon_loss = criterion_mse(preds['reconstruction'], images)
             
-            # 2. Proprioception Loss (Where am I?)
-            proprio_loss = criterion_mse(preds['proprio'], proprio)
+            # 2. Proprioception Loss (Where am I?) - SE(3) Chordal
+            proprio_loss = se3_pose_loss(preds['proprio'], proprio, omega_rot=1.0, omega_trans=1.0)
             
-            # 3. Subtask End Pose Loss (Where is the exact target?)
-            end_pose_loss = criterion_mse(preds['end_pose'], end_pose) # 'end_pose' targets are normalized
+            # 3. Subtask End Pose Loss (Where is the exact target?) - SE(3) Chordal
+            end_pose_loss = se3_pose_loss(preds['end_pose'], end_pose, omega_rot=1.0, omega_trans=1.0)
             
             # 4. Object Properties Loss (What EXACTLY is it?)
             obj_props_loss = criterion_mse(preds['object_props'], object_props)

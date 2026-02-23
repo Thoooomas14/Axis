@@ -37,7 +37,8 @@ def evaluate_vision(args):
             loss_horizon=1,
             shuffle=True,
             repeat=False,
-            max_episodes=1 # Just need one episode to grab a few frames
+            max_episodes=1, # Just need one episode to grab a few frames
+            random_frames=True
         )
     else:
         print(f"Loading sample data from streaming dataset: {args.dataset}")
@@ -45,11 +46,12 @@ def evaluate_vision(args):
             data_dir=None, # Uses default GS bucket for DROID
             dataset_name=args.dataset,
             split='train',
-            batch_size=8, # workers batch size 
+            batch_size=args.batch_size, # workers batch size 
             window_size=args.batch_size, # This dictates the number of frames we evaluate
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
-            shuffle_buffer_size=10
+            shuffle_buffer_size=10,
+            random_frames=True
         )
 
     # Note: StreamLoader yields dicts matching local loader.
@@ -69,14 +71,9 @@ def evaluate_vision(args):
     object_props = batch['object_props'].to(device).squeeze(0) # (9,)
     object_props = object_props.unsqueeze(0).expand(images.size(0), -1) # (W, 9)
 
-    # Normalize targets using independent batch statistics for evaluation purposes
-    batch_mean_p = proprio_raw.mean(0)
-    batch_std_p = proprio_raw.std(0, unbiased=False).clamp(min=1e-3)
-    proprio = (proprio_raw - batch_mean_p) / batch_std_p
-    
-    batch_mean_e = end_pose_raw.mean(0)
-    batch_std_e = end_pose_raw.std(0, unbiased=False).clamp(min=1e-3)
-    end_pose = (end_pose_raw - batch_mean_e) / batch_std_e
+    # NO NORMALIZATION FOR SE(3) TARGETS
+    proprio = proprio_raw
+    end_pose = end_pose_raw
 
     # Forward Pass
     with torch.no_grad():

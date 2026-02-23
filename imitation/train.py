@@ -944,7 +944,7 @@ if __name__ == "__main__":
     parser.add_argument('--viz_interval', type=int, default=1000, help="Steps between visualizations")
 
     # === Loss Function ===
-    parser.add_argument('--loss_horizon', type=int, default=1, 
+    parser.add_argument('--loss_horizon', type=int, default=10, 
                         help="Twist steps to rollout before loss (1 <= horizon <= window_size)")
     parser.add_argument('--loss_discount', type=float, default=0.8, help='Geometric discount factor for horizon steps')
     parser.add_argument('--omega_rot', type=float, default=1.0, help="Rotation loss weight")

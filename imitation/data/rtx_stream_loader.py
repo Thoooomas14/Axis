@@ -27,7 +27,7 @@ from .goal_oracle import GoalOracle, extract_object_properties
 
 
 def _episode_worker(data_dir, dataset_name, split, image_key, image_size, 
-                    window_size, loss_horizon, result_queue, stop_event):
+                    window_size, loss_horizon, mix_episodes, ram_usage_limit, result_queue, stop_event):
     """
     Worker process that loads episodes and sends numpy data back via queue.
     Runs in a SEPARATE PROCESS - when it exits, all TensorFlow memory is released.
@@ -200,17 +200,32 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
         
         buffer_size = window_size + loss_horizon
         MAX_STEPS_PER_EPISODE = 400
-        MAX_EPISODES_BEFORE_REFRESH = 100
-        PRESTART_AT = 50
-        episode_count = 0
         
+        # We process 'mix_episodes' at a time. The worker will naturally loop 
+        # infinitely over the tfds dataset until stop_event is set.
+        episode_buffer = []
+        
+        from imitation.data.goal_oracle import GoalOracle
+        oracle = GoalOracle(output_dim=38)
+
         for episode in ds:
             if stop_event.is_set():
                 break
             
-            episode_count += 1
+            # 1. RAM Check
+            import psutil
+            ram_used_gb = psutil.virtual_memory().used / (1024 ** 3)
+            if ram_used_gb > ram_usage_limit:
+                if len(episode_buffer) == 0:
+                    raise MemoryError(f"System RAM ({ram_used_gb:.1f}GB) exceeds limit ({ram_usage_limit}GB) before loading any episodes! Increase limit or free memory.")
+                # If memory is over the limit, it means the GPU is processing slower than we are fetching.
+                # We sleep slightly to give the GPU loop a chance to pop from our queue, releasing RAM.
+                import time
+                while psutil.virtual_memory().used / (1024 ** 3) > ram_usage_limit:
+                    if stop_event.is_set(): break
+                    time.sleep(0.5)
             
-            # Extract episode data to numpy
+            # --- Extract episode data to numpy ---
             imgs = []
             props = []
             language_instruction = ""
@@ -218,7 +233,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
             for s in episode['steps']:
                 obs = s['observation']
                 
-                # Extract language instruction from first step (with fallback)
                 if not language_instruction and 'language_instruction' in s:
                     instr = s['language_instruction']
                     if hasattr(instr, 'numpy'):
@@ -227,7 +241,6 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                         instr = instr.decode('utf-8', errors='ignore')
                     language_instruction = str(instr).strip() if instr else ""
                 
-                # Fallback: check observation/natural_language_instruction
                 if not language_instruction and 'natural_language_instruction' in obs:
                     instr = obs['natural_language_instruction']
                     if hasattr(instr, 'numpy'):
@@ -245,7 +258,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                 imgs.append(process_image(img, image_size))
                 props.append(get_pose(obs))
             
-            # Extract object properties from language instruction
+            # Object Properties
             from imitation.data.goal_oracle import extract_object_properties as extract_props
             object_props = extract_props(language_instruction)
             object_props_vec = np.concatenate([
@@ -257,7 +270,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
             if len(imgs) < buffer_size:
                 continue
             
-            # Truncate very long episodes (keep last N steps)
+            # Truncate
             if len(imgs) > MAX_STEPS_PER_EPISODE:
                 imgs = imgs[-MAX_STEPS_PER_EPISODE:]
                 props = props[-MAX_STEPS_PER_EPISODE:]
@@ -265,8 +278,7 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
             
-            # Skip initial stalled frames where arm isn't moving
-            # Threshold: 0.1 cm (1mm) movement between frames (positions already scaled to cm)
+            # Skip stalled Start
             if len(props) > 1:
                 pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
                 moving_mask = pos_deltas > 0.1
@@ -276,90 +288,81 @@ def _episode_worker(data_dir, dataset_name, split, image_key, image_size,
                         imgs = imgs[first_moving:]
                         props = props[first_moving:]
             
-            # Segment into subtasks BEFORE generating windows
+            if len(imgs) < buffer_size:
+                continue
+                
             segments = segment_subtasks(props)
             
-            # Generate windows
-            num_windows = len(imgs) - window_size - loss_horizon + 1
+            # Precompute Episode Level Arrays
+            seq_len = len(imgs)
+            twists = np.zeros((seq_len - 1, 7), dtype=np.float32)
+            goals = np.zeros((seq_len, 38), dtype=np.float32)
+            subtask_ends = np.zeros((seq_len, 13), dtype=np.float32)
             
-            for w in range(num_windows):
-                if stop_event.is_set():
-                    break
+            for i in range(seq_len - 1):
+                twists[i] = compute_twist(props[i], props[i+1])
                 
-                w_imgs = imgs[w : w + window_size]
-                w_props = props[w : w + window_size]
-                
-                # Find subtask for current window's last frame
-                current_frame = w + window_size - 1
-                seg = get_segment_for_frame(segments, current_frame)
-                
-                # Compute twists
-                target_twists = []
-                target_poses = []
-                start_idx = w + window_size - 1
-                
-                for h in range(loss_horizon):
-                    curr_idx = start_idx + h
-                    next_idx = curr_idx + 1
-                    twist = compute_twist(props[curr_idx], props[next_idx])
-                    target_twists.append(twist)
-                    target_poses.append(props[next_idx])
-                
-                # Compute GOAL for each frame in the window (and subtask_end_pose)
-                from imitation.data.goal_oracle import GoalOracle
-                # Re-instantiate Oracle in worker (stateless)
-                oracle = GoalOracle(output_dim=38) 
-                
-                window_goals = []
-                window_end_poses = []
-                
-                for i in range(window_size):
-                    frame_idx = w + i
-                    frame_seg = get_segment_for_frame(segments, frame_idx)
-                    
-                    if frame_seg:
-                        g = oracle.encode_goal(
-                            frame_seg['task_type'],
-                            frame_seg['start_pose'],
-                            frame_seg['end_pose'],
-                            object_props
-                        )
-                        window_end_poses.append(frame_seg['end_pose'])
-                    else:
-                        # Fallback
-                        g = oracle.encode_goal(0, props[frame_idx], props[frame_idx], object_props)
-                        window_end_poses.append(props[frame_idx])
-                        
-                    window_goals.append(g)
-                    
-                window_goals_arr = np.array(window_goals, dtype=np.float32)
-                window_end_poses_arr = np.array(window_end_poses, dtype=np.float32)
+            for i in range(seq_len):
+                seg = get_segment_for_frame(segments, i)
+                if seg:
+                    goals[i] = oracle.encode_goal(seg['task_type'], seg['start_pose'], seg['end_pose'], object_props)
+                    subtask_ends[i] = seg['end_pose']
+                else:
+                    goals[i] = oracle.encode_goal(0, props[i], props[i], object_props)
+                    subtask_ends[i] = props[i]
 
-                # Send window via queue (blocks if queue full)
-                result_queue.put({
-                    'images': w_imgs,
-                    'proprio': w_props,
-                    'goal': window_goals_arr, # (W, 38)
-                    'actions': np.array(target_twists, dtype=np.float32),
-                    'target_poses': np.array(target_poses, dtype=np.float32),
-                    'subtask_end_pose': window_end_poses_arr, # (W, 13)
-                    'object_props': object_props_vec,
-                })
+            episode_buffer.append({
+                'images': imgs,
+                'proprio': props,
+                'twists': twists,
+                'goals': goals,
+                'subtask_ends': subtask_ends,
+                'object_props': object_props_vec
+            })
             
-            # Clear TF after each episode
-            tf.keras.backend.clear_session()
-            gc.collect()
-            
-            # Signal main process to start warming up next worker
-            if episode_count == PRESTART_AT:
-                result_queue.put({'prestart': True})
-            
-            # Proactive refresh - exit and let main process restart us
-            if episode_count >= MAX_EPISODES_BEFORE_REFRESH:
-                result_queue.put({'refresh': True})
-                return
-        
-        result_queue.put({'error': 'Worker episode loop ended unexpectedly'})
+            # --- Mix and Sliced Yielding ---
+            if len(episode_buffer) >= mix_episodes:
+                # 1. Pointer Mapping
+                valid_indices = []
+                for ep_id, ep_data in enumerate(episode_buffer):
+                    ep_len = len(ep_data['images'])
+                    max_start = ep_len - window_size - loss_horizon + 1
+                    for start_idx in range(max_start):
+                        valid_indices.append((ep_id, start_idx))
+                
+                # 2. Global Shuffle
+                np.random.shuffle(valid_indices)
+                
+                # 3. Dynamic Slicing and Queuing (simulate 'window_size' dimensional batches)
+                for ep_id, start_idx in valid_indices:
+                    if stop_event.is_set(): break
+                    ep = episode_buffer[ep_id]
+                    
+                    w_start = start_idx
+                    w_end = start_idx + window_size
+                    
+                    twist_start = w_end - 1
+                    twist_end = twist_start + loss_horizon
+                    
+                    pose_start = w_end
+                    pose_end = pose_start + loss_horizon
+                    
+                    result_queue.put({
+                        'images': ep['images'][w_start : w_end], # NumPy (W, C, H, W) Unnormalized 0-255! normalization happens in Train loop for loader! Wait, RTX loader historically yields raw 255. Local loader normalized. We'll leave as raw since it was before
+                        'proprio': ep['proprio'][w_start : w_end],
+                        'goal': ep['goals'][w_start : w_end],
+                        'actions': ep['twists'][twist_start : twist_end],
+                        'target_poses': ep['proprio'][pose_start : pose_end],
+                        'subtask_end_pose': ep['subtask_ends'][w_start : w_end],
+                        'object_props': ep['object_props']
+                    })
+                
+                # Clear TF after each massive episode flush
+                tf.keras.backend.clear_session()
+                gc.collect()
+                
+                # Empty buffer to soak next batch
+                episode_buffer = []
             
     except Exception as e:
         import traceback
@@ -381,9 +384,11 @@ class RTXStreamLoader(IterableDataset):
     """
     
     def __init__(self, dataset_name, split='train', batch_size=1, window_size=8, 
-                 loss_horizon=1, image_key=None, image_size=(128, 128), 
+                 loss_horizon=1, image_key=None, 
                  shuffle_buffer_size=1000, data_dir=None, repeat=True,
-                 use_subprocess=True, queue_size=32, shuffle_files=True, max_episodes=0):
+                 use_subprocess=True, queue_size=32, shuffle_files=True, max_episodes=0,
+                 image_size=(128, 128), mix_episodes=8, ram_usage_limit=12.0,
+                 random_frames=False): # random_frames is deprecated but kept for backwards compatibility in init
         self.dataset_name = dataset_name
         self.split = split
         self.batch_size = batch_size
@@ -392,12 +397,15 @@ class RTXStreamLoader(IterableDataset):
         self.image_key = image_key
         self.image_size = image_size
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.mix_episodes = mix_episodes
+        self.ram_usage_limit = ram_usage_limit
         self.data_dir = data_dir
         self.repeat = repeat
         self.use_subprocess = use_subprocess
         self.queue_size = queue_size
         self.shuffle_files = shuffle_files
         self.max_episodes = max_episodes  # 0 = unlimited
+        self.random_frames = random_frames
         
         self.oracle = GoalOracle(output_dim=38)
         
@@ -443,19 +451,29 @@ class RTXStreamLoader(IterableDataset):
         usable_steps = max(0, avg_episode_length - self.window_size - self.loss_horizon + 1)
         return num_episodes * usable_steps
     
-    def _start_worker(self, ctx, result_queue, stop_event):
-        """Start a new subprocess worker."""
-        worker = ctx.Process(
-            target=_episode_worker,
-            args=(
-                self.data_dir, self.dataset_name, self.split,
-                self.image_key, self.image_size,
-                self.window_size, self.loss_horizon,
-                result_queue, stop_event
+    def _start_worker(self, ctx, result_queue, stop_event, num_workers=1):
+        """Start multiple background workers to process episodes and place into queue."""
+        # Technically 'num_workers' here controls how many simultaneous TF processes
+        # read the dataset. Note each process loads mix_episodes into RAM!
+        # DROID requires heavy RAM, so 1 worker is often all a desktop can handle.
+        # But if the cluster has 128GB+, increasing num_workers fills the queue faster.
+        active_workers = []
+        for _ in range(num_workers):
+            worker = ctx.Process(
+                target=_episode_worker,
+                args=(
+                    self.data_dir, self.dataset_name, self.split,
+                    self.image_key, self.image_size,
+                    self.window_size, self.loss_horizon,
+                    self.mix_episodes, self.ram_usage_limit, result_queue, stop_event
+                )
             )
-        )
-        worker.start()
-        return worker
+            worker.start()
+            active_workers.append(worker)
+            
+        # Historically, the iteration loop below this assumes it only has one worker reference.
+        # Returning list to expand later if needed, but for now we expect the first.
+        return active_workers[0] if num_workers == 1 else active_workers
     
     def _iter_subprocess(self):
         """Iterator using subprocess for TF memory isolation."""
