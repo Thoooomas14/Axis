@@ -183,7 +183,6 @@ def inspect_streaming(dataset: str, num_windows: int = 100, data_dir: str = None
     loader = RTXStreamLoader(
         dataset_name=dataset,
         split='train',
-        batch_size=1,
         window_size=8,
         loss_horizon=1,
         image_size=(128, 128),

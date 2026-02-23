@@ -16,8 +16,7 @@ def visualize_requery(args):
     loader = RTXStreamLoader(
         dataset_name=args.dataset,
         data_dir=args.data_dir,
-        window_size=8,
-        batch_size=1
+        window_size=8
     )
     
     # Initialize TFDS builder

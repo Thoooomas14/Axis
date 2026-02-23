@@ -76,8 +76,7 @@ def train_vision(args):
             loss_horizon=1,
             shuffle=True,
             repeat=True,
-            max_episodes=args.max_episodes,
-            random_frames=True
+            max_episodes=args.max_episodes
         )
     else:
         log.info(f"Initializing Streaming DataLoader: {args.dataset}")
@@ -85,12 +84,10 @@ def train_vision(args):
             data_dir=args.data_dir,
             dataset_name=args.dataset,
             split='train',
-            batch_size=args.batch_size,
             window_size=args.batch_size, # Random frames use window_size as batch size to yield
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
-            shuffle_buffer_size=args.shuffle_buffer_size,
-            random_frames=True
+            shuffle_buffer_size=args.shuffle_buffer_size
         )
     
     dataloader = torch.utils.data.DataLoader(

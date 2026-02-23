@@ -37,8 +37,7 @@ def evaluate_vision(args):
             loss_horizon=1,
             shuffle=True,
             repeat=False,
-            max_episodes=1, # Just need one episode to grab a few frames
-            random_frames=True
+            max_episodes=1 # Just need one episode to grab a few frames
         )
     else:
         print(f"Loading sample data from streaming dataset: {args.dataset}")
@@ -46,13 +45,12 @@ def evaluate_vision(args):
             data_dir=None, # Uses default GS bucket for DROID
             dataset_name=args.dataset,
             split='train',
-            batch_size=args.batch_size, # workers batch size 
             window_size=args.batch_size, # This dictates the number of frames we evaluate
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
-            shuffle_buffer_size=10,
-            random_frames=True
+            shuffle_buffer_size=10
         )
+
 
     # Note: StreamLoader yields dicts matching local loader.
     dataloader = torch.utils.data.DataLoader(stream_loader, batch_size=1, num_workers=0)

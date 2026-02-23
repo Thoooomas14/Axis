@@ -21,7 +21,6 @@ def visualize_episode(args):
         print(f"Loading Local Dataset from {args.local_path}")
         dataset = LocalDataLoader(
             data_path=args.local_path,
-            batch_size=1,
             window_size=args.window_size,
             loss_horizon=1,
             repeat=False # One epoch
@@ -31,7 +30,6 @@ def visualize_episode(args):
         dataset = RTXStreamLoader(
             dataset_name=args.dataset, 
             split='train', 
-            batch_size=1, # Get 1 full episode
             window_size=args.window_size,
             image_size=(128, 128),
             data_dir=args.data_dir,

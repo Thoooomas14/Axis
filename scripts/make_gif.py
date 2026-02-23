@@ -166,7 +166,6 @@ def make_gif(args):
         loader = RTXStreamLoader(
             dataset_name=args.dataset,
             split='train',
-            batch_size=1,
             window_size=10,
             image_size=(128, 128),
             data_dir=args.data_dir,

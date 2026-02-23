@@ -60,9 +60,9 @@ twist_7d = [twist, gripper_next - gripper_curr]
 
 ### 2. Goal Oracle (`imitation/data/goal_oracle.py`)
 
-Generates deterministic 64D semantic goal embeddings during training.
+Generates deterministic 38D semantic goal embeddings during training.
 
-#### Goal Vector Layout (64D)
+#### Goal Vector Layout (38D)
 
 | Indices | Dims | Component |
 |---------|------|-----------|
@@ -70,61 +70,34 @@ Generates deterministic 64D semantic goal embeddings during training.
 | 3-15 | 13 | Start pose (13D SE(3) full matrix) |
 | 16-28 | 13 | End pose (13D SE(3) full matrix) |
 | 29-37 | 9 | Object properties (size, color, shape) |
-| 38-55 | 18 | Reserved (zeros) |
-| 56-63 | 8 | Regularization noise (σ configurable) |
-
-#### Configurable Noise Scale
-
-```python
-oracle = GoalOracle(output_dim=64, noise_scale=0.1)
-```
 
 ### 3. Output Format
 
-Each batch contains (where H = `loss_horizon`):
+Each batch contains (where H = `loss_horizon` and W = `window_size`):
 
 | Key | Shape | Description |
 |-----|-------|--------------|
 | `images` | `(B, W, 3, 128, 128)` | RGB images (observation window) |
 | `proprio` | `(B, W, 13)` | 13D SE(3) poses (observation window) |
-| `goal` | `(B, 64)` | Dynamic goal embedding |
+| `goal` | `(B, 38)` | Dynamic goal embedding |
 | `actions` | `(B, H, 7)` | 7D twist targets for future H steps |
 | `target_poses` | `(B, H, 13)` | Direct future poses for endpoint loss |
+| `subtask_end_pose`| `(B, W, 13)`| Target end pose of current subtask |
+| `object_props` | `(B, W, 9)` | Numeric object properties if matched |
 
-> **Windowing**: Episodes are windowed such that there are always H valid future poses after each window. Windows near episode end are excluded.
+## Data Flow (Memory-Mapped Architecture)
 
-> **Note**: `requery` is not in data - trained as model confidence from action loss.
+Both loaders use an Index-Based memory-mapped approach combined with background `multiprocessing` workers:
 
-## Data Flow
-
-```mermaid
-graph LR
-    GCS[GCS Bucket] -->|Stream| TFDS[TFDS Iterator]
-    TFDS -->|Episode| Conv[Pose Converter<br/>8D → 13D]
-    Conv --> Twist[Twist Calculator<br/>PyPose Log Map]
-    Conv --> GS[Gripper State<br/>Change Detection]
-    
-    subgraph Dynamic Goal
-        GS -->|Transitions| Oracle[Goal Oracle]
-        Oracle -->|64D| Window
-    end
-    
-    Twist --> Window[Sliding Window<br/>W=8]
-    Window -->|Batch| Model
-```
+1. **Episode Buffer**: `num_workers` fetch full episodes into memory simultaneously up to `mix_episodes` (e.g., 8).
+2. **Pointer Generation**: Calculates all valid `window_size` + `loss_horizon` start markers.
+3. **Global Shuffle**: Pointers are perfectly shuffled across all `mix_episodes` yielding highly IID distributions.
+4. **Dynamic Slice**: `(B, W, ...)` batches are sliced efficiently upon iterating, drastically lowering memory footprint vs duplicate buffers.
 
 ## Memory Management
 
-The loader includes automatic memory management:
-
-```python
-# After each episode
-gc.collect()
-
-# Linux only: release memory to OS
-if platform.system() == 'Linux':
-    libc.malloc_trim(0)
-```
+The loaders implement proactive out-of-memory protections through `ram_usage_limit`. 
+If a background worker detects the system RAM exceeding the limit, it pauses fetching. If a single payload exceeds this natively, the loader throws a fatal `MemoryError` traceback.
 
 ## Usage
 
@@ -135,14 +108,16 @@ loader = RTXStreamLoader(
     dataset_name='fractal20220817_data',
     split='train',
     window_size=8,
-    shuffle_buffer_size=10  # Reduce if OOM
+    mix_episodes=8,
+    ram_usage_limit=32.0, # Blocks fetching if usage exceeds 32GB
+    use_subprocess=True # Isolate memory
 )
 
-for batch in loader:
-    images = batch['images']      # (B, 8, 3, 128, 128)
-    proprio = batch['proprio']    # (B, 8, 13)
-    goal = batch['goal']          # (B, 64)
-    actions = batch['actions']    # (B, 8, 7)
+# Iterator dynamically slices batches of size 1 (loader output is (W, ...))
+iterator = iter(loader)
+for batch in iterator:
+    images = batch['images']      # (W, 3, 128, 128)
+    proprio = batch['proprio']    # (W, 13)
 ```
 
 ---

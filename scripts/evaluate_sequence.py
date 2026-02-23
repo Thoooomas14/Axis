@@ -91,7 +91,6 @@ def evaluate_sequence(args):
         dataset = RTXStreamLoader(
             dataset_name=args.dataset, 
             split='train', 
-            batch_size=1, 
             window_size=8,
             image_size=(128, 128),
             data_dir=args.data_dir,
