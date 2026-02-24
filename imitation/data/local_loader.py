@@ -78,7 +78,7 @@ class LocalDataLoader(IterableDataset):
         self.ram_usage_limit = ram_usage_limit
         self.random_frames = False # Deprecated: unified index design handles this natively
         
-        self.oracle = GoalOracle(output_dim=38)
+        self.oracle = None
         
         # Get episode keys, metadata, and apply split
         with h5py.File(data_path, 'r') as f:
@@ -254,6 +254,9 @@ class LocalDataLoader(IterableDataset):
                         seq_len = len(imgs)
                         goals = np.zeros((seq_len, 38), dtype=np.float32)
                         subtask_ends = np.zeros((seq_len, 13), dtype=np.float32)
+                        
+                        if self.oracle is None:
+                            self.oracle = GoalOracle(output_dim=38)
                         
                         for i in range(seq_len):
                             seg = self._get_segment_for_frame(segments, i)

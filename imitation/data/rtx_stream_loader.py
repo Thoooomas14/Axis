@@ -407,7 +407,7 @@ class RTXStreamLoader(IterableDataset):
         self.max_episodes = max_episodes  # 0 = unlimited
         self.random_frames = random_frames
         
-        self.oracle = GoalOracle(output_dim=38)
+        self.oracle = None
         
         # Lazy-initialized for in-process mode
         self.builder = None
@@ -687,6 +687,10 @@ class RTXStreamLoader(IterableDataset):
                 task_type = 2  # Place
             else:
                 task_type = 0  # Move
+            
+            if self.oracle is None:
+                from imitation.data.goal_oracle import GoalOracle
+                self.oracle = GoalOracle(output_dim=38)
             
             goal = self.oracle.encode_goal(task_type, start_pose, end_pose, object_props)
             segments.append({
