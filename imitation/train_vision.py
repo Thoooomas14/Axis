@@ -72,7 +72,7 @@ def train_vision(args):
         # This makes exactly ONE read per training step for the entire batch.
         stream_loader = LocalDataLoader(
             data_path=args.local_data_path,
-            window_size=args.batch_size, 
+            window_size=1, 
             loss_horizon=1,
             shuffle=True,
             repeat=True,
@@ -86,7 +86,7 @@ def train_vision(args):
             data_dir=args.data_dir,
             dataset_name=args.dataset,
             split='train',
-            window_size=args.batch_size, # Random frames use window_size as batch size to yield
+            window_size=1, # Replaced with 1 to allow PyTorch DataLoader to handle batch sizing
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
             shuffle_buffer_size=args.shuffle_buffer_size,
@@ -96,7 +96,7 @@ def train_vision(args):
     
     dataloader = torch.utils.data.DataLoader(
         stream_loader,
-        batch_size=1, # One batch = one window of size args.batch_size
+        batch_size=args.batch_size, # PyTorch dynamically groups 1-frame windows into full batches
         num_workers=args.num_workers,
         pin_memory=True,
         persistent_workers=(args.num_workers > 0),
@@ -140,13 +140,12 @@ def train_vision(args):
             break
             
         # Unpack Data
-        images = batch['images'].to(device, non_blocking=True).squeeze(0) # (W, 3, 128, 128)
-        proprio_raw = batch['proprio'].to(device, non_blocking=True).squeeze(0) # (W, 13)
-        end_pose_raw = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(0) # (W, 13)
-        object_props = batch['object_props'].to(device, non_blocking=True).squeeze(0) # (9,)
+        images = batch['images'].to(device, non_blocking=True).squeeze(1) # (B, 3, 128, 128)
+        proprio_raw = batch['proprio'].to(device, non_blocking=True).squeeze(1) # (B, 13)
+        end_pose_raw = batch['subtask_end_pose'].to(device, non_blocking=True).squeeze(1) # (B, 13)
+        object_props = batch['object_props'].to(device, non_blocking=True) # (B, 9)
         
-        # Expand episode-level object_props to match the window batch dimension
-        object_props = object_props.unsqueeze(0).expand(images.size(0), -1) # (W, 9)
+        # DataLoader handles batching across episodes now, so object_props is already (B, 9)
         
         # 1. Update/Apply Target Normalization
         with torch.no_grad():
