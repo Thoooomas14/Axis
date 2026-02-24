@@ -258,6 +258,12 @@ def train_vision(args):
     log.info("Vision Pre-training Complete.")
 
 if __name__ == "__main__":
+    import multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+        
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default=None, help="Path to dataset")
     parser.add_argument('--dataset', type=str, default='fractal20220817_data', help="Dataset name")
