@@ -280,6 +280,8 @@ def train(args):
                 split_start=split_start,
                 split_end=split_end,
                 max_episodes=args.max_episodes,
+                mix_episodes=args.mix_episodes,
+                ram_usage_limit=args.ram_limit
             )
             # Local loader supports multi-worker
             effective_workers = num_workers
@@ -298,6 +300,8 @@ def train(args):
                 shuffle_buffer_size=shuffle_buffer,
                 use_subprocess=args.use_subprocess,
                 queue_size=64,
+                mix_episodes=args.mix_episodes,
+                ram_usage_limit=args.ram_limit,
                 max_episodes=args.max_episodes,
             )
             # When use_subprocess=True, the loader handles parallelism internally
@@ -925,6 +929,8 @@ if __name__ == "__main__":
     parser.add_argument('--warmup_steps', type=int, default=1000, help="LR warmup steps")
     parser.add_argument('--window_size', type=int, default=10, help="Sliding window size")
     parser.add_argument('--num_workers', type=int, default=0, help="DataLoader workers")
+    parser.add_argument('--ram_limit', type=float, default=12.0, help="RAM usage limit in GB for data workers")
+    parser.add_argument('--mix_episodes', type=int, default=8, help="Number of episodes to mix in RAM")
     
     # === Checkpointing ===
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help="Checkpoint directory")

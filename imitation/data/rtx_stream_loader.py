@@ -872,7 +872,15 @@ class RTXStreamLoader(IterableDataset):
             gc.collect()
     
     def __iter__(self):
-        if self.use_subprocess:
+        import multiprocessing as mp
+        current_process = mp.current_process()
+        
+        # PyTorch DataLoader workers are daemonic. If we are inside one, we cannot spawn 
+        # more subprocesses. But that's okay! PyTorch has already isolated this worker's memory, 
+        # so dropping down to in-process TF loading avoids the leak issue safely.
+        if current_process.daemon:
+            yield from self._iter_inprocess()
+        elif self.use_subprocess:
             yield from self._iter_subprocess()
         else:
             yield from self._iter_inprocess()

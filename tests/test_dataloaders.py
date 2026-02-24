@@ -70,6 +70,6 @@ def test_oom_protection_local_loader():
         shuffle=False
     )
     
-    with pytest.raises(RuntimeError, match="MemoryError"):
+    with pytest.raises(MemoryError):
         iterator = iter(loader)
         next(iterator)

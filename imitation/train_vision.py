@@ -76,7 +76,9 @@ def train_vision(args):
             loss_horizon=1,
             shuffle=True,
             repeat=True,
-            max_episodes=args.max_episodes
+            max_episodes=args.max_episodes,
+            mix_episodes=args.mix_episodes,
+            ram_usage_limit=args.ram_limit
         )
     else:
         log.info(f"Initializing Streaming DataLoader: {args.dataset}")
@@ -87,7 +89,9 @@ def train_vision(args):
             window_size=args.batch_size, # Random frames use window_size as batch size to yield
             loss_horizon=1,
             use_subprocess=args.use_subprocess,
-            shuffle_buffer_size=args.shuffle_buffer_size
+            shuffle_buffer_size=args.shuffle_buffer_size,
+            mix_episodes=args.mix_episodes,
+            ram_usage_limit=args.ram_limit
         )
     
     dataloader = torch.utils.data.DataLoader(
@@ -264,6 +268,8 @@ if __name__ == "__main__":
     parser.add_argument('--save_dir', type=str, default='./checkpoints_vision', help="Directory to save checkpoints")
     parser.add_argument('--use_subprocess', action='store_true', help="Use subprocess for data loading")
     parser.add_argument('--num_workers', type=int, default=4, help="Number of data loader workers")
+    parser.add_argument('--ram_limit', type=float, default=12.0, help="RAM usage limit in GB for data workers")
+    parser.add_argument('--mix_episodes', type=int, default=8, help="Number of episodes to mix in RAM")
     parser.add_argument('--shuffle_buffer_size', type=int, default=1000)
     parser.add_argument('--local_data_path', type=str, default=None, help="Path to local HDF5 file (overrides streaming)")
     parser.add_argument('--max_episodes', type=int, default=0, help="Max episodes to use (0=all)")
