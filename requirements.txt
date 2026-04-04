@@ -1,5 +1,5 @@
 numpy<2.0
-torch==2.2.1
+torch==2.5.1
 tqdm
 tensorflow
 tensorflow_datasets
@@ -8,7 +8,8 @@ matplotlib
 pandas
 scipy
 apache_beam
-torchvision
+torchvision=0.20.1
+torchaudio=2.5.1
 pytest
 flake8
 pyyaml
