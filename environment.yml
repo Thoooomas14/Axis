@@ -33,6 +33,6 @@ dependencies:
       - psutil
       - toml
       - gymnasium
-      - pypose>=0.6.0
+      - pypose
       - h5py
       - sympy

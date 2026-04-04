@@ -1,12 +1,14 @@
 import torch
 import copy
 
+
 class EMA:
     """
     Exponential Moving Average for model parameters.
     Maintains a shadow copy of the model and updates it using:
     shadow_variable -= (1 - decay) * (shadow_variable - variable)
     """
+
     def __init__(self, model, decay=0.9999):
         self.decay = decay
         self.shadow = copy.deepcopy(model)
@@ -22,7 +24,7 @@ class EMA:
                     # Skip if shape mismatch (e.g. dynamic buffers like latent_queue)
                     if msd[k].shape != ssd[k].shape:
                         continue
-                    ssd[k].copy_(self.decay * ssd[k] + (1. - self.decay) * msd[k])
+                    ssd[k].copy_(self.decay * ssd[k] + (1.0 - self.decay) * msd[k])
 
     def state_dict(self):
         return self.shadow.state_dict()

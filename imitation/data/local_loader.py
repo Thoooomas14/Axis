@@ -16,27 +16,26 @@ import torch
 from torch.utils.data import IterableDataset
 import numpy as np
 import h5py
-from scipy.spatial.transform import Rotation as R
+from typing import cast
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 import pypose as pp
 import psutil
-import time
 from .goal_oracle import GoalOracle
 
 
 class LocalDataLoader(IterableDataset):
     """
     Load preprocessed episodes from HDF5.
-    
+
     Supports any dataset preprocessed with preprocessor.py (DROID, Fractal, etc.).
     Performs windowing, subtask segmentation, goal computation, and twist
     computation at load time for maximum flexibility.
-    
+
     Output format matches RTXStreamLoader exactly.
     """
-    
+
     def __init__(
         self,
         data_path: str,
@@ -62,7 +61,7 @@ class LocalDataLoader(IterableDataset):
             max_episodes: Max episodes to use (0 = all). Useful for overfit testing.
             mix_episodes: Number of episodes to mix in RAM before yielding batches.
             ram_usage_limit: Maximum RAM usage (GB) before pausing background fetching.
-            
+
         Example splits:
             Train: split_start=0.0, split_end=0.95 (first 95%)
             Val:   split_start=0.95, split_end=1.0 (last 5%)
@@ -76,58 +75,60 @@ class LocalDataLoader(IterableDataset):
         self.split_end = split_end
         self.mix_episodes = mix_episodes
         self.ram_usage_limit = ram_usage_limit
-        self.random_frames = False # Deprecated: unified index design handles this natively
-        
+        self.random_frames = (
+            False  # Deprecated: unified index design handles this natively
+        )
+
         self.oracle = None
-        
+
         # Get episode keys, metadata, and apply split
-        with h5py.File(data_path, 'r') as f:
-            all_keys = sorted([k for k in f.keys() if k.startswith('episode_')])
+        with h5py.File(data_path, "r") as f:
+            all_keys = sorted([k for k in f.keys() if k.startswith("episode_")])
             total = len(all_keys)
-            
+
             start_idx = int(total * split_start)
             end_idx = int(total * split_end)
-            
+
             self.episode_keys = all_keys[start_idx:end_idx]
-            
+
             # Apply max_episodes limit (for overfit testing)
             if max_episodes > 0:
                 self.episode_keys = self.episode_keys[:max_episodes]
-            
+
             self.num_episodes = len(self.episode_keys)
-            
+
             # Load metadata from preprocessor
-            self.total_frames = f.attrs.get('total_frames', 0)
-            self.avg_episode_length = f.attrs.get('avg_episode_length', 100.0)
-            self.dataset_name = f.attrs.get('dataset', 'unknown')
-        
+            self.total_frames = f.attrs.get("total_frames", 0)
+            self.avg_episode_length = f.attrs.get("avg_episode_length", 100.0)
+            self.dataset_name = f.attrs.get("dataset", "unknown")
+
         self.buffer_size = window_size + loss_horizon
-    
+
     def estimate_total_windows(self) -> int:
         """Estimate total training windows for progress tracking."""
         windows_per_episode = max(1, self.avg_episode_length - self.buffer_size + 1)
         return int(self.num_episodes * windows_per_episode)
-    
+
     def __len__(self):
         return self.num_episodes
-    
+
     # Helper methods kept for backwards compatibility or other internal logic if ever called directly
     def _segment_subtasks(self, props: np.ndarray):
         grippers = props[:, 12]  # Gripper at index 12 in 13D pose
         is_closed = grippers > 0.5
         changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
         boundaries = np.concatenate([[0], changes, [len(props)]])
-        
+
         segments = []
         for i in range(len(boundaries) - 1):
             start = boundaries[i]
             end = boundaries[i + 1] - 1
             if end < start:
                 end = start
-            
+
             start_pose = props[start]
             end_pose = props[end]
-            
+
             # Determine task type (index 12 for gripper)
             if start_pose[12] < 0.5 and end_pose[12] > 0.5:
                 task_type = 1  # Pick (gripper closing)
@@ -135,93 +136,112 @@ class LocalDataLoader(IterableDataset):
                 task_type = 2  # Place (gripper opening)
             else:
                 task_type = 0  # Move (no change)
-            
-            segments.append({
-                'start': start,
-                'end': boundaries[i + 1],
-                'start_pose': start_pose,
-                'end_pose': end_pose,
-                'task_type': task_type,
-            })
+
+            segments.append(
+                {
+                    "start": start,
+                    "end": boundaries[i + 1],
+                    "start_pose": start_pose,
+                    "end_pose": end_pose,
+                    "task_type": task_type,
+                }
+            )
         return segments
-    
+
     def _get_segment_for_frame(self, segments, frame_idx):
         for seg in segments:
-            if seg['start'] <= frame_idx < seg['end']:
+            if seg["start"] <= frame_idx < seg["end"]:
                 return seg
         return segments[-1] if segments else None
-    
+
     def _compute_episode_twists(self, props: np.ndarray) -> np.ndarray:
-        R_flat = props[:, :9].reshape(-1, 3, 3) # (T, 3, 3)
-        p = props[:, 9:12] # (T, 3)
-        gripper = props[:, 12:13] # (T, 1)
-        
+        R_flat = props[:, :9].reshape(-1, 3, 3)  # (T, 3, 3)
+        p = props[:, 9:12]  # (T, 3)
+        gripper = props[:, 12:13]  # (T, 1)
+
         U, S, V = torch.svd(torch.tensor(R_flat, dtype=torch.float32))
         with torch.no_grad():
-             det = torch.det(U @ V.transpose(-2, -1))
-             diag = torch.ones_like(S)
-             diag[:, -1] = det
-             R_clean = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
-        
+            det = torch.det(U @ V.transpose(-2, -1))
+            diag = torch.ones_like(S)
+            diag[:, -1] = det
+            R_clean = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
+
         T_mats = torch.eye(4).unsqueeze(0).repeat(len(props), 1, 1)
         T_mats[:, :3, :3] = R_clean
-        T_mats[:, :3, 3] = torch.tensor(p, dtype=torch.float32)
-        
-        T_pp = pp.mat2SE3(T_mats, check=False)
+        T_mats[:, :3, 3] = torch.tensor(data=p, dtype=torch.float32)
+
+        T_pp = pp.from_matrix(T_mats, ltype=pp.SE3_type, check=False)
         T_curr = T_pp[:-1]
         T_next = T_pp[1:]
-        
-        T_rel = T_curr.Inv() @ T_next
-        xi = pp.Log(T_rel).tensor().numpy() # (T-1, 6)
-        
+
+        T_rel = pp.Inv(T_curr) @ T_next
+        xi = pp.Log(T_rel).tensor().numpy()  # (T-1, 6)
+
         g_curr = gripper[:-1]
         g_next = gripper[1:]
         g_delta = g_next - g_curr
-        
-        twists = np.concatenate([xi, g_delta], axis=1) # (T-1, 7)
-        return twists
+
+        return np.concatenate([xi, g_delta], axis=1)  # (T-1, 7)
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         episode_keys = self.episode_keys.copy()
-        
+
         if worker_info is not None:
-            per_worker = int(np.ceil(len(episode_keys) / float(worker_info.num_workers)))
+            per_worker = int(
+                np.ceil(len(episode_keys) / float(worker_info.num_workers))
+            )
             worker_id = worker_info.id
             start = worker_id * per_worker
-            end = start + per_worker if worker_id < worker_info.num_workers - 1 else len(episode_keys)
+            end = (
+                start + per_worker
+                if worker_id < worker_info.num_workers - 1
+                else len(episode_keys)
+            )
             episode_keys = episode_keys[start:end]
-            
-        ram_limit_gb = getattr(self, 'ram_usage_limit', 12.0)
-        
+
+        ram_limit_gb = getattr(self, "ram_usage_limit", 12.0)
+
         try:
-            with h5py.File(self.data_path, 'r', rdcc_nbytes=4 * 1024 * 1024, libver='latest', swmr=True) as f:
+            with h5py.File(
+                self.data_path,
+                "r",
+                rdcc_nbytes=4 * 1024 * 1024,
+                libver="latest",
+                swmr=True,
+            ) as f:
                 while True:
                     current_keys = episode_keys.copy()
                     if self.shuffle:
                         random.shuffle(current_keys)
-                    
+
                     episode_buffer = []
 
                     for key in current_keys:
                         # RAM Check
-                        ram_used_gb = psutil.virtual_memory().used / (1024 ** 3)
+                        ram_used_gb = psutil.virtual_memory().used / (1024**3)
                         if ram_used_gb > ram_limit_gb:
                             if len(episode_buffer) == 0:
-                                raise MemoryError(f"System RAM ({ram_used_gb:.1f}GB) exceeds priority limit ({ram_limit_gb}GB).")
+                                raise MemoryError(
+                                    f"System RAM ({ram_used_gb:.1f}GB) exceeds priority limit ({ram_limit_gb}GB)."
+                                    " Consider reducing `ram_usage_limit` or increasing system RAM."
+                                )
                             yield from self._yield_shuffled_buffer(episode_buffer)
                             episode_buffer = []
                             import time
+
                             time.sleep(0.5)
 
-                        ep = f[key]
-                        imgs = ep['images'][:]
-                        props = ep['proprio'][:]
-                        
-                        props[:, 9:12] *= 1000.0 # Scale to mm
-                        
+                        ep = cast(h5py.Group, f[key])
+                        imgs = cast(h5py.Dataset, ep["images"])[:]
+                        props = cast(h5py.Dataset, ep["proprio"])[:]
+
+                        props[:, 9:12] *= 1000.0  # Scale to mm
+
                         if len(props) > 1:
-                            pos_deltas = np.linalg.norm(np.diff(props[:, 9:12], axis=0), axis=1)
+                            pos_deltas = np.linalg.norm(
+                                np.diff(props[:, 9:12], axis=0), axis=1
+                            )
                             moving_mask = pos_deltas > 0.1
                             if moving_mask.any():
                                 first_moving = np.argmax(moving_mask)
@@ -231,84 +251,106 @@ class LocalDataLoader(IterableDataset):
 
                         if len(imgs) < self.buffer_size:
                             continue
-                            
+
                         # Extract language instruction
                         object_props = None
-                        if 'language_instruction' in ep:
+                        if "language_instruction" in ep:
                             try:
-                                instruction = str(ep['language_instruction'][()][0], 'utf-8')
+                                instruction = str(
+                                    cast(h5py.Dataset, ep["language_instruction"])[()][
+                                        0
+                                    ],
+                                    "utf-8",
+                                )
                             except Exception:
                                 instruction = ""
-                            from imitation.data.goal_oracle import extract_object_properties
+                            from imitation.data.goal_oracle import (
+                                extract_object_properties,
+                            )
+
                             object_props = extract_object_properties(instruction)
-                            
+
                         object_props_vec = np.zeros(9, dtype=np.float32)
                         if object_props:
-                            object_props_vec = np.concatenate([
-                                object_props['size'], object_props['color'], object_props['shape']
-                            ]).astype(np.float32)
+                            object_props_vec = np.concatenate(
+                                [
+                                    object_props["size"],
+                                    object_props["color"],
+                                    object_props["shape"],
+                                ]
+                            ).astype(np.float32)
 
                         twists = self._compute_episode_twists(props)
                         segments = self._segment_subtasks(props)
-                        
+
                         seq_len = len(imgs)
                         goals = np.zeros((seq_len, 38), dtype=np.float32)
                         subtask_ends = np.zeros((seq_len, 13), dtype=np.float32)
-                        
+
                         if self.oracle is None:
                             self.oracle = GoalOracle(output_dim=38)
-                        
+
                         for i in range(seq_len):
                             seg = self._get_segment_for_frame(segments, i)
                             if seg:
-                                goals[i] = self.oracle.encode_goal(seg['task_type'], seg['start_pose'], seg['end_pose'], object_props)
-                                subtask_ends[i] = seg['end_pose']
+                                goals[i] = self.oracle.encode_goal(
+                                    seg["task_type"],
+                                    seg["start_pose"],
+                                    seg["end_pose"],
+                                    object_props,
+                                ).numpy()
+                                subtask_ends[i] = seg["end_pose"]
                             else:
-                                goals[i] = self.oracle.encode_goal(0, props[i], props[i], object_props)
+                                goals[i] = self.oracle.encode_goal(
+                                    0, props[i], props[i], object_props
+                                ).numpy()
                                 subtask_ends[i] = props[i]
 
-                        episode_buffer.append({
-                            'images': imgs,
-                            'proprio': props,
-                            'twists': twists,
-                            'goals': goals,
-                            'subtask_ends': subtask_ends,
-                            'object_props': object_props_vec
-                        })
-                        
+                        episode_buffer.append(
+                            {
+                                "images": imgs,
+                                "proprio": props,
+                                "twists": twists,
+                                "goals": goals,
+                                "subtask_ends": subtask_ends,
+                                "object_props": object_props_vec,
+                            }
+                        )
+
                         if len(episode_buffer) >= self.mix_episodes:
                             yield from self._yield_shuffled_buffer(episode_buffer)
                             episode_buffer = []
 
                     if len(episode_buffer) > 0:
                         yield from self._yield_shuffled_buffer(episode_buffer)
-                        
+
                     if not self.repeat:
                         break
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             raise e
-            
+
     def _yield_shuffled_buffer(self, episode_buffer):
         """Build valid pointers directly to arrays and yield them uniformly shuffled."""
         valid_indices = []
-        
+
         # 1. Map pointers
         for ep_id, ep_data in enumerate(episode_buffer):
-            seq_len = len(ep_data['images'])
+            seq_len = len(ep_data["images"])
             max_start = seq_len - self.window_size - self.loss_horizon + 1
-            
-            if max_start <= 0: # Episode too short to form any window
+
+            if max_start <= 0:  # Episode too short to form any window
                 continue
 
             for start_idx in range(max_start):
                 valid_indices.append((ep_id, start_idx))
-                
+
         # 2. Global uniform shuffle
         if self.shuffle:
             random.shuffle(valid_indices)
-            
+
         # 3. Dynamic Batch Slicing
         # The DataLoader expects to receive single items from __iter__ and then batches them.
         # However, RTXStreamLoader and LocalDataLoader historically yielded "batches" of size `window_size`
@@ -324,16 +366,16 @@ class LocalDataLoader(IterableDataset):
 
         for ep_id, start_idx in valid_indices:
             ep = episode_buffer[ep_id]
-            
+
             w_start = start_idx
             w_end = start_idx + self.window_size
-            
+
             # Target twists and poses are for the future, starting from the last frame of the window
             # twist index i corresponds to transition from frame i to i+1
             # We need twists starting from (w_end - 1) up to loss_horizon
             twist_start = w_end - 1
             twist_end = twist_start + self.loss_horizon
-            
+
             # Target poses are the poses REACHED by the twists
             # If twist[t] goes t -> t+1, the target pose is t+1
             # So targets are props from (w_end - 1) + 1 to (w_end - 1) + 1 + loss_horizon
@@ -342,11 +384,24 @@ class LocalDataLoader(IterableDataset):
 
             # Slicing creates Views, not full copies, massively reducing overhead
             yield {
-                'images': torch.tensor(ep['images'][w_start : w_end], dtype=torch.float32) / 255.0, # (W, C, H, W)
-                'proprio': torch.tensor(ep['proprio'][w_start : w_end], dtype=torch.float32),       # (W, 13)
-                'goal': torch.tensor(ep['goals'][w_start : w_end], dtype=torch.float32),            # (W, 38)
-                'actions': torch.tensor(ep['twists'][twist_start : twist_end], dtype=torch.float32), # (H, 7)
-                'target_poses': torch.tensor(ep['proprio'][pose_start : pose_end], dtype=torch.float32), # (H, 13)
-                'subtask_end_pose': torch.tensor(ep['subtask_ends'][w_start : w_end], dtype=torch.float32), # (W, 13)
-                'object_props': torch.tensor(ep['object_props'], dtype=torch.float32),              # (9,)
+                "images": torch.tensor(ep["images"][w_start:w_end], dtype=torch.float32)
+                / 255.0,  # (W, C, H, W)
+                "proprio": torch.tensor(
+                    ep["proprio"][w_start:w_end], dtype=torch.float32
+                ),  # (W, 13)
+                "goal": torch.tensor(
+                    ep["goals"][w_start:w_end], dtype=torch.float32
+                ),  # (W, 38)
+                "actions": torch.tensor(
+                    ep["twists"][twist_start:twist_end], dtype=torch.float32
+                ),  # (H, 7)
+                "target_poses": torch.tensor(
+                    ep["proprio"][pose_start:pose_end], dtype=torch.float32
+                ),  # (H, 13)
+                "subtask_end_pose": torch.tensor(
+                    ep["subtask_ends"][w_start:w_end], dtype=torch.float32
+                ),  # (W, 13)
+                "object_props": torch.tensor(
+                    ep["object_props"], dtype=torch.float32
+                ),  # (9,)
             }

@@ -1,94 +1,129 @@
+import logging
 import os
 import csv
 import matplotlib.pyplot as plt
 import pandas as pd
 
+
 class TrainingLogger:
     def __init__(self, log_dir, resume=True):
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
-        self.log_path = os.path.join(log_dir, 'training_log.csv')
-        self.plot_path = os.path.join(log_dir, 'training_plot.png')
-        
+        self.log_path = os.path.join(log_dir, "training_log.csv")
+        self.plot_path = os.path.join(log_dir, "training_plot.png")
+
         # Reset if not resuming (and file exists)
         if not resume:
             if os.path.exists(self.log_path):
                 try:
                     os.remove(self.log_path)
-                    print(f"[Logger] Removed old log file: {self.log_path}")
+                    logging.info(f"[Logger] Removed old log file: {self.log_path}")
                 except Exception as e:
-                    print(f"[Logger] Failed to remove old log: {e}")
-            
+                    logging.error(f"[Logger] Failed to remove old log: {e}")
+
             if os.path.exists(self.plot_path):
                 try:
                     os.remove(self.plot_path)
-                    print(f"[Logger] Removed old plot file: {self.plot_path}")
+                    logging.info(f"[Logger] Removed old plot file: {self.plot_path}")
                 except Exception as e:
-                    print(f"[Logger] Failed to remove old plot: {e}")
-        
+                    logging.error(f"[Logger] Failed to remove old plot: {e}")
+
         # Initialize CSV with fallback for permission errors
         try:
             if not os.path.exists(self.log_path):
-                with open(self.log_path, 'w', newline='') as f:
+                with open(self.log_path, "w", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss', 'val_loss'])
-            
+                    writer.writerow(
+                        [
+                            "step",
+                            "epoch",
+                            "loss",
+                            "action_loss",
+                            "requery_loss",
+                            "val_loss",
+                        ]
+                    )
+
             # Verify writable
-            with open(self.log_path, 'a', newline='') as f:
+            with open(self.log_path, "a", newline="") as f:
                 pass
         except PermissionError:
             import datetime
+
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.log_path = os.path.join(log_dir, f'training_log_{ts}.csv')
-            print(f"[Logger] Permission denied on main log. Falling back to: {self.log_path}")
+            self.log_path = os.path.join(log_dir, f"training_log_{ts}.csv")
+            logging.info(
+                f"[Logger] Permission denied on main log. Falling back to: {self.log_path}"
+            )
             # Create fallback
-            with open(self.log_path, 'w', newline='') as f:
+            with open(self.log_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(['step', 'epoch', 'loss', 'action_loss', 'requery_loss', 'val_loss'])
+                writer.writerow(
+                    ["step", "epoch", "loss", "action_loss", "requery_loss", "val_loss"]
+                )
 
     def log_step(self, step, epoch, loss, action_loss, requery_loss, val_loss=None):
-        with open(self.log_path, 'a', newline='') as f:
+        with open(self.log_path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([step, epoch, loss, action_loss, requery_loss, val_loss])
 
     def plot_progress(self):
         try:
-            try:
-                df = pd.read_csv(self.log_path, on_bad_lines='skip')
-            except TypeError:
-                # Fallback for older pandas versions
-                df = pd.read_csv(self.log_path, error_bad_lines=False)
-            if len(df) < 2: return
-            
+            df = pd.read_csv(self.log_path, on_bad_lines="skip")
+
+            if len(df) < 2:
+                return
+
             plt.figure(figsize=(12, 6))
-            
+
             # Plot Total Loss with Validation
             plt.subplot(1, 2, 1)
-            plt.plot(df['step'], df['loss'], label='Train Loss', color='blue', alpha=0.7)
-            if 'val_loss' in df.columns:
+            plt.plot(
+                df["step"], df["loss"], label="Train Loss", color="blue", alpha=0.7
+            )
+            if "val_loss" in df.columns:
                 # Plot validation points only where they exist (not NaNs)
-                val_data = df[df['val_loss'].notna()]
+                val_data = df[df["val_loss"].notna()]
                 if len(val_data) > 0:
-                    plt.plot(val_data['step'], val_data['val_loss'], label='Val Loss', color='orange', marker='o', linestyle='--')
-            
-            plt.xlabel('Step')
-            plt.ylabel('Loss')
-            plt.title('Training Loss')
+                    plt.plot(
+                        val_data["step"],
+                        val_data["val_loss"],
+                        label="Val Loss",
+                        color="orange",
+                        marker="o",
+                        linestyle="--",
+                    )
+
+            plt.xlabel("Step")
+            plt.ylabel("Loss")
+            plt.title("Training Loss")
             plt.grid(True, alpha=0.3)
             plt.legend()
-            
+
             # Plot Components
             plt.subplot(1, 2, 2)
-            plt.plot(df['step'], df['action_loss'], label='Action Loss', color='green', alpha=0.7)
-            plt.plot(df['step'], df['requery_loss'], label='Requery Loss', color='red', alpha=0.7)
-            plt.xlabel('Step')
-            plt.title('Loss Components')
+            plt.plot(
+                df["step"],
+                df["action_loss"],
+                label="Action Loss",
+                color="green",
+                alpha=0.7,
+            )
+            plt.plot(
+                df["step"],
+                df["requery_loss"],
+                label="Requery Loss",
+                color="red",
+                alpha=0.7,
+            )
+            plt.xlabel("Step")
+            plt.title("Loss Components")
             plt.grid(True, alpha=0.3)
             plt.legend()
-            
+
             plt.tight_layout()
             plt.savefig(self.plot_path)
             plt.close()
-            
+
         except Exception as e:
-            print(f"Error plotting progress: {e}")
+            logging.error(f"Error plotting progress: {e}")
