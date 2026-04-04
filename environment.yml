@@ -10,9 +10,9 @@ dependencies:
   - numpy<2.0
   - pip
   # Pin PyTorch to match requirements.txt
-  - pytorch=2.5.1
-  - torchvision=0.20.1
-  - torchaudio=2.5.1
+  - pytorch=2.2.1
+  - torchvision=0.17.1
+  - torchaudio=2.2.1
   - pytorch-cuda=12.1
   - tqdm
   - pip:
@@ -39,5 +39,4 @@ dependencies:
       - tensorboard
       - torchsummary
       - torchinfo
-      - huggingface
       - huggingface-hub
