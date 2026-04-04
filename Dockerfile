@@ -19,6 +19,10 @@ COPY environment.yml .
 # We use the name 'axis_env' as defined in the yaml file
 RUN conda env create -f environment.yml
 
+RUN conda run -n axis_env pip install --force-reinstall \
+    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
 # Make RUN commands use the new environment
 SHELL ["conda", "run", "-n", "axis_env", "/bin/bash", "-c"]
 
