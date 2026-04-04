@@ -300,7 +300,7 @@ def train(args):
                 dataset_name=args.dataset,
                 split=split,
                 image_key=args.image_key,
-                image_size=(128, 128),
+                image_size=(224, 224),
                 window_size=config.get("window_size", 10),
                 loss_horizon=args.loss_horizon,
                 shuffle_buffer_size=shuffle_buffer,
@@ -569,7 +569,7 @@ def train(args):
                     # Unpack Batch (requery is NOT in data - computed from action loss)
                     # Cast batch to dict to satisfy type checker
                     batch = dict(batch)
-                    images = batch["images"].to(device)  # (B, W, 3, 128, 128)
+                    images = batch["images"].to(device)  # (B, W, 3, ImgH, ImgW)
                     proprio = batch["proprio"].to(device)  # (B, W, 7)
                     goal_embs = batch["goal"].to(device)  # (B, 64)
                     target_poses = batch["target_poses"].to(
@@ -582,9 +582,10 @@ def train(args):
                     # === Data Augmentation ===
                     if model.training:
                         # Reshape to (B*T, C, H, W) for efficient augmentation
-                        fl_imgs = images.view(-1, 3, 128, 128)
+                        _, _, C, ImgH, ImgW = images.shape
+                        fl_imgs = images.view(-1, 3, ImgH, ImgW)
                         aug_imgs = augmentations(fl_imgs)
-                        images = aug_imgs.view(B, W, 3, 128, 128)
+                        images = aug_imgs.view(B, W, 3, ImgH, ImgW)
 
                     optimizer.zero_grad()
 
@@ -814,7 +815,7 @@ def train(args):
                             "optimizer_state_dict": optimizer.state_dict(),
                             "scheduler_state_dict": scheduler.state_dict(),  # Save Scheduler
                             "scaler_state_dict": scaler.state_dict(),  # Save Scaler
-                            "loss": loss.item(),
+                            "loss": loss.item() if 'loss' in locals() else float('inf'),
                         }
 
                         try:
@@ -1004,7 +1005,7 @@ def train(args):
                         "optimizer_state_dict": optimizer.state_dict(),
                         "scheduler_state_dict": scheduler.state_dict(),
                         "scaler_state_dict": scaler.state_dict(),
-                        "loss": loss.item(),
+                        "loss": loss.item() if 'loss' in locals() else float('inf'),
                     },
                     save_checkpoint_path,
                 )
@@ -1047,7 +1048,7 @@ def train(args):
                     last_tokens = tokens[:, -1, :]  # (B, 512)
 
                     meta = [str(g.cpu().numpy()[:5]) for g in v_goals]
-                    label_img = v_imgs[:, -1, ...]  # (B, 3, 128, 128)
+                    label_img = v_imgs[:, -1, ...]  # (B, 3, 224, 224)
 
                     training_logger.log_embeddings(
                         last_tokens, metadata=meta, label_img=label_img, step=step
@@ -1072,7 +1073,7 @@ def train(args):
                     "ema_state_dict": ema.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scaler_state_dict": scaler.state_dict(),
-                    "loss": loss.item(),
+                    "loss": loss.item() if 'loss' in locals() else float('inf'),
                 },
                 run_path,
             )
