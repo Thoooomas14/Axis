@@ -3,6 +3,8 @@ import os
 import csv
 import matplotlib.pyplot as plt
 import pandas as pd
+from torch.utils.tensorboard.writer import SummaryWriter
+import torch
 
 
 class TrainingLogger:
@@ -61,6 +63,48 @@ class TrainingLogger:
                 writer.writerow(
                     ["step", "epoch", "loss", "action_loss", "requery_loss", "val_loss"]
                 )
+
+        # TensorBoard integration
+        writer_dir = os.path.join("runs", os.path.basename(log_dir))
+        self.tb_writer = SummaryWriter(writer_dir)
+
+    def log_scalars(self, tag_scalar_dict, step):
+        for tag, scalar_value in tag_scalar_dict.items():
+            self.tb_writer.add_scalar(tag, scalar_value, step)
+
+    def log_histograms(self, model, step):
+        for name, param in model.named_parameters():
+            self.tb_writer.add_histogram(f"Weights/{name}", param.data, step)
+            if param.grad is not None:
+                self.tb_writer.add_histogram(f"Gradients/{name}", param.grad, step)
+
+    def log_images(self, tag, img_tensor, step):
+        # Expects img_tensor to be a grid or valid tensor for add_image
+        self.tb_writer.add_image(tag, img_tensor, step)
+
+    def log_graph(self, model, input_to_model):
+        self.tb_writer.add_graph(model, input_to_model)
+
+    def log_embeddings(self, mat, metadata, label_img, step):
+        # We will use this at the end or occasionally
+        self.tb_writer.add_embedding(
+            mat, metadata=metadata, label_img=label_img, global_step=step
+        )
+
+    def log_hparams(self, hparam_dict, metric_dict=None):
+        if metric_dict is None:
+            metric_dict = {}
+        # Preprocess hparam_dict so types are compatible with add_hparams (e.g. no lists or dicts)
+        clean_hparam_dict = {}
+        for k, v in hparam_dict.items():
+            if isinstance(v, (int, float, str, bool, torch.Tensor)):
+                clean_hparam_dict[k] = v
+            else:
+                clean_hparam_dict[k] = str(v)
+        self.tb_writer.add_hparams(clean_hparam_dict, metric_dict)
+
+    def close(self):
+        self.tb_writer.close()
 
     def log_step(self, step, epoch, loss, action_loss, requery_loss, val_loss=None):
         with open(self.log_path, "a", newline="") as f:

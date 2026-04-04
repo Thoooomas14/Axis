@@ -1,3 +1,4 @@
+# ruff: noqa S101
 import os
 import ast
 import re

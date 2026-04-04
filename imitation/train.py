@@ -7,7 +7,6 @@ import logging
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-from torch.utils.tensorboard.writer import SummaryWriter
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +14,10 @@ import argparse
 from tqdm import tqdm
 from datetime import datetime
 import pypose as pp
+import tensorflow as tf
+from collections import deque
+import time
+import torchvision.transforms as T
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -25,17 +28,10 @@ from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
-import tensorflow as tf
-from collections import deque
-import time
+
 
 # Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
 tf.config.set_visible_devices([], "GPU")
-
-import torchvision.transforms as T
-
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-writer = SummaryWriter(f"runs/axis_experiment_{timestamp}")
 
 
 # --- Logging Setup ---
@@ -139,8 +135,7 @@ def train(args):
             diag[:, -1] = det
 
             # Reconstruct: R = U @ diag @ V.T
-            R_new = U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
-        return R_new
+        return U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
 
     def endpoint_chordal_loss(
         pred_twists,
@@ -243,6 +238,7 @@ def train(args):
 
     # --- Utilities ---
     training_logger = TrainingLogger(args.checkpoint_dir, resume=args.resume)
+    training_logger.log_hparams(vars(args))
     visualizer = Visualizer(args.checkpoint_dir)
 
     # --- Model ---
@@ -262,9 +258,6 @@ def train(args):
             param.requires_grad = False
 
     # Dataset
-    # If epochs > 0, we do NOT repeat the dataset (finite epoch).
-    # If steps > 0 (and epochs=0), we repeat the dataset (infinite stream).
-    repeat_dataset = args.epochs == 0
 
     # === Dynamic Memory Parameters (can be reduced on OOM) ===
     effective_batch_size = args.batch_size
@@ -284,7 +277,9 @@ def train(args):
         # Use local loader if local_data_path is provided
         if args.local_data_path:
             log.info(
-                f"Creating LOCAL dataloader: batch_size={batch_size}, split=[{split_start:.0%}-{split_end:.0%}], max_episodes={args.max_episodes}"
+                f"Creating LOCAL dataloader: batch_size={batch_size}, "
+                f"split=[{split_start:.0%}-{split_end:.0%}], "
+                f"max_episodes={args.max_episodes}"
             )
             stream = LocalDataLoader(
                 data_path=args.local_data_path,
@@ -306,7 +301,8 @@ def train(args):
             effective_workers = num_workers
         else:
             log.info(
-                f"Creating dataloader ({split}): batch_size={batch_size}, use_subprocess={args.use_subprocess}, max_episodes={args.max_episodes}"
+                f"Creating dataloader ({split}): batch_size={batch_size}, "
+                f"use_subprocess={args.use_subprocess}, max_episodes={args.max_episodes}"
             )
 
             # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
@@ -485,10 +481,8 @@ def train(args):
 
     # Determine total steps/epochs
     if args.epochs > 0:
-        total_steps = args.steps  # Fallback
         log.info(f"Training for {args.epochs} epochs.")
     else:
-        total_steps = args.steps
         log.info(f"Training for {args.steps} steps.")
 
     # Calculate target step (relative to start)
@@ -589,9 +583,6 @@ def train(args):
                     images = batch["images"].to(device)  # (B, W, 3, 128, 128)
                     proprio = batch["proprio"].to(device)  # (B, W, 7)
                     goal_embs = batch["goal"].to(device)  # (B, 64)
-                    target_actions = batch["actions"].to(
-                        device
-                    )  # (B, H, 7) - future twists (H=loss_horizon)
                     target_poses = batch["target_poses"].to(
                         device
                     )  # (B, H, 7) - direct future poses
@@ -609,9 +600,20 @@ def train(args):
                     optimizer.zero_grad()
 
                     # === Forward Pass with AMP ===
-                    with torch.cuda.amp.autocast():
-                        # Forward Pass - model outputs chunked predictions
-                        pred_action, requery_pred = model(images, proprio, goal_embs)
+                    with torch.autocast(device_type=device.type):
+                        # FORWARD PASS WITH OPTIONAL ATTENTION WEIGHTS
+                        should_log_tb = step % args.tb_histogram_interval == 0
+
+                        if should_log_tb:
+                            # Forward Pass - model outputs chunked predictions and attention weights
+                            pred_action, requery_pred, attn_weights = model(
+                                images, proprio, goal_embs, return_attn_weights=True
+                            )
+                        else:
+                            pred_action, requery_pred = model(
+                                images, proprio, goal_embs
+                            )
+                            attn_weights = None
 
                         # pred_action: (B, W, 7) - chunked twist predictions
                         # requery_pred: (B, 1) - model confidence [0, 1]
@@ -679,6 +681,52 @@ def train(args):
                         requery_loss.item(),
                     )
 
+                    # TensorBoard Logging
+                    if step == start_step:
+                        try:
+                            # Log computation graph once
+                            training_logger.log_graph(
+                                model, (images, proprio, goal_embs)
+                            )
+                        except Exception as e:
+                            log.warning(f"Could not log graph: {e}")
+
+                    if step % args.tb_scalar_interval == 0:
+                        training_logger.log_scalars(
+                            {
+                                "Loss/train": loss.item(),
+                                "Loss/action": action_loss.item(),
+                                "Loss/requery": requery_loss.item(),
+                                "Hyperparameters/learning_rate": scheduler.get_last_lr()[
+                                    0
+                                ],
+                            },
+                            step,
+                        )
+
+                    if should_log_tb:
+                        training_logger.log_histograms(model, step)
+                        import torchvision.utils as vutils
+
+                        # Images (Batch 0, middle of window)
+                        mid_idx = W // 2
+                        grid = vutils.make_grid(
+                            images[0, mid_idx].unsqueeze(0), normalize=True
+                        )
+                        training_logger.log_images("Images/Input_Data", grid, step)
+
+                        # Attention Maps (if available)
+                        if attn_weights is not None and len(attn_weights) > 0:
+                            last_layer_attn = attn_weights[-1][0].mean(
+                                dim=0, keepdim=True
+                            )
+                            attn_map_grid = vutils.make_grid(
+                                last_layer_attn.unsqueeze(0), normalize=True
+                            )
+                            training_logger.log_images(
+                                "Images/Attention_Map", attn_map_grid, step
+                            )
+
                     step += 1
                     steps_in_current_epoch += 1
 
@@ -686,9 +734,9 @@ def train(args):
                     monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
                     rate, eta = monitor.get_stats()
 
-                    pbar.set_description(
-                        f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | {rate:.2f}it/s | ETA: {eta}"
-                    )
+                    desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | "
+                    desc +=f"{rate:.2f}it/s | ETA: {eta}"
+                    pbar.set_description(desc)
                     pbar.update(1)  # Increment progress bar counter
 
                     # === Persistent Memory Fix ===
@@ -753,13 +801,11 @@ def train(args):
                         avg_val_loss = val_loss_total / max(1, val_batches)
                         log.info(f"Validation Loss: {avg_val_loss:.4f}")
 
-                        # Log validation step (re-use previous action/requery loss for continuity in CSV, or None)
-                        # We pass None for training components to indicate this is a val update
+                        # Log validation step
                         training_logger.log_step(
                             step, epoch, None, None, None, val_loss=avg_val_loss
                         )
-                        # Assuming Logger has a generic log_scalar or we just print for now.
-                        # logger.writer.add_scalar("Loss/val", avg_val_loss, step)
+                        training_logger.log_scalars({"Loss/val": avg_val_loss}, step)
                         model.train()
 
                         # Cleanup validation variables
@@ -836,16 +882,16 @@ def train(args):
                                 f"[CUDA OOM] Reducing batch size to {effective_batch_size}"
                             )
                             break  # Exit batch loop to rebuild dataloader
-                        else:
-                            log.error(
-                                f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
-                            )
-                            log.error(
-                                "[CUDA OOM] Saving checkpoint and exiting gracefully..."
-                            )
-                            raise SystemExit(
-                                "CUDA OOM: Cannot reduce batch size further"
-                            )
+
+                        log.error(
+                            f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
+                        )
+                        log.error(
+                            "[CUDA OOM] Saving checkpoint and exiting gracefully..."
+                        )
+                        raise SystemExit(
+                            "CUDA OOM: Cannot reduce batch size further"
+                        ) from None
 
                     continue
 
@@ -873,17 +919,15 @@ def train(args):
                                     f"[CUDA OOM] Reducing batch size to {effective_batch_size}"
                                 )
                                 break
-                            else:
-                                log.error(
-                                    f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
-                                )
-                                raise SystemExit(
-                                    "CUDA OOM: Cannot reduce batch size further"
-                                )
+                            log.error(
+                                f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
+                            )
+                            raise SystemExit(
+                                "CUDA OOM: Cannot reduce batch size further"
+                            ) from e
 
                         continue
-                    else:
-                        raise
+                    raise
 
                 except MemoryError:
                     # System RAM OOM: Reduce shuffle_buffer first, then num_workers
@@ -911,7 +955,7 @@ def train(args):
                             )
                             break
                         # Then try reducing workers
-                        elif effective_num_workers > MIN_NUM_WORKERS:
+                        if effective_num_workers > MIN_NUM_WORKERS:
                             effective_num_workers = max(
                                 MIN_NUM_WORKERS, effective_num_workers - 1
                             )
@@ -921,16 +965,16 @@ def train(args):
                                 f"[RAM OOM] Reducing num_workers to {effective_num_workers}"
                             )
                             break
-                        else:
-                            log.error(
-                                "[RAM OOM] All parameters at minimum. Cannot reduce further."
-                            )
-                            log.error(
-                                "[RAM OOM] Saving checkpoint and exiting gracefully..."
-                            )
-                            raise SystemExit(
-                                "RAM OOM: Cannot reduce memory parameters further"
-                            )
+
+                        log.error(
+                            "[RAM OOM] All parameters at minimum. Cannot reduce further."
+                        )
+                        log.error(
+                            "[RAM OOM] Saving checkpoint and exiting gracefully..."
+                        )
+                        raise SystemExit(
+                            "RAM OOM: Cannot reduce memory parameters further"
+                        ) from None
 
                     continue
 
@@ -1000,6 +1044,29 @@ def train(args):
 
         traceback.print_exc()
     finally:
+        # Log Projector Embeddings
+        try:
+            log.info("Computing embeddings projector data...")
+            model.eval()
+            with torch.no_grad():
+                for val_batch in val_dataloader:
+                    v_imgs = val_batch["images"].to(device)
+                    v_props = val_batch["proprio"].to(device)
+                    v_goals = val_batch["goal"].to(device)
+
+                    _, _, tokens = model(v_imgs, v_props, v_goals, return_tokens=True)
+                    last_tokens = tokens[:, -1, :]  # (B, 512)
+
+                    meta = [str(g.cpu().numpy()[:5]) for g in v_goals]
+                    label_img = v_imgs[:, -1, ...]  # (B, 3, 128, 128)
+
+                    training_logger.log_embeddings(
+                        last_tokens, metadata=meta, label_img=label_img, step=step
+                    )
+                    break
+        except Exception as e:
+            log.warning(f"Embedding projector failed: {e}")
+
         # Archival: Always save a fresh checkpoint to avoid losing data if 'latest' is locked
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1197,6 +1264,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--verbose", type=int, default=1, help="Verbosity: 0=WARNING, 1=INFO, 2=DEBUG"
     )
+    parser.add_argument(
+        "--tb_scalar_interval",
+        type=int,
+        default=50,
+        help="Steps between logging scalars",
+    )
+    parser.add_argument(
+        "--tb_histogram_interval",
+        type=int,
+        default=500,
+        help="Steps between logging histograms/images",
+    )
 
     args = parser.parse_args()
 
@@ -1223,7 +1302,8 @@ if __name__ == "__main__":
             import warnings
 
             warnings.warn(
-                f"Using --local_data_path, the following streaming args are IGNORED: {', '.join(ignored_args)}"
+                f"Using --local_data_path, the following streaming args are IGNORED: {', '.join(ignored_args)}",
+                stacklevel=2
             )
 
     # Validate loss_horizon

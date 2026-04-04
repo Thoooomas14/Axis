@@ -38,7 +38,8 @@ class AxisModel(nn.Module):
                 }
             else:
                 raise ValueError(
-                    f"Unknown config string: {config}. Please provide a valid config name or a custom dictionary of parameters."
+                    f"Unknown config string: {config}. "
+                    "Please provide a valid config name or a custom dictionary of parameters."
                 )
         elif isinstance(config, dict):
             self.config = config
@@ -97,7 +98,13 @@ class AxisModel(nn.Module):
         return self.config
 
     def forward(
-        self, images, proprio, raw_goal, cached_tokens=None, return_tokens=False
+        self,
+        images,
+        proprio,
+        raw_goal,
+        cached_tokens=None,
+        return_tokens=False,
+        return_attn_weights=False,
     ):
         """
         Forward pass for Axis V2.
@@ -113,6 +120,7 @@ class AxisModel(nn.Module):
             pred_action: (B, 10) or (B, chunk_size, 10) - predicted action(s)
             requery_logit: (B, 1) - subtask completion logit
             tokens: (B, W, 512) - (Optional) full token sequence if return_tokens=True
+            attn_weights: (Optional) list of attention matrices if return_attn_weights=True
         """
         B, W, C, H, _ = images.shape
 
@@ -188,7 +196,12 @@ class AxisModel(nn.Module):
             )  # (B, W, 512)
 
         # 5. Transformer backbone
-        output_tokens = self.transformer(input_tokens)  # (B, W, 512)
+        if return_attn_weights:
+            output_tokens, attn_weights = self.transformer(
+                input_tokens, return_attn_weights=True
+            )
+        else:
+            output_tokens = self.transformer(input_tokens)  # (B, W, 512)
 
         # 6. Decode from LAST token ONLY (Current State -> Future Trajectory)
         last_token = output_tokens[:, -1, :]  # (B, 512)
@@ -196,7 +209,10 @@ class AxisModel(nn.Module):
         pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
         requery_logit = self.requery_decoder(last_token)  # (B, 1)
 
+        if return_tokens and return_attn_weights:
+            return pred_action, requery_logit, input_tokens, attn_weights
         if return_tokens:
             return pred_action, requery_logit, input_tokens
-        else:
-            return pred_action, requery_logit
+        if return_attn_weights:
+            return pred_action, requery_logit, attn_weights
+        return pred_action, requery_logit

@@ -1,3 +1,4 @@
+# ruff: noqa S101
 import os
 import pytest
 from imitation.data.local_loader import LocalDataLoader

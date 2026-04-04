@@ -6,6 +6,8 @@ rotation conversion, action smoothing (via Temporal Ensembling),
 and state management for deployment.
 """
 
+import logging
+
 import torch
 import numpy as np
 from collections import deque
@@ -119,7 +121,7 @@ class AxisInference:
         self.model.eval()
 
         if self.random_weights:
-            print("WARNING: Using Random Weights for AxisInference.")
+            logging.warning("WARNING: Using Random Weights for AxisInference.")
         else:
             self._load_checkpoint(checkpoint_path)
 
@@ -140,7 +142,7 @@ class AxisInference:
     def _load_checkpoint(self, path):
         if not path:
             return
-        print(f"Loading checkpoint {path}...")
+        logging.info(f"Loading checkpoint {path}...")
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
 

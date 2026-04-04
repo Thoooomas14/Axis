@@ -768,7 +768,12 @@ class RTXStreamLoader(IterableDataset):
         if hasattr(img, "numpy"):
             img = img.numpy()
 
-        img = cv2.resize(img, self.image_size, interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+        img = (
+            cv2.resize(img, self.image_size, interpolation=cv2.INTER_LINEAR).astype(
+                np.float32
+            )
+            / 255.0
+        )
         return np.transpose(img, (2, 0, 1))
 
     def _segment_subtasks(self, props: np.ndarray, object_props: dict | None = None):
@@ -841,7 +846,9 @@ class RTXStreamLoader(IterableDataset):
 
         if self.ds is None:
             if self.builder is None:
-                raise RuntimeError("Builder must be initialized before creating dataset")
+                raise RuntimeError(
+                    "Builder must be initialized before creating dataset"
+                )
 
             self.ds = self.builder.as_dataset(
                 split=self.split,

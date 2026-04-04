@@ -1,3 +1,4 @@
+# ruff: noqa S101
 import pytest
 import torch
 from src.models.axis import AxisModel

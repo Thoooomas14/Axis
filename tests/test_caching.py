@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import sys
 import os
@@ -9,13 +11,13 @@ from src.models.axis import AxisModel
 
 
 def test_token_caching():
-    print("Testing Token Caching Optimization...")
+    logging.info("Testing Token Caching Optimization...")
 
     # 1. Setup Model
     config = "AxisV2"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    logging.info(f"Using device: {device}")
 
     model = AxisModel(config).to(device)
     model.eval()
@@ -40,7 +42,7 @@ def test_token_caching():
     win2_imgs = images_seq[:, 1 : 1 + W]
     win2_props = proprio_seq[:, 1 : 1 + W]
 
-    print("\nRunning Standard Pass (Target)...")
+    logging.info("\nRunning Standard Pass (Target)...")
     with torch.no_grad():
         out_act_std, out_req_std = model(win2_imgs, win2_props, goal)
 
@@ -49,7 +51,7 @@ def test_token_caching():
     win1_imgs = images_seq[:, 0:W]
     win1_props = proprio_seq[:, 0:W]
 
-    print("Running Window 1 (Prime Cache)...")
+    logging.info("Running Window 1 (Prime Cache)...")
     with torch.no_grad():
         _, _, tokens_w1 = model(win1_imgs, win1_props, goal, return_tokens=True)
 
@@ -58,11 +60,11 @@ def test_token_caching():
     # tokens_w1 shape: (B, W, 512) -> we want indices 1..W-1 (which correspond to time steps 1..3)
     cached_tokens = tokens_w1[:, 1:, :]
 
-    print(f"Cached tokens shape: {cached_tokens.shape} (Expected: {B}, {W - 1}, {512})")
+    logging.info(f"Cached tokens shape: {cached_tokens.shape} (Expected: {B}, {W - 1}, {512})")
 
     # Run Window 2 with cache
     # We pass the full window images/proprio, but the model should only use the last frame
-    print("Running Cached Pass...")
+    logging.info("Running Cached Pass...")
     with torch.no_grad():
         out_act_cached, out_req_cached, _ = model(
             win2_imgs, win2_props, goal, cached_tokens=cached_tokens, return_tokens=True
@@ -72,14 +74,14 @@ def test_token_caching():
     diff_act = torch.abs(out_act_std - out_act_cached).max().item()
     diff_req = torch.abs(out_req_std - out_req_cached).max().item()
 
-    print(f"\nMax Action Difference: {diff_act}")
-    print(f"Max Requery Difference: {diff_req}")
+    logging.info(f"\nMax Action Difference: {diff_act}")
+    logging.info(f"Max Requery Difference: {diff_req}")
 
     TOLERANCE = 1e-4
     if diff_act < TOLERANCE and diff_req < TOLERANCE:
-        print("\n✅ SUCCESS: Cached output matches standard output.")
+        logging.info("\n✅ SUCCESS: Cached output matches standard output.")
     else:
-        print("\n❌ FAILURE: Mismatch detected!")
+        logging.error("\n❌ FAILURE: Mismatch detected!")
         sys.exit(1)
 
 

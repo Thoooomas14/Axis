@@ -185,6 +185,38 @@ python imitation/train.py \
 | `--viz` | Enable visualization | False |
 | `--viz_interval` | Steps between visualizations | 1000 |
 | `--verbose` | Logging verbosity: 0=WARN, 1=INFO, 2=DEBUG | 1 |
+| `--tb_scalar_interval`| Steps between logging scalars | 50 |
+| `--tb_histogram_interval`| Steps between logging histograms/images | 500 |
+
+## Tracking with TensorBoard
+
+The training loop natively integrates with TensorBoard, capturing scalars, distributions (weights and gradients), images, attention maps, computational graphs, and high-dimensional embeddings.
+
+It creates a `runs/` directory at the project root where it saves all tracking data.
+
+### 1. Local Environment
+If you are running training on your localhost (e.g. your personal machine), launch the tensorboard server in a separate terminal:
+```bash
+tensorboard --logdir runs/
+```
+You can view the dashboard by opening `http://localhost:6006` in your web browser.
+
+### 2. Docker on Remote Host
+If your training is running inside a Docker container on a remote GPU server, you need to expose port 6006 and bind TensorBoard to all network interfaces (`0.0.0.0`) instead of localhost so that the port binding works correctly.
+
+Inside the remote Docker container, start TensorBoard with:
+```bash
+tensorboard --logdir runs/ --host 0.0.0.0 --port 6006
+```
+*(Make sure your docker run command exposes the port: `docker run ... -p 6006:6006 ...`)*
+
+**To view the dashboard, you have two options:**
+- **Direct IP (if firewall allows):** Open `http://<remote_ip>:6006` in your browser.
+- **SSH Port Forwarding (more secure):** From your local machine, tunnel into the remote host:
+  ```bash
+  ssh -L 6006:localhost:6006 your_user@remote_host
+  ```
+  Then simply go to `http://localhost:6006` on your local machine.
 
 ## Training Flow
 

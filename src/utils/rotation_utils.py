@@ -10,6 +10,8 @@ Also includes:
 - Chordal loss for SE(3) comparison
 """
 
+import logging
+
 import torch
 import pypose as pp
 
@@ -87,7 +89,7 @@ def quaternion_to_matrix(quat: torch.Tensor) -> torch.Tensor:
     r21 = 2 * (y * z + x * w)
     r22 = 1 - 2 * (x * x + y * y)
 
-    matrix = torch.stack(
+    return torch.stack(
         [
             torch.stack([r00, r01, r02], dim=-1),
             torch.stack([r10, r11, r12], dim=-1),
@@ -95,8 +97,6 @@ def quaternion_to_matrix(quat: torch.Tensor) -> torch.Tensor:
         ],
         dim=-2,
     )
-
-    return matrix
 
 
 def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
@@ -203,7 +203,7 @@ def pose_13d_to_se3_matrix(pose_13d: torch.Tensor) -> torch.Tensor:
 
 
 def se3_matrix_to_pose_13d(
-    T: torch.Tensor, gripper: torch.Tensor = None
+    T: torch.Tensor, gripper: torch.Tensor | None = None
 ) -> torch.Tensor:
     """
     Convert 4x4 SE(3) matrix to 13D pose [R_flat(9), pos(3), gripper(1)].
@@ -250,7 +250,7 @@ def apply_twist(T: torch.Tensor, twist_6d: torch.Tensor) -> torch.Tensor:
     delta_SE3 = pp.Exp(delta_se3)  # LieTensor in SE(3)
 
     # Convert current T to PyPose SE3
-    T_pp = pp.mat2SE3(T)
+    T_pp = pp.from_matrix(T, ltype=pp.SE3_type)
 
     # Compose: T_new = T @ delta (body-frame twist)
     T_new_pp = T_pp @ delta_SE3
@@ -272,8 +272,8 @@ def compute_twist(T_curr: torch.Tensor, T_next: torch.Tensor) -> torch.Tensor:
     Returns:
         (B, 6) twist vector [ω_x, ω_y, ω_z, v_x, v_y, v_z]
     """
-    T_curr_pp = pp.mat2SE3(T_curr)
-    T_next_pp = pp.mat2SE3(T_next)
+    T_curr_pp = pp.from_matrix(T_curr, ltype=pp.SE3_type)
+    T_next_pp = pp.from_matrix(T_next, ltype=pp.SE3_type)
 
     # T_rel = T_curr^(-1) @ T_next
     T_rel_pp = T_curr_pp.Inv() @ T_next_pp
@@ -364,28 +364,28 @@ def chordal_se3_loss(
 # =============================================================================
 
 if __name__ == "__main__":
-    print("Testing rotation utilities with PyPose...")
+    logging.info("Testing rotation utilities with PyPose...")
 
     # Test 6D representation roundtrip
     quat = torch.tensor([0.0, 0.0, 0.7071, 0.7071])  # 90° around Z
     d6 = quaternion_to_rotation_6d(quat)
     quat_back = rotation_6d_to_quaternion(d6)
-    print(f"6D roundtrip: {quat} -> {quat_back}")
-    assert torch.allclose(quat.abs(), quat_back.abs(), atol=1e-5)
+    logging.info(f"6D roundtrip: {quat} -> {quat_back}")
+    assert torch.allclose(quat.abs(), quat_back.abs(), atol=1e-5)  # noqa: S101
 
     # Test 13D pose conversion
     pose_13d = torch.randn(2, 13)
     T = pose_13d_to_se3_matrix(pose_13d)
-    print(f"13D -> SE(3): {pose_13d.shape} -> {T.shape}")
-    assert T.shape == (2, 4, 4)
+    logging.info(f"13D -> SE(3): {pose_13d.shape} -> {T.shape}")
+    assert T.shape == (2, 4, 4)  # noqa: S101
 
     # Test chordal loss
     T1 = torch.eye(4).unsqueeze(0)
     T2 = torch.eye(4).unsqueeze(0)
     T2[0, 0, 3] = 0.1  # Small translation
     loss = chordal_se3_loss(T1, T2)
-    print(f"Chordal loss (small diff): {loss.item():.6f}")
-    assert loss.item() > 0
+    logging.info(f"Chordal loss (small diff): {loss.item():.6f}")
+    assert loss.item() > 0  # noqa: S101
 
     # Test PyPose twist operations
     T_curr = torch.eye(4).unsqueeze(0)
@@ -393,11 +393,11 @@ if __name__ == "__main__":
         [[0.0, 0.0, 0.1, 0.01, 0.0, 0.0]]
     )  # Small rotation + translation
     T_new = apply_twist(T_curr, twist)
-    print(f"Apply twist: {T_curr.shape} + {twist.shape} -> {T_new.shape}")
+    logging.info(f"Apply twist: {T_curr.shape} + {twist.shape} -> {T_new.shape}")
 
     # Verify roundtrip
     twist_back = compute_twist(T_curr, T_new)
-    print(f"Twist roundtrip: {twist} -> {twist_back}")
-    assert torch.allclose(twist, twist_back, atol=1e-5)
+    logging.info(f"Twist roundtrip: {twist} -> {twist_back}")
+    assert torch.allclose(twist, twist_back, atol=1e-5)  # noqa: S101
 
-    print("All tests passed!")
+    logging.info("All tests passed!")

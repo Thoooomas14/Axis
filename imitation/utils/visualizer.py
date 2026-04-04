@@ -11,7 +11,9 @@ try:
     import pypose as pp
 except ImportError:
     pp = None
-    logging.warning("Warning: PyPose not found. Trajectory integration will be limited.")
+    logging.warning(
+        "Warning: PyPose not found. Trajectory integration will be limited."
+    )
 
 
 class Visualizer:

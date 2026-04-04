@@ -119,9 +119,8 @@ class RoPEMultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
-        assert self.head_dim * num_heads == embed_dim, (
-            "embed_dim must be divisible by num_heads"
-        )
+        if not self.head_dim * num_heads == embed_dim:
+            raise ValueError("embed_dim must be divisible by num_heads")
 
         self.scale = self.head_dim**-0.5
 
@@ -136,15 +135,19 @@ class RoPEMultiHeadAttention(nn.Module):
         # RoPE
         self.rope = RotaryPositionEmbedding(self.head_dim, max_seq_len=max_seq_len)
 
-    def forward(self, x, attn_mask=None, key_padding_mask=None):
+    def forward(
+        self, x, attn_mask=None, key_padding_mask=None, return_attn_weights=False
+    ):
         """
         Args:
             x: Input tensor of shape (batch, seq_len, embed_dim)
             attn_mask: Optional attention mask
             key_padding_mask: Optional key padding mask
+            return_attn_weights: Whether to return attention weights
 
         Returns:
             Output tensor of shape (batch, seq_len, embed_dim)
+            (Optional) Attention weights of shape (batch, num_heads, seq_len, seq_len)
         """
         B, S, D = x.shape
 
@@ -188,6 +191,8 @@ class RoPEMultiHeadAttention(nn.Module):
         # Output projection
         output = self.out_proj(attn_output)
 
+        if return_attn_weights:
+            return output, attn_weights
         return output
 
 
@@ -224,20 +229,35 @@ class RoPETransformerEncoderLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, src_mask=None, src_key_padding_mask=None):
+    def forward(
+        self, x, src_mask=None, src_key_padding_mask=None, return_attn_weights=False
+    ):
         """
         Args:
             x: Input tensor of shape (batch, seq_len, embed_dim)
             src_mask: Optional source mask for attention
             src_key_padding_mask: Optional padding mask
+            return_attn_weights: Whether to return attention weights
 
         Returns:
             Output tensor of shape (batch, seq_len, embed_dim)
+            (Optional) Attention weights of shape (batch, num_heads, seq_len, seq_len)
         """
         # Pre-LN Self-Attention
         residual = x
         x = self.norm1(x)
-        x = self.self_attn(x, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)
+        if return_attn_weights:
+            x, attn_weights = self.self_attn(
+                x,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                return_attn_weights=True,
+            )
+        else:
+            x = self.self_attn(
+                x, attn_mask=src_mask, key_padding_mask=src_key_padding_mask
+            )
+            attn_weights = None
         x = self.dropout(x) + residual
 
         # Pre-LN FFN
@@ -245,6 +265,8 @@ class RoPETransformerEncoderLayer(nn.Module):
         x = self.norm2(x)
         x = self.ffn(x) + residual
 
+        if return_attn_weights:
+            return x, attn_weights
         return x
 
 
@@ -274,22 +296,38 @@ class RoPETransformerEncoder(nn.Module):
             max_seq_len=layer.self_attn.rope.max_seq_len,
         )
 
-    def forward(self, x, mask=None, src_key_padding_mask=None):
+    def forward(
+        self, x, mask=None, src_key_padding_mask=None, return_attn_weights=False
+    ):
         """
         Args:
             x: Input tensor of shape (batch, seq_len, embed_dim)
             mask: Optional attention mask
             src_key_padding_mask: Optional padding mask
+            return_attn_weights: Whether to return a list of attention weights from all layers
 
         Returns:
             Output tensor of shape (batch, seq_len, embed_dim)
+            (Optional) List of attention weights
         """
+        all_attn_weights = []
         for layer in self.layers:
-            x = layer(x, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+            if return_attn_weights:
+                x, attn = layer(
+                    x,
+                    src_mask=mask,
+                    src_key_padding_mask=src_key_padding_mask,
+                    return_attn_weights=True,
+                )
+                all_attn_weights.append(attn)
+            else:
+                x = layer(x, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
 
         if self.norm is not None:
             x = self.norm(x)
 
+        if return_attn_weights:
+            return x, all_attn_weights
         return x
 
 
@@ -356,12 +394,14 @@ class AxisTransformer(nn.Module):
             # Learnable positional embeddings
             self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, embed_dim))
 
-    def forward(self, x):
+    def forward(self, x, return_attn_weights=False):
         """
         Args:
             x: Input tokens (B, SeqLen, EmbedDim)
+            return_attn_weights: Whether to return a list of attention tensors
         Returns:
             Output tokens (B, SeqLen, EmbedDim)
+            (Optional) List of attention weights [NumLayers] tensors of shape (B, NumHeads, SeqLen, SeqLen)
         """
         B, S, D = x.shape
 
@@ -371,6 +411,13 @@ class AxisTransformer(nn.Module):
 
         # Pass through transformer
         # RoPE is applied internally in the attention layers when use_rope=True
+        if self.use_rope:
+            if return_attn_weights:
+                x, attn_weights = self.transformer(x, return_attn_weights=True)
+                return x, attn_weights
+            return self.transformer(x)
+        # Standard nn.TransformerEncoder doesn't support returning attention easily
         x = self.transformer(x)
-
+        if return_attn_weights:
+            return x, None
         return x

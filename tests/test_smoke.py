@@ -1,3 +1,6 @@
+# ruff: noqa S101
+import logging
+
 import torch
 import sys
 import os
@@ -10,7 +13,7 @@ from src.models.axis import AxisModel
 
 def test_model_dimensions():
     """Verifies that the AxisModel accepts inputs and produces outputs with expected shapes."""
-    print("Verifying Axis Model Dimensions...")
+    logging.info("Verifying Axis Model Dimensions...")
 
     # Config matching SE(3) full matrix representation
     config = {

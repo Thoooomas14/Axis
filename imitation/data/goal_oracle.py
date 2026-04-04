@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import numpy as np
 import re
@@ -157,7 +159,8 @@ class GoalOracle:
     """
 
     def __init__(self, output_dim: int = 38):
-        assert output_dim == 38, "Goal vector must be 38D"
+        if output_dim != 38:
+            raise ValueError(f"Output dimension must be 38, but got {output_dim}")
         self.output_dim = output_dim
 
     def encode_goal(
@@ -212,17 +215,17 @@ if __name__ == "__main__":
 
     # Test with properties
     props = extract_object_properties("pick up the red block")
-    print(f"Extracted from 'pick up the red block': {props}")
+    logging.info(f"Extracted from 'pick up the red block': {props}")
 
     start = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 0.0, 0.3, 0.0], dtype=np.float32)
     end = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.0, 0.1, 1.0], dtype=np.float32)
 
     goal = oracle.encode_goal(1, start, end, props)
-    print(f"Goal shape: {goal.shape}")
-    print(f"Goal vector: {goal}")
+    logging.info(f"Goal shape: {goal.shape}")
+    logging.info(f"Goal vector: {goal}")
 
     # Test with blank instruction
     props_blank = extract_object_properties("")
-    print(f"\nExtracted from '': {props_blank}")
+    logging.info(f"\nExtracted from '': {props_blank}")
     goal_blank = oracle.encode_goal(0, start, end, props_blank)
-    print(f"Goal (blank props): {goal_blank}")
+    logging.info(f"Goal (blank props): {goal_blank}")

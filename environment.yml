@@ -36,3 +36,6 @@ dependencies:
       - pypose
       - h5py
       - sympy
+      - tensorboard
+      - torchsummary
+      - torchinfo

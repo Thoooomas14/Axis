@@ -4,13 +4,16 @@ import torch.nn as nn
 
 # Suppress unfixable 3rd-party library warnings from DINOv2 and UniDepth
 warnings.filterwarnings("ignore", message=".*xFormers is not available.*")
-warnings.filterwarnings("ignore", message=".*Importing from timm.models.layers is deprecated.*")
+warnings.filterwarnings(
+    "ignore", message=".*Importing from timm.models.layers is deprecated.*"
+)
 warnings.filterwarnings("ignore", message=".*To run evaluation you need KNN.*")
-warnings.filterwarnings("ignore", message=".*User provided device_type of 'cuda', but CUDA is not available.*")
+warnings.filterwarnings(
+    "ignore",
+    message=".*User provided device_type of 'cuda', but CUDA is not available.*",
+)
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 warnings.filterwarnings("ignore", message=".*self\\.resolution_level not set.*")
-
-
 
 
 class VisionEncoder(nn.Module):
@@ -33,17 +36,22 @@ class VisionEncoder(nn.Module):
 
         # Load Backbones
         self.dinov2 = torch.hub.load(
-            repo_or_dir="facebookresearch/dinov2", model="dinov2_vits14_reg", pretrained=pretrained, trust_repo=True
+            repo_or_dir="facebookresearch/dinov2",
+            model="dinov2_vits14_reg",
+            pretrained=pretrained,
+            trust_repo=True,
         )
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=FutureWarning, module="torch.hub")
+            warnings.filterwarnings(
+                "ignore", category=FutureWarning, module="torch.hub"
+            )
         self.unidepthv2 = torch.hub.load(
             repo_or_dir="lpiccinelli-eth/UniDepth",
             model="UniDepth",
             version="v2",
             backbone="vits14",
             pretrained=pretrained,
-            trust_repo=True
+            trust_repo=True,
         )
 
         setattr(self.unidepthv2, "resolution_level", 0.0)  # noqa: B010
