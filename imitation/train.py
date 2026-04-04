@@ -246,17 +246,6 @@ def train(args):
     config = model.config  # Get config from model (handles defaults)
     log.info("Model initialized.")
 
-    # --- Vision Encoder Checkpoint Loading ---
-    # 1. Init model (random weights)
-    # 2. Resume full checkpoint (if exists) -> overwrites all weights
-    # 3. Load Vision Checkpoint (if provided) -> overwrites vision weights
-
-    # Freezing logic should happen here though, as optimizer needs to know what requires grad.
-    if args.freeze_vision:
-        log.info("Freezing Vision Encoder...")
-        for param in model.vision_encoder.parameters():
-            param.requires_grad = False
-
     # Dataset
 
     # === Dynamic Memory Parameters (can be reduced on OOM) ===
@@ -1195,19 +1184,6 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Stop after N minutes (0=no limit)",
-    )
-
-    # === Vision Pre-training ===
-    parser.add_argument(
-        "--vision_checkpoint",
-        type=str,
-        default=None,
-        help="Path to pre-trained vision encoder weights (overrides checkpoint weights if provided)",
-    )
-    parser.add_argument(
-        "--freeze_vision",
-        action="store_true",
-        help="Freeze vision encoder backbone during training",
     )
 
     # === Visualization ===
