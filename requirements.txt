@@ -24,6 +24,5 @@ sympy
 tensorboard
 torchsummary
 torchinfo
-xformers
 huggingface
 huggingface-hub
