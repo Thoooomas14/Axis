@@ -36,6 +36,7 @@ class AxisModel(nn.Module):
                     "action_dim": 7,
                     "chunk_size": 10,
                 }
+                self.config = config
             else:
                 raise ValueError(
                     f"Unknown config string: {config}. "
