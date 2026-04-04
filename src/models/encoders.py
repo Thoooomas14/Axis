@@ -33,15 +33,17 @@ class VisionEncoder(nn.Module):
 
         # Load Backbones
         self.dinov2 = torch.hub.load(
-            "facebookresearch/dinov2", "dinov2_vits14_reg", pretrained=pretrained, weights_only=True
+            repo_or_dir="facebookresearch/dinov2", model="dinov2_vits14_reg", pretrained=pretrained, trust_repo=True
         )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, module="torch.hub")
         self.unidepthv2 = torch.hub.load(
-            "lpiccinelli-eth/UniDepth",
-            "UniDepth",
+            repo_or_dir="lpiccinelli-eth/UniDepth",
+            model="UniDepth",
             version="v2",
             backbone="vits14",
             pretrained=pretrained,
-            weights_only=True
+            trust_repo=True
         )
 
         setattr(self.unidepthv2, "resolution_level", 0.0)  # noqa: B010
