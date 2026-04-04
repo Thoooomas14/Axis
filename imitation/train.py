@@ -687,9 +687,7 @@ def train(args):
                                 "Loss/train": loss.item(),
                                 "Loss/action": action_loss.item(),
                                 "Loss/requery": requery_loss.item(),
-                                "Hyperparameters/learning_rate": scheduler.get_last_lr()[
-                                    0
-                                ],
+                                "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
                             },
                             step,
                         )
