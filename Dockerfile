@@ -8,7 +8,7 @@ WORKDIR /app
 # libgl1-mesa-glx and libglib2.0-0 are often required for OpenCV/rendering tasks
 RUN apt-get update && apt-get install -y \
     git \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
