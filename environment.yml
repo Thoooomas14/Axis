@@ -40,3 +40,4 @@ dependencies:
       - torchsummary
       - torchinfo
       - huggingface-hub
+      - timm

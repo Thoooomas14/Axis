@@ -25,3 +25,4 @@ tensorboard
 torchsummary
 torchinfo
 huggingface-hub
+timm
