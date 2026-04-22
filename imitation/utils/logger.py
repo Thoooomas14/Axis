@@ -74,9 +74,18 @@ class TrainingLogger:
 
     def log_histograms(self, model, step):
         for name, param in model.named_parameters():
-            self.tb_writer.add_histogram(f"Weights/{name}", param.data, step)
-            if param.grad is not None:
-                self.tb_writer.add_histogram(f"Gradients/{name}", param.grad, step)
+            try:
+                self.tb_writer.add_histogram(f"Weights/{name}", param.data, step)
+                if param.grad is not None:
+                    self.tb_writer.add_histogram(f"Gradients/{name}", param.grad, step)
+            except ValueError as e:
+                # Catch the specific TensorBoard error for empty histograms
+                if "The histogram is empty" in str(e):
+                    # This safely skips logging if gradients are completely NaN/Inf
+                    # which frequently happens during the first few AMP scaler steps.
+                    pass
+                else:
+                    raise e
 
     def log_images(self, tag, img_tensor, step):
         # Expects img_tensor to be a grid or valid tensor for add_image
