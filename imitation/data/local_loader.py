@@ -200,6 +200,9 @@ class LocalDataLoader(IterableDataset):
             )
             episode_keys = episode_keys[start:end]
 
+        if len(episode_keys) == 0:
+            return
+
         ram_limit_gb = getattr(self, "ram_usage_limit", 12.0)
 
         try:
