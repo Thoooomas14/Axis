@@ -488,6 +488,7 @@ def train(args):
     MIN_BATCH_SIZE = 1
     MIN_SHUFFLE_BUFFER = 1
     MIN_NUM_WORKERS = 0
+    microBatchSize = args.batch_size
 
     try:
         log.debug("Entering training loop...")
@@ -495,14 +496,9 @@ def train(args):
         # Loop structure
         num_epochs = args.epochs if args.epochs > 0 else 1
 
-        # For step-based training, ignore epoch from checkpoint
-        # (prevents range(51, 1) = empty when resuming epoch-trained checkpoint)
+        # Global pbar for step-based training
         if args.epochs == 0:
             start_epoch = 0
-
-        # Global pbar for step-based training
-        # Global pbar for step-based training
-        if args.epochs == 0:
             pbar = tqdm(
                 total=target_step,
                 initial=start_step,
@@ -535,7 +531,7 @@ def train(args):
                 pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.0)
                 monitor = ThroughputMonitor(window_size=100, total_steps=epoch_total)
 
-            for batch in dataloader:
+            for full_batch in dataloader:
                 if args.epochs == 0 and step >= target_step:
                     break
 
@@ -549,428 +545,421 @@ def train(args):
                         break
 
                 # === OOM Protection: Wrap batch processing in try/except ===
-                try:
-                    # Periodic memory cleanup (every 1000 steps)
-                    if step % 1000 == 0:
-                        gc.collect()
-                        # Only clear CUDA cache on OOM or very rarely to avoid sync overhead
-                        # if torch.cuda.is_available():
-                        #     torch.cuda.empty_cache()
+                success = False
+                while not success:
+                    try:
+                        # CRITICAL: Must zero grads at the start of the while loop so
+                        # failed OOM attempts don't leave partial ghost gradients behind
+                        optimizer.zero_grad()
 
-                    # Unpack Batch (requery is NOT in data - computed from action loss)
-                    # Cast batch to dict to satisfy type checker
-                    batch = dict(batch)
-                    images = batch["images"].to(device)  # (B, W, 3, ImgH, ImgW)
-                    proprio = batch["proprio"].to(device)  # (B, W, 13)
-                    goal_embs = batch["goal"].to(device)  # (B, 64)
-                    target_poses = batch["target_poses"].to(
-                        device
-                    )  # (B, H, 7) - direct future poses
+                        full_batch = dict(full_batch)
+                        B_full = full_batch["proprio"].shape[0]
+                        W = full_batch["proprio"].shape[1]
+                        H = args.loss_horizon
 
-                    B = proprio.shape[0]
-                    W = proprio.shape[1]
-                    H = args.loss_horizon
+                        # Pre-stitch targets for the full batch to save compute
+                        full_trajectory = torch.cat(
+                            [full_batch["proprio"].to(device),
+                             full_batch["target_poses"].to(device)],
+                             dim=1
+                        )
+                        rolling_targets_full = torch.zeros((B_full, W, H, 13), device=device)
+                        for i in range(W):
+                            rolling_targets_full[:, i, :, :] = full_trajectory[:, i+1 : i+1+H, :]
 
-                    # === Data Augmentation ===
-                    if model.training:
-                        # Reshape to (B*T, C, H, W) for efficient augmentation
-                        _, _, C, ImgH, ImgW = images.shape
-                        fl_imgs = images.view(-1, 3, ImgH, ImgW)
-                        aug_imgs = augmentations(fl_imgs)
-                        images = aug_imgs.view(B, W, 3, ImgH, ImgW)
-
-                    optimizer.zero_grad()
-
-                    # Stitch history and future together: (B, W, 13) + (B, H, 13) -> (B, W+H, 13)
-                    full_trajectory = torch.cat([proprio, target_poses], dim=1)
-
-                    # Build rolling horizon targets explicitly aligned to pred_action
-                    # Shape: (B, W, H, 13)
-                    rolling_targets = torch.zeros((B, W, H, 13), device=device)
-                    for i in range(W):
-                        rolling_targets[:, i, :, :] = full_trajectory[:, i+1 : i+1+H, :]
-
-                    # === Forward Pass with AMP ===
-                    with torch.autocast(device_type=device.type):
-                        # FORWARD PASS WITH OPTIONAL ATTENTION WEIGHTS
-                        should_log_tb = step % args.tb_histogram_interval == 0 and step != 0
-
-                        if should_log_tb:
-                            # Forward Pass - model outputs chunked predictions and attention weights
-                            pred_action, requery_pred, attn_weights = model(
-                                images, proprio, goal_embs, return_attn_weights=True
-                            )
-                        else:
-                            pred_action, requery_pred = model(
-                                images, proprio, goal_embs
-                            )
-                            attn_weights = None
-
-                        # === Endpoint Loss (Task-Oriented) ===
-                        # Disable AMP for geodesic loss - SE(3) operations need float32 precision
-                        with torch.autocast(device_type=device.type, enabled=False):
-                            # Pass the native 4D tensors directly to the dimension-agnostic loss function
-                            raw_action_loss = endpoint_chordal_loss(
-                                pred_twists=pred_action.float(),      # (B, W, H, 7)
-                                start_poses=proprio.float(),          # (B, W, 13)
-                                target_poses=rolling_targets.float(), # (B, W, H, 13)
-                                horizon=H,
-                                discount=args.loss_discount,
-                                omega_rot=args.omega_rot,
-                                omega_trans=args.omega_trans,
-                            )
-                            # raw_action_loss shape natively returned as: (B, W)
-
-                        # === Context Discounting ===
+                        # Pre-calculate Context Weights
                         context_discount = 0.8
                         token_indices = torch.arange(W - 1, -1, -1, device=device, dtype=torch.float32)
                         raw_context_weights = context_discount ** token_indices
                         context_weights = raw_context_weights / raw_context_weights.sum()
 
-                        # Apply Context Weights
-                        weighted_action_loss = raw_action_loss * context_weights
-                        action_loss = weighted_action_loss.sum(dim=1).mean()
+                        # === Dynamic Micro-Batch Loop ===
+                        for mbCount in range(0, B_full, microBatchSize):
 
-                        # === Confidence Target (Self-Supervised) ===
-                        per_token_loss = raw_action_loss.detach() # Shape: (B, W)
+                            # 1. SLICE TENSORS (Not the dictionary)
+                            images = full_batch["images"][mbCount : mbCount+microBatchSize].to(device)
+                            proprio = full_batch["proprio"][mbCount : mbCount+microBatchSize].to(device)
+                            goal_embs = full_batch["goal"][mbCount : mbCount+microBatchSize].to(device)
+                            mb_targets = rolling_targets_full[mbCount : mbCount+microBatchSize]
 
-                        # Expand to (B, W, 1) to perfectly match requery_pred shape
-                        confidence_target = torch.exp(
-                            -per_token_loss / args.confidence_temperature
-                        ).unsqueeze(-1)
+                            mb_B = images.shape[0] # Actual size of this micro-batch
 
-                        requery_loss = requery_criterion(
-                            requery_pred.float(), confidence_target
-                        )
+                            # 2. Data Augmentation
+                            if model.training:
+                                _, _, C, ImgH, ImgW = images.shape
+                                fl_imgs = images.view(-1, 3, ImgH, ImgW)
+                                aug_imgs = augmentations(fl_imgs)
+                                images = aug_imgs.view(mb_B, W, 3, ImgH, ImgW)
 
-                        # Weighted Loss
-                        loss = action_loss + (requery_loss * args.requery_weight)
+                            # 3. Forward Pass
+                            with torch.autocast(device_type=device.type):
+                                # Only log TB for the first micro-batch chunk to avoid spam
+                                should_log_tb = step % args.tb_histogram_interval == 0 and step != 0 and mbCount == 0
 
-                    # === Backward with Scaler ===
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-
-                    # === EMA Update ===
-                    ema.update(model)
-
-                    scheduler.step()
-
-                    # Logging
-                    training_logger.log_step(
-                        step,
-                        epoch,
-                        loss.item(),
-                        action_loss.item(),
-                        requery_loss.item(),
-                    )
-
-                    # TensorBoard Logging
-                    if step == start_step:
-                        try:
-                            # Log computation graph once
-                            training_logger.log_graph(
-                                model, (images, proprio, goal_embs)
-                            )
-                        except Exception as e:
-                            log.warning(f"Could not log graph: {e}")
-
-                    if step % args.tb_scalar_interval == 0:
-                        training_logger.log_scalars(
-                            {
-                                "Loss/train": loss.item(),
-                                "Loss/action": action_loss.item(),
-                                "Loss/requery": requery_loss.item(),
-                                "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
-                            },
-                            step,
-                        )
-
-                    if should_log_tb:
-                        training_logger.log_histograms(model, step)
-                        import torchvision.utils as vutils
-
-                        # Images (Batch 0, middle of window)
-                        mid_idx = W // 2
-                        grid = vutils.make_grid(
-                            images[0, mid_idx].unsqueeze(0), normalize=True
-                        )
-                        training_logger.log_images("Images/Input_Data", grid, step)
-
-                        # Attention Maps (if available)
-                        if attn_weights is not None and len(attn_weights) > 0:
-                            # Loop through every layer's attention map
-                            for layer_idx, layer_attn in enumerate(attn_weights):
-                                # Average the attention heads for the first item in the batch
-                                mean_attn = layer_attn[0].mean(dim=0, keepdim=True)
-                                attn_map_grid = vutils.make_grid(mean_attn.unsqueeze(0), normalize=True)
-                                # Log each layer dynamically (e.g., Images/Attention_Map_Layer_0, Layer_1, etc.)
-                                training_logger.log_images(
-                                    f"Images/Attention_Map_Layer_{layer_idx}",
-                                    attn_map_grid,
-                                    step
-                                )
-
-                    step += 1
-                    steps_in_current_epoch += 1
-
-                    # Update Monitor
-                    monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
-                    rate, eta = monitor.get_stats()
-
-                    desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | "
-                    desc +=f"{rate:.2f}it/s | ETA: {eta}"
-                    pbar.set_description(desc)
-                    pbar.update(1)  # Increment progress bar counter
-
-                    # === Persistent Memory Fix ===
-                    # Python doesn't always release memory to OS. We force it periodically.
-                    if step % 1000 == 0:
-                        gc.collect()
-
-                    # === Validation Loop ===
-                    if step % args.val_interval == 0:
-                        # Force GC to clear any transient training memory
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-                        model.eval()
-                        val_loss_total = 0.0
-                        val_batches = 0
-                        log.info("Running Validation...")
-                        with torch.no_grad():
-                            for val_batch in val_dataloader:
-                                if val_batches >= args.val_batches:
-                                    break  # Limit val batches
-
-                                v_imgs = val_batch["images"].to(device)
-                                v_props = val_batch["proprio"].to(device)
-                                v_goals = val_batch["goal"].to(device)
-                                v_target_poses = val_batch["target_poses"].to(device)
-
-                                B_val = v_imgs.shape[0]
-                                H_val = args.loss_horizon
-
-                                with torch.autocast(device_type=device.type):
-                                    # Validation forward pass (eval mode automatically skips dense decoding)
-                                    # v_pred: (B_val, ChunkSize, 7)
-                                    # v_requery_pred: (B_val, 1)
-                                    v_pred, v_requery_pred = model(
-                                        v_imgs, v_props, v_goals
+                                if should_log_tb:
+                                    pred_action, requery_pred, attn_weights = model(
+                                        images, proprio, goal_embs, return_attn_weights=True
                                     )
+                                else:
+                                    pred_action, requery_pred = model(images, proprio, goal_embs)
+                                    attn_weights = None
 
-                                # Endpoint loss in float32 (SE(3) ops need precision)
+                                # 4. Endpoint Loss
                                 with torch.autocast(device_type=device.type, enabled=False):
-                                    # Pass the 3D tensors natively to the dimension-agnostic loss function
-                                    raw_v_a_loss = endpoint_chordal_loss(
-                                        pred_twists=v_pred.float(),            # (B_val, H_val, 7)
-                                        start_poses=v_props[:, -1, :].float(), # (B_val, 13) - ONLY LAST POSE
-                                        target_poses=v_target_poses.float(),   # (B_val, H_val, 13)
-                                        horizon=H_val,
+                                    raw_action_loss = endpoint_chordal_loss(
+                                        pred_twists=pred_action.float(),
+                                        start_poses=proprio.float(),
+                                        target_poses=mb_targets.float(),
+                                        horizon=H,
                                         discount=args.loss_discount,
                                         omega_rot=args.omega_rot,
                                         omega_trans=args.omega_trans,
                                     )
-                                    # raw_v_a_loss is returned natively as (B_val,)
 
-                                    # Validation Requery Target (Calculated per-sample before averaging)
-                                    v_confidence_target = torch.exp(
-                                        -raw_v_a_loss.detach() / args.confidence_temperature
-                                    ).unsqueeze(-1) # Expands to (B_val, 1)
+                                # 5. GRADIENT ACCUMULATION SCALING
+                                weighted_action_loss = raw_action_loss * context_weights
+                                # Divide sum by B_full to perfectly replicate .mean() over the whole batch
+                                action_loss = weighted_action_loss.sum() / B_full
 
-                                    v_r_loss = requery_criterion(
-                                        v_requery_pred.float(), v_confidence_target
+                                # Requery Loss
+                                per_token_loss = raw_action_loss.detach()
+                                confidence_target = torch.exp(
+                                    -per_token_loss / args.confidence_temperature
+                                ).unsqueeze(-1)
+
+                                mb_requery_loss = requery_criterion(requery_pred.float(), confidence_target)
+                                # Scale requery loss by the ratio of the micro-batch to the full batch
+                                requery_loss = mb_requery_loss * (mb_B / B_full)
+
+                                # Weighted Loss & Accumulate Gradients
+                                loss = action_loss + (requery_loss * args.requery_weight)
+                                scaler.scale(loss).backward()
+
+                        # === Backward with Scaler (Executes once per FULL batch) ===
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+
+                        # === EMA Update ===
+                        ema.update(model)
+
+                        scheduler.step()
+
+                        # Logging
+                        training_logger.log_step(
+                            step,
+                            epoch,
+                            loss.item(),
+                            action_loss.item(),
+                            requery_loss.item(),
+                        )
+
+                        # TensorBoard Logging
+                        if step == start_step:
+                            try:
+                                # Log computation graph once
+                                training_logger.log_graph(
+                                    model, (images, proprio, goal_embs)
+                                )
+                            except Exception as e:
+                                log.warning(f"Could not log graph: {e}")
+
+                        if step % args.tb_scalar_interval == 0:
+                            training_logger.log_scalars(
+                                {
+                                    "Loss/train": loss.item(),
+                                    "Loss/action": action_loss.item(),
+                                    "Loss/requery": requery_loss.item(),
+                                    "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
+                                },
+                                step,
+                            )
+
+                        if should_log_tb:
+                            training_logger.log_histograms(model, step)
+                            import torchvision.utils as vutils
+
+                            # Images (Batch 0, middle of window)
+                            mid_idx = W // 2
+                            grid = vutils.make_grid(
+                                images[0, mid_idx].unsqueeze(0), normalize=True
+                            )
+                            training_logger.log_images("Images/Input_Data", grid, step)
+
+                            # Attention Maps (if available)
+                            if attn_weights is not None and len(attn_weights) > 0:
+                                # Loop through every layer's attention map
+                                for layer_idx, layer_attn in enumerate(attn_weights):
+                                    # Average the attention heads for the first item in the batch
+                                    mean_attn = layer_attn[0].mean(dim=0, keepdim=True)
+                                    attn_map_grid = vutils.make_grid(mean_attn.unsqueeze(0), normalize=True)
+                                    # Log each layer dynamically (e.g., Images/Attention_Map_Layer_0, Layer_1, etc.)
+                                    training_logger.log_images(
+                                        f"Images/Attention_Map_Layer_{layer_idx}",
+                                        attn_map_grid,
+                                        step
                                     )
 
-                                    # Average the action loss over the batch to create a scalar for logging
-                                    v_a_loss_scalar = raw_v_a_loss.mean()
+                        step += 1
+                        steps_in_current_epoch += 1
 
-                                    v_loss = v_a_loss_scalar + (v_r_loss * args.requery_weight)
-                                    val_loss_total += v_loss.item()
-                                    val_batches += 1
+                        # Update Monitor
+                        monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
+                        rate, eta = monitor.get_stats()
 
-                        avg_val_loss = val_loss_total / max(1, val_batches)
-                        log.info(f"Validation Loss: {avg_val_loss:.4f}")
+                        desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | "
+                        desc +=f"{rate:.2f}it/s | ETA: {eta}"
+                        pbar.set_description(desc)
+                        pbar.update(1)  # Increment progress bar counter
 
-                        # Log validation step
-                        training_logger.log_step(
-                            step, epoch, None, None, None, val_loss=avg_val_loss
-                        )
-                        training_logger.log_scalars({"Loss/val": avg_val_loss}, step)
-                        model.train()
+                        # === Persistent Memory Fix ===
+                        # Python doesn't always release memory to OS. We force it periodically.
+                        if step % 1000 == 0:
+                            gc.collect()
 
-                        # Cleanup validation variables
-                        del val_loss_total, val_batches
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        # === Validation Loop ===
+                        if step % args.val_interval == 0:
+                            # Force GC to clear any transient training memory
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
 
-                    # Checkpointing (Step-based)
-                    if step % args.save_interval == 0:
-                        # Define checkpoint data
-                        ckpt_data = {
-                            "step": step,
-                            "epoch": epoch,
-                            "model_state_dict": model.state_dict(),
-                            "ema_state_dict": ema.state_dict(),  # Save EMA
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "scheduler_state_dict": scheduler.state_dict(),  # Save Scheduler
-                            "scaler_state_dict": scaler.state_dict(),  # Save Scaler
-                            "loss": loss.item() if 'loss' in locals() else float('inf'),
-                        }
+                            model.eval()
+                            val_loss_total = 0.0
+                            val_batches = 0
+                            log.info("Running Validation...")
+                            with torch.no_grad():
+                                for val_full_batch in val_dataloader:
+                                    val_full_batch = dict(val_full_batch)
+                                    B_val_full = val_full_batch["proprio"].shape[0]
 
-                        try:
-                            # Try primary save (latest)
-                            os.makedirs(
-                                os.path.dirname(save_checkpoint_path), exist_ok=True
+                                    for mbCount in range(0, B_val_full, microBatchSize):
+                                        if val_batches >= args.val_batches:
+                                            break
+
+                                        v_imgs = val_full_batch["images"][mbCount : mbCount+microBatchSize].to(device)
+                                        v_props = val_full_batch["proprio"][mbCount : mbCount+microBatchSize].to(device)
+                                        v_goals = val_full_batch["goal"][mbCount : mbCount+microBatchSize].to(device)
+                                        v_target_poses = val_full_batch["target_poses"][
+                                            mbCount : mbCount+microBatchSize
+                                        ].to(device)
+
+                                        mb_B_val = v_imgs.shape[0]
+                                        H_val = args.loss_horizon
+
+                                        with torch.autocast(device_type=device.type):
+                                            v_pred, v_requery_pred = model(v_imgs, v_props, v_goals)
+
+                                        with torch.autocast(device_type=device.type, enabled=False):
+                                            raw_v_a_loss = endpoint_chordal_loss(
+                                                pred_twists=v_pred.float(),
+                                                start_poses=v_props[:, -1, :].float(),
+                                                target_poses=v_target_poses.float(),
+                                                horizon=H_val,
+                                                discount=args.loss_discount,
+                                                omega_rot=args.omega_rot,
+                                                omega_trans=args.omega_trans,
+                                            )
+
+                                            v_confidence_target = torch.exp(
+                                                -raw_v_a_loss.detach() / args.confidence_temperature
+                                            ).unsqueeze(-1)
+
+                                            v_r_loss = requery_criterion(
+                                                v_requery_pred.float(), v_confidence_target
+                                            )
+
+                                            # Use the exact same gradient-accumulation scaling math to track metrics
+                                            v_a_loss_scaled = raw_v_a_loss.sum() / B_val_full
+                                            v_r_loss_scaled = v_r_loss * (mb_B_val / B_val_full)
+
+                                            v_loss = v_a_loss_scaled + (v_r_loss_scaled * args.requery_weight)
+                                            val_loss_total += v_loss.item()
+
+                                    val_batches += 1 # Only increment after finishing the full batch
+
+                            avg_val_loss = val_loss_total / max(1, val_batches)
+                            log.info(f"Validation Loss: {avg_val_loss:.4f}")
+
+                            # Log validation step
+                            training_logger.log_step(
+                                step, epoch, None, None, None, val_loss=avg_val_loss
                             )
-                            torch.save(ckpt_data, save_checkpoint_path)
-                        except Exception as e:
-                            log.error(
-                                f"Failed to save primary checkpoint '{save_checkpoint_path}': {e}"
-                            )
+                            training_logger.log_scalars({"Loss/val": avg_val_loss}, step)
+                            model.train()
 
-                            # Fallback save (timestamped/step-based)
+                            # Cleanup validation variables
+                            del val_loss_total, val_batches
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                        # Checkpointing (Step-based)
+                        if step % args.save_interval == 0:
+                            # Define checkpoint data
+                            ckpt_data = {
+                                "step": step,
+                                "epoch": epoch,
+                                "model_state_dict": model.state_dict(),
+                                "ema_state_dict": ema.state_dict(),  # Save EMA
+                                "optimizer_state_dict": optimizer.state_dict(),
+                                "scheduler_state_dict": scheduler.state_dict(),  # Save Scheduler
+                                "scaler_state_dict": scaler.state_dict(),  # Save Scaler
+                                "loss": loss.item() if 'loss' in locals() else float('inf'),
+                            }
+
                             try:
-                                fallback_name = f"checkpoint_step_{step}.pt"
-                                fallback_path = os.path.join(
-                                    args.checkpoint_dir, fallback_name
+                                # Try primary save (latest)
+                                os.makedirs(
+                                    os.path.dirname(save_checkpoint_path), exist_ok=True
                                 )
-                                log.info(
-                                    f"Attempting fallback save to '{fallback_path}'..."
+                                torch.save(ckpt_data, save_checkpoint_path)
+                            except Exception as e:
+                                log.error(
+                                    f"Failed to save primary checkpoint '{save_checkpoint_path}': {e}"
                                 )
-                                torch.save(ckpt_data, fallback_path)
-                                log.info("Fallback save successful!")
-                            except Exception as e2:
-                                log.error(f"CRITICAL: Fallback save also failed: {e2}")
 
-                        training_logger.plot_progress()
+                                # Fallback save (timestamped/step-based)
+                                try:
+                                    fallback_name = f"checkpoint_step_{step}.pt"
+                                    fallback_path = os.path.join(
+                                        args.checkpoint_dir, fallback_name
+                                    )
+                                    log.info(
+                                        f"Attempting fallback save to '{fallback_path}'..."
+                                    )
+                                    torch.save(ckpt_data, fallback_path)
+                                    log.info("Fallback save successful!")
+                                except Exception as e2:
+                                    log.error(f"CRITICAL: Fallback save also failed: {e2}")
 
-                    # Visualization (Step-based)
-                    if args.viz and step % args.viz_interval == 0:
-                        visualizer.visualize_batch(step, batch, pred_action)
+                            training_logger.plot_progress()
 
-                except torch.cuda.OutOfMemoryError:
-                    # CUDA OOM: Reduce batch size
-                    consecutive_cuda_oom += 1
-                    successful_batches_since_oom = 0
+                        # Visualization (Step-based)
+                        if args.viz and step % args.viz_interval == 0:
+                            visualizer.visualize_batch(step, full_batch, pred_action)
 
-                    log.warning(
-                        f"[CUDA OOM] Out of memory at step {step}. (OOM #{consecutive_cuda_oom})"
-                    )
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    optimizer.zero_grad(set_to_none=True)
+                        success = True
 
-                    if consecutive_cuda_oom >= max_consecutive_ooms:
-                        if effective_batch_size > MIN_BATCH_SIZE:
-                            effective_batch_size = max(
-                                MIN_BATCH_SIZE, effective_batch_size // 2
-                            )
-                            consecutive_cuda_oom = 0
-                            need_dataloader_rebuild = True
-                            log.warning(
-                                f"[CUDA OOM] Reducing batch size to {effective_batch_size}"
-                            )
-                            break  # Exit batch loop to rebuild dataloader
-
-                        log.error(
-                            f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
-                        )
-                        log.error(
-                            "[CUDA OOM] Saving checkpoint and exiting gracefully..."
-                        )
-                        raise SystemExit(
-                            "CUDA OOM: Cannot reduce batch size further"
-                        ) from None
-
-                    continue
-
-                except RuntimeError as e:
-                    if "out of memory" in str(e).lower():
-                        # Treat as CUDA OOM
+                    except torch.cuda.OutOfMemoryError:
+                        # CUDA OOM: Reduce batch size
                         consecutive_cuda_oom += 1
                         successful_batches_since_oom = 0
 
                         log.warning(
-                            f"[CUDA OOM] Runtime memory error at step {step}. (OOM #{consecutive_cuda_oom})"
+                            f"[CUDA OOM] Out of memory at step {step}. (OOM #{consecutive_cuda_oom})"
                         )
                         gc.collect()
                         torch.cuda.empty_cache()
                         optimizer.zero_grad(set_to_none=True)
 
                         if consecutive_cuda_oom >= max_consecutive_ooms:
-                            if effective_batch_size > MIN_BATCH_SIZE:
-                                effective_batch_size = max(
-                                    MIN_BATCH_SIZE, effective_batch_size // 2
+                            if microBatchSize > MIN_BATCH_SIZE:
+                                microBatchSize = max(
+                                    MIN_BATCH_SIZE, microBatchSize // 2
                                 )
                                 consecutive_cuda_oom = 0
-                                need_dataloader_rebuild = True
                                 log.warning(
-                                    f"[CUDA OOM] Reducing batch size to {effective_batch_size}"
+                                    f"[CUDA OOM] Reducing microbatch size to {microBatchSize}"
                                 )
-                                break
+                                continue  # Retry with smaller batch size
+
                             log.error(
-                                f"[CUDA OOM] Batch size already at minimum ({MIN_BATCH_SIZE}). Cannot reduce further."
+                                f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."+
+                                " Cannot reduce further."
+                            )
+                            log.error(
+                                "[CUDA OOM] Saving checkpoint and exiting gracefully..."
                             )
                             raise SystemExit(
                                 "CUDA OOM: Cannot reduce batch size further"
-                            ) from e
+                            ) from None
 
                         continue
-                    raise
 
-                except MemoryError:
-                    # System RAM OOM: Reduce shuffle_buffer first, then num_workers
-                    consecutive_ram_oom += 1
-                    successful_batches_since_oom = 0
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            # Treat as CUDA OOM
+                            consecutive_cuda_oom += 1
+                            successful_batches_since_oom = 0
 
-                    log.warning(
-                        f"[RAM OOM] System memory exhausted at step {step}. (OOM #{consecutive_ram_oom})"
-                    )
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    optimizer.zero_grad(set_to_none=True)
-
-                    if consecutive_ram_oom >= max_consecutive_ooms:
-                        # First try reducing shuffle buffer
-                        if effective_shuffle_buffer > MIN_SHUFFLE_BUFFER:
-                            effective_shuffle_buffer = max(
-                                MIN_SHUFFLE_BUFFER, effective_shuffle_buffer // 2
-                            )
-                            consecutive_ram_oom = 0
-                            need_dataloader_rebuild = True
                             log.warning(
-                                f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}"
+                                f"[CUDA OOM] Runtime memory error at step {step}. (OOM #{consecutive_cuda_oom})"
                             )
-                            break
-                        # Then try reducing workers
-                        if effective_num_workers > MIN_NUM_WORKERS:
-                            effective_num_workers = max(
-                                MIN_NUM_WORKERS, effective_num_workers - 1
-                            )
-                            consecutive_ram_oom = 0
-                            need_dataloader_rebuild = True
-                            log.warning(
-                                f"[RAM OOM] Reducing num_workers to {effective_num_workers}"
-                            )
-                            break
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            optimizer.zero_grad(set_to_none=True)
 
-                        log.error(
-                            "[RAM OOM] All parameters at minimum. Cannot reduce further."
-                        )
-                        log.error(
-                            "[RAM OOM] Saving checkpoint and exiting gracefully..."
-                        )
-                        raise SystemExit(
-                            "RAM OOM: Cannot reduce memory parameters further"
-                        ) from None
+                            if consecutive_cuda_oom >= max_consecutive_ooms:
+                                if microBatchSize > MIN_BATCH_SIZE:
+                                    microBatchSize = max(
+                                        MIN_BATCH_SIZE, microBatchSize // 2
+                                    )
+                                    consecutive_cuda_oom = 0
+                                    log.warning(
+                                        f"[CUDA OOM] Reducing microbatch size to {microBatchSize}"
+                                    )
+                                    continue  # Retry with smaller batch size
+                                log.error(
+                                    f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."+
+                                    " Cannot reduce further."
+                                )
+                                raise SystemExit(
+                                    "CUDA OOM: Cannot reduce microbatch size further"
+                                ) from e
 
-                    continue
+                            continue
+                        raise
+
+                    except MemoryError:
+                        # System RAM OOM: Reduce shuffle_buffer first, then num_workers
+                        consecutive_ram_oom += 1
+                        successful_batches_since_oom = 0
+
+                        log.warning(
+                            f"[RAM OOM] System memory exhausted at step {step}. (OOM #{consecutive_ram_oom})"
+                        )
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        optimizer.zero_grad(set_to_none=True)
+
+                        if consecutive_ram_oom >= max_consecutive_ooms:
+                            # First try reducing shuffle buffer
+                            if effective_shuffle_buffer > MIN_SHUFFLE_BUFFER:
+                                effective_shuffle_buffer = max(
+                                    MIN_SHUFFLE_BUFFER, effective_shuffle_buffer // 2
+                                )
+                                consecutive_ram_oom = 0
+                                need_dataloader_rebuild = True
+                                log.warning(
+                                    f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}"
+                                )
+                                break
+                            # Then try reducing workers
+                            if effective_num_workers > MIN_NUM_WORKERS:
+                                effective_num_workers = max(
+                                    MIN_NUM_WORKERS, effective_num_workers - 1
+                                )
+                                consecutive_ram_oom = 0
+                                need_dataloader_rebuild = True
+                                log.warning(
+                                    f"[RAM OOM] Reducing num_workers to {effective_num_workers}"
+                                )
+                                break
+
+                            log.error(
+                                "[RAM OOM] All parameters at minimum. Cannot reduce further."
+                            )
+                            log.error(
+                                "[RAM OOM] Saving checkpoint and exiting gracefully..."
+                            )
+                            raise SystemExit(
+                                "RAM OOM: Cannot reduce memory parameters further"
+                            ) from None
+
+                        continue
 
                 # Successful batch - reset OOM counters
                 consecutive_cuda_oom = 0
@@ -984,13 +973,15 @@ def train(args):
             # Check if we need to rebuild dataloader (from OOM reduction)
             if need_dataloader_rebuild:
                 log.info("[Memory] Rebuilding dataloader with new parameters...")
-                dataloader = create_dataloader(
+                dataloader, _ = create_dataloader(
                     effective_batch_size,
                     effective_shuffle_buffer,
                     effective_num_workers,
+                    split=train_split,
+                    split_start=0.0,
+                    split_end=args.train_split_pct,
                 )
-                need_dataloader_rebuild = False
-                continue  # Restart epoch loop with new dataloader
+                continue
 
             # Close epoch pbar
             if args.epochs > 0:
@@ -1018,7 +1009,7 @@ def train(args):
                 if args.viz:
                     log.info(f"Visualizing at end of epoch {epoch + 1}")
                     # Use the last batch for visualization
-                    visualizer.visualize_batch(step, batch, pred_action)
+                    visualizer.visualize_batch(step, full_batch, pred_action)
 
             # End of inner loop
             if args.epochs == 0 and step >= target_step:
