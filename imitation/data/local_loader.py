@@ -203,14 +203,14 @@ class LocalDataLoader(IterableDataset):
         ram_limit_gb = getattr(self, "ram_usage_limit", 12.0)
 
         try:
-            with h5py.File(
-                self.data_path,
-                "r",
-                rdcc_nbytes=4 * 1024 * 1024,
-                libver="latest",
-                swmr=True,
-            ) as f:
-                while True:
+            while True:
+                with h5py.File(
+                    self.data_path,
+                    "r",
+                    rdcc_nbytes=4 * 1024 * 1024,
+                    libver="latest",
+                    swmr=True,
+                ) as f:
                     current_keys = episode_keys.copy()
                     if self.shuffle:
                         random.shuffle(current_keys)
@@ -324,8 +324,8 @@ class LocalDataLoader(IterableDataset):
                     if len(episode_buffer) > 0:
                         yield from self._yield_shuffled_buffer(episode_buffer)
 
-                    if not self.repeat:
-                        break
+                if not self.repeat:
+                    break
         except Exception as e:
             import traceback
 
