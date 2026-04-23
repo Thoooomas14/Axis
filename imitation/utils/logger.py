@@ -79,12 +79,8 @@ class TrainingLogger:
                 if param.grad is not None:
                     self.tb_writer.add_histogram(f"Gradients/{name}", param.grad, step)
             except ValueError as e:
-                # Catch the specific TensorBoard error for empty histograms
-                if "The histogram is empty" in str(e):
-                    # This safely skips logging if gradients are completely NaN/Inf
-                    # which frequently happens during the first few AMP scaler steps.
-                    pass
-                else:
+                # Safely ignore empty histograms (e.g., NaN gradients during AMP scaler warmups)
+                if "The histogram is empty" not in str(e):
                     raise e
 
     def log_images(self, tag, img_tensor, step):

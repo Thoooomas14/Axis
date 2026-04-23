@@ -30,6 +30,7 @@ from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 
 
+
 # Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
 tf.config.set_visible_devices([], "GPU")
 
@@ -122,19 +123,14 @@ def train(args):
     def orthonormalize_rotation(R):
         """
         Orthonormalize rotation matrices using SVD.
-        Project onto the closest valid rotation matrix in Frobenius norm.
-        R: (B, 3, 3)
-        Returns: (B, 3, 3) valid rotation matrices
+        Supports arbitrary batch dimensions (e.g., (B, 3, 3) or (B, W, 3, 3)).
         """
         U, S, V = torch.svd(R)
-        # Ensure det(U @ V.T) is 1 (handle reflection case)
-        # Construct correction matrix
         with torch.no_grad():
             det = torch.det(U @ V.transpose(-2, -1))
             diag = torch.ones_like(S)
-            diag[:, -1] = det
+            diag[..., -1] = det  # Ellipsis supports N-dimensional batches
 
-            # Reconstruct: R = U @ diag @ V.T
         return U @ torch.diag_embed(diag) @ V.transpose(-2, -1)
 
     def endpoint_chordal_loss(
@@ -164,33 +160,31 @@ def train(args):
         Returns:
             Scalar loss: Weighted sum of step losses
         """
-        B = pred_twists.shape[0]
+        # Extract arbitrary batch dimensions (e.g., (B,) or (B, W,))
+        batch_shape = pred_twists.shape[:-2]
         device = pred_twists.device
         dtype = pred_twists.dtype
 
-        # 1. Build Predicted SE(3) Transform by rollout from 13D pose
-        R_start = start_poses[:, :9].reshape(B, 3, 3)
-        p_start = start_poses[:, 9:12]
+        # 1. Build Predicted SE(3) Transform
+        R_start = start_poses[..., :9].reshape(*batch_shape, 3, 3)
+        p_start = start_poses[..., 9:12]
 
+        # Initialize Identity matrix with correct N-dimensional shape
         T_pred = (
             torch.eye(4, device=device, dtype=dtype)
-            .unsqueeze(0)
-            .expand(B, 4, 4)
+            .view(*(1,) * len(batch_shape), 4, 4)
+            .expand(*batch_shape, 4, 4)
             .clone()
         )
 
-        # Sanitize input rotation
         R_start_clean = orthonormalize_rotation(R_start)
-        T_pred[:, :3, :3] = R_start_clean
-        T_pred[:, :3, 3] = p_start
+        T_pred[..., :3, :3] = R_start_clean
+        T_pred[..., :3, 3] = p_start
 
-        # Initialize LieTensor
         T_pred_pp = pp.from_matrix(T_pred, ltype=pp.SE3_type, check=False)
 
-        gripper_curr = start_poses[:, 12:13]
+        gripper_curr = start_poses[..., 12:13]
 
-        # Compute Normalized Weights
-        # w_t = gamma^t
         steps = torch.arange(horizon, device=device, dtype=dtype)
         raw_weights = discount**steps
         weights = raw_weights / raw_weights.sum()
@@ -198,42 +192,39 @@ def train(args):
         total_loss = torch.tensor(0.0, device=device, dtype=dtype)
 
         # Pre-process targets to avoid reshaping inside the loop
-        target_Rs = target_poses[..., :9].reshape(B, horizon, 3, 3)
+        target_Rs = target_poses[..., :9].reshape(*batch_shape, horizon, 3, 3)
         target_ps = target_poses[..., 9:12]
         target_gs = target_poses[..., 12:13]
 
         # Rollout & Loss Accumulation
         for t in range(horizon):
-            twist_6d = pred_twists[:, t, :6]
-            gripper_delta = pred_twists[:, t, 6:7]
+            twist_6d = pred_twists[..., t, :6]
+            gripper_delta = pred_twists[..., t, 6:7]
 
-            # Apply twist (Body frame assumption)
             T_delta_pp = pp.Exp(pp.se3(twist_6d))
             T_pred_pp = T_pred_pp @ T_delta_pp
 
-            # FIX: Clamp state immediately to preserve gradients at boundaries
             gripper_curr = torch.clamp(gripper_curr + gripper_delta, 0.0, 1.0)
 
-            # --- Loss Calculation ---
             T_step = T_pred_pp.matrix()
-            R_pred = T_step[:, :3, :3]
-            p_pred = T_step[:, :3, 3]
+            R_pred = T_step[..., :3, :3]
+            p_pred = T_step[..., :3, 3]
 
-            # Rotation (Chordal)
-            # ||R_pred - R_target||_F^2
-            rot_diff = R_pred - target_Rs[:, t]
-            rot_loss = torch.sum(rot_diff**2, dim=(-2, -1)).mean()
+            # Rotation (Chordal) - Unreduced!
+            rot_diff = R_pred - target_Rs[..., t, :, :]
+            rot_loss = torch.sum(rot_diff**2, dim=(-2, -1))
 
-            # Translation
-            trans_diff = p_pred - target_ps[:, t]
-            trans_loss = torch.sum(trans_diff**2, dim=-1).mean()
+            # Translation - Unreduced!
+            trans_diff = p_pred - target_ps[..., t, :]
+            trans_loss = torch.sum(trans_diff**2, dim=-1)
 
-            # Gripper (MSE)
-            grip_loss = torch.mean((gripper_curr - target_gs[:, t]) ** 2)
+            # Gripper (MSE) - Unreduced!
+            grip_loss = ((gripper_curr - target_gs[..., t, :]) ** 2).squeeze(-1)
 
             step_loss = omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
             total_loss += weights[t] * step_loss
 
+        # Returns shape identical to batch_shape (e.g., (B, W))
         return total_loss
 
     # --- Utilities ---
@@ -570,14 +561,15 @@ def train(args):
                     # Cast batch to dict to satisfy type checker
                     batch = dict(batch)
                     images = batch["images"].to(device)  # (B, W, 3, ImgH, ImgW)
-                    proprio = batch["proprio"].to(device)  # (B, W, 7)
+                    proprio = batch["proprio"].to(device)  # (B, W, 13)
                     goal_embs = batch["goal"].to(device)  # (B, 64)
                     target_poses = batch["target_poses"].to(
                         device
                     )  # (B, H, 7) - direct future poses
 
-                    B = images.shape[0]
-                    W = images.shape[1]  # Window size
+                    B = proprio.shape[0]
+                    W = proprio.shape[1]
+                    H = args.loss_horizon
 
                     # === Data Augmentation ===
                     if model.training:
@@ -589,10 +581,19 @@ def train(args):
 
                     optimizer.zero_grad()
 
+                    # Stitch history and future together: (B, W, 13) + (B, H, 13) -> (B, W+H, 13)
+                    full_trajectory = torch.cat([proprio, target_poses], dim=1)
+
+                    # Build rolling horizon targets explicitly aligned to pred_action
+                    # Shape: (B, W, H, 13)
+                    rolling_targets = torch.zeros((B, W, H, 13), device=device)
+                    for i in range(W):
+                        rolling_targets[:, i, :, :] = full_trajectory[:, i+1 : i+1+H, :]
+
                     # === Forward Pass with AMP ===
                     with torch.autocast(device_type=device.type):
                         # FORWARD PASS WITH OPTIONAL ATTENTION WEIGHTS
-                        should_log_tb = step % args.tb_histogram_interval == 0
+                        should_log_tb = step % args.tb_histogram_interval == 0 and step != 0
 
                         if should_log_tb:
                             # Forward Pass - model outputs chunked predictions and attention weights
@@ -605,46 +606,41 @@ def train(args):
                             )
                             attn_weights = None
 
-                        # pred_action: (B, W, 7) - chunked twist predictions
-                        # requery_pred: (B, 1) - model confidence [0, 1]
-
                         # === Endpoint Loss (Task-Oriented) ===
                         # Disable AMP for geodesic loss - SE(3) operations need float32 precision
-                        with torch.cuda.amp.autocast(enabled=False):
-                            # Cast to float32 for numerical precision in rotation ops
-                            pred_action_f32 = pred_action.float()
-                            start_poses_f32 = proprio[:, -1, :].float()  # (B, 13)
-
-                            # Target endpoint: directly from data loader at the horizon step
-                            horizon = args.loss_horizon
-                            # target_poses is (B, H, 13)
-
-                            # Compute trajectory loss
-                            action_loss = endpoint_chordal_loss(
-                                pred_action_f32,
-                                start_poses_f32,
-                                target_poses.float(),
-                                horizon,
-                                args.loss_discount,
-                                args.omega_rot,
-                                args.omega_trans,
+                        with torch.autocast(device_type=device.type, enabled=False):
+                            # Pass the native 4D tensors directly to the dimension-agnostic loss function
+                            raw_action_loss = endpoint_chordal_loss(
+                                pred_twists=pred_action.float(),      # (B, W, H, 7)
+                                start_poses=proprio.float(),          # (B, W, 13)
+                                target_poses=rolling_targets.float(), # (B, W, H, 13)
+                                horizon=H,
+                                discount=args.loss_discount,
+                                omega_rot=args.omega_rot,
+                                omega_trans=args.omega_trans,
                             )
+                            # raw_action_loss shape natively returned as: (B, W)
 
-                        # Compute per-sample loss for confidence (using endpoint error)
-                        per_sample_loss = (
-                            action_loss.detach()
-                        )  # Scalar, broadcast to all samples
+                        # === Context Discounting ===
+                        context_discount = 0.8
+                        token_indices = torch.arange(W - 1, -1, -1, device=device, dtype=torch.float32)
+                        raw_context_weights = context_discount ** token_indices
+                        context_weights = raw_context_weights / raw_context_weights.sum()
+
+                        # Apply Context Weights
+                        weighted_action_loss = raw_action_loss * context_weights
+                        action_loss = weighted_action_loss.sum(dim=1).mean()
 
                         # === Confidence Target (Self-Supervised) ===
-                        # Requery represents model confidence: high when predictions are accurate
-                        confidence_target = torch.exp(
-                            -per_sample_loss / args.confidence_temperature
-                        ).expand(B, 1)
-                        confidence_target = confidence_target.detach()
+                        per_token_loss = raw_action_loss.detach() # Shape: (B, W)
 
-                        # Compute requery loss (MSE between predicted confidence and loss-derived target)
+                        # Expand to (B, W, 1) to perfectly match requery_pred shape
+                        confidence_target = torch.exp(
+                            -per_token_loss / args.confidence_temperature
+                        ).unsqueeze(-1)
+
                         requery_loss = requery_criterion(
-                            requery_pred, confidence_target
+                            requery_pred.float(), confidence_target
                         )
 
                         # Weighted Loss
@@ -705,15 +701,17 @@ def train(args):
 
                         # Attention Maps (if available)
                         if attn_weights is not None and len(attn_weights) > 0:
-                            last_layer_attn = attn_weights[-1][0].mean(
-                                dim=0, keepdim=True
-                            )
-                            attn_map_grid = vutils.make_grid(
-                                last_layer_attn.unsqueeze(0), normalize=True
-                            )
-                            training_logger.log_images(
-                                "Images/Attention_Map", attn_map_grid, step
-                            )
+                            # Loop through every layer's attention map
+                            for layer_idx, layer_attn in enumerate(attn_weights):
+                                # Average the attention heads for the first item in the batch
+                                mean_attn = layer_attn[0].mean(dim=0, keepdim=True)
+                                attn_map_grid = vutils.make_grid(mean_attn.unsqueeze(0), normalize=True)
+                                # Log each layer dynamically (e.g., Images/Attention_Map_Layer_0, Layer_1, etc.)
+                                training_logger.log_images(
+                                    f"Images/Attention_Map_Layer_{layer_idx}",
+                                    attn_map_grid,
+                                    step
+                                )
 
                     step += 1
                     steps_in_current_epoch += 1
@@ -754,35 +752,43 @@ def train(args):
                                 v_target_poses = val_batch["target_poses"].to(device)
 
                                 B_val = v_imgs.shape[0]
+                                H_val = args.loss_horizon
 
-                                with torch.cuda.amp.autocast():
-                                    # Validation forward pass
+                                with torch.autocast(device_type=device.type):
+                                    # Validation forward pass (eval mode automatically skips dense decoding)
+                                    # v_pred: (B_val, ChunkSize, 7)
+                                    # v_requery_pred: (B_val, 1)
                                     v_pred, v_requery_pred = model(
                                         v_imgs, v_props, v_goals
                                     )
 
                                 # Endpoint loss in float32 (SE(3) ops need precision)
-                                with torch.cuda.amp.autocast(enabled=False):
-                                    v_pred_f32 = v_pred.float()
-                                    v_start_poses_f32 = v_props[:, -1, :].float()
-                                    horizon = args.loss_horizon
-                                    v_a_loss = endpoint_chordal_loss(
-                                        v_pred_f32,
-                                        v_start_poses_f32,
-                                        v_target_poses.float(),
-                                        horizon,
-                                        args.loss_discount,
-                                        args.omega_rot,
-                                        args.omega_trans,
+                                with torch.autocast(device_type=device.type, enabled=False):
+                                    # Pass the 3D tensors natively to the dimension-agnostic loss function
+                                    raw_v_a_loss = endpoint_chordal_loss(
+                                        pred_twists=v_pred.float(),            # (B_val, H_val, 7)
+                                        start_poses=v_props[:, -1, :].float(), # (B_val, 13) - ONLY LAST POSE
+                                        target_poses=v_target_poses.float(),   # (B_val, H_val, 13)
+                                        horizon=H_val,
+                                        discount=args.loss_discount,
+                                        omega_rot=args.omega_rot,
+                                        omega_trans=args.omega_trans,
                                     )
+                                    # raw_v_a_loss is returned natively as (B_val,)
 
+                                    # Validation Requery Target (Calculated per-sample before averaging)
                                     v_confidence_target = torch.exp(
-                                        -v_a_loss.detach() / args.confidence_temperature
-                                    ).expand(B_val, 1)
+                                        -raw_v_a_loss.detach() / args.confidence_temperature
+                                    ).unsqueeze(-1) # Expands to (B_val, 1)
+
                                     v_r_loss = requery_criterion(
                                         v_requery_pred.float(), v_confidence_target
                                     )
-                                    v_loss = v_a_loss + (v_r_loss * args.requery_weight)
+
+                                    # Average the action loss over the batch to create a scalar for logging
+                                    v_a_loss_scalar = raw_v_a_loss.mean()
+
+                                    v_loss = v_a_loss_scalar + (v_r_loss * args.requery_weight)
                                     val_loss_total += v_loss.item()
                                     val_batches += 1
 

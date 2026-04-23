@@ -406,18 +406,20 @@ class AxisTransformer(nn.Module):
         B, S, D = x.shape
 
         if not self.use_rope and self.pos_embedding is not None:
-            # Add learned positional embeddings (truncated to current sequence length)
             x = x + self.pos_embedding[:, :S, :]
 
-        # Pass through transformer
-        # RoPE is applied internally in the attention layers when use_rope=True
+        # === CAUSAL MASK ===
+        # Lower-triangular mask: 0 for allowed (past/present), -inf for blocked (future)
+        causal_mask = torch.triu(torch.ones(S, S) * float('-inf'), diagonal=1).to(x.device)
+
         if self.use_rope:
             if return_attn_weights:
-                x, attn_weights = self.transformer(x, return_attn_weights=True)
+                # Pass mask down to the encoder layers
+                x, attn_weights = self.transformer(x, mask=causal_mask, return_attn_weights=True)
                 return x, attn_weights
-            return self.transformer(x)
-        # Standard nn.TransformerEncoder doesn't support returning attention easily
-        x = self.transformer(x)
+            return self.transformer(x, mask=causal_mask)
+
+        x = self.transformer(x, mask=causal_mask)
         if return_attn_weights:
             return x, None
         return x

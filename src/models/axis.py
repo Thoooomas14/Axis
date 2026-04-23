@@ -204,11 +204,25 @@ class AxisModel(nn.Module):
         else:
             output_tokens = self.transformer(input_tokens)  # (B, W, 512)
 
-        # 6. Decode from LAST token ONLY (Current State -> Future Trajectory)
-        last_token = output_tokens[:, -1, :]  # (B, 512)
+        if self.training:
+            # DENSE SUPERVISION: Decode from every token in the window
+            pred_actions = []
+            requery_logits = []
 
-        pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
-        requery_logit = self.requery_decoder(last_token)  # (B, 1)
+            for i in range(output_tokens.size(1)):
+                token = output_tokens[:, i, :]  # (B, 512)
+                pred_actions.append(self.action_decoder(token))
+                requery_logits.append(self.requery_decoder(token))
+
+            # Stack along the window dimension (dim=1)
+            pred_action = torch.stack(pred_actions, dim=1)      # (B, W, ChunkSize, 7)
+            requery_logit = torch.stack(requery_logits, dim=1)  # (B, W, 1)
+
+        else:
+            # INFERENCE: Decode ONLY from the final token
+            last_token = output_tokens[:, -1, :]  # (B, 512)
+            pred_action = self.action_decoder(last_token)     # (B, ChunkSize, 7)
+            requery_logit = self.requery_decoder(last_token)  # (B, 1)
 
         if return_tokens and return_attn_weights:
             return pred_action, requery_logit, input_tokens, attn_weights
