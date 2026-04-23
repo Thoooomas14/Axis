@@ -189,7 +189,7 @@ def train(args):
         raw_weights = discount**steps
         weights = raw_weights / raw_weights.sum()
 
-        total_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        total_loss = torch.zeros(batch_shape, device=device, dtype=dtype)
 
         # Pre-process targets to avoid reshaping inside the loop
         target_Rs = target_poses[..., :9].reshape(*batch_shape, horizon, 3, 3)
