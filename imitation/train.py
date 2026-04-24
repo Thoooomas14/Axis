@@ -236,7 +236,6 @@ def train(args):
 
     # --- Model ---
     model = AxisModel(config).to(device)
-    model = torch.compile(model)
     config = model.config  # Get config from model (handles defaults)
     log.info("Model initialized.")
 
