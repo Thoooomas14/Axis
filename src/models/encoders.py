@@ -2,6 +2,8 @@ import warnings
 import torch
 import torch.nn as nn
 
+from typing import cast
+
 # Suppress unfixable 3rd-party library warnings from DINOv2 and UniDepth
 warnings.filterwarnings("ignore", message=".*xFormers is not available.*")
 warnings.filterwarnings(
@@ -34,25 +36,31 @@ class VisionEncoder(nn.Module):
             )
         self.image_size = img_size
 
-        # Load Backbones
-        self.dinov2 = torch.hub.load(
-            repo_or_dir="facebookresearch/dinov2",
-            model="dinov2_vits14_reg",
-            pretrained=pretrained,
-            trust_repo=True,
-        )
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", category=FutureWarning, module="torch.hub"
             )
-        self.unidepthv2 = torch.hub.load(
+        # Load Backbones
+        self.dinov2 = cast(nn.Module, torch.hub.load(
+            repo_or_dir="facebookresearch/dinov2",
+            model="dinov2_vits14_reg",
+            pretrained=pretrained,
+            trust_repo=True,
+        ))
+
+        self.unidepthv2 = cast(nn.Module, torch.hub.load(
             repo_or_dir="lpiccinelli-eth/UniDepth",
             model="UniDepth",
             version="v2",
             backbone="vits14",
             pretrained=pretrained,
             trust_repo=True,
-        )
+        ))
+
+        for param in self.dinov2.parameters():
+            param.requires_grad = False
+        for param in self.unidepthv2.parameters():
+            param.requires_grad = False
 
         setattr(self.unidepthv2, "resolution_level", 0.0)  # noqa: B010
 
