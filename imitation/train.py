@@ -575,6 +575,7 @@ def train(args):
                         raw_context_weights = context_discount ** token_indices
                         context_weights = raw_context_weights / raw_context_weights.sum()
 
+                        should_log_tb = step % args.tb_histogram_interval == 0 and step != 0
                         # === Dynamic Micro-Batch Loop ===
                         for mbCount in range(0, B_full, microBatchSize):
 
@@ -596,7 +597,6 @@ def train(args):
                             # 3. Forward Pass
                             with torch.autocast(device_type=device.type):
                                 # Only log TB for the first micro-batch chunk to avoid spam
-                                should_log_tb = step % args.tb_histogram_interval == 0 and step != 0 and mbCount == 0
 
                                 if should_log_tb:
                                     pred_action, requery_pred, attn_weights = model(
@@ -1241,13 +1241,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tb_scalar_interval",
         type=int,
-        default=50,
+        default=100,
         help="Steps between logging scalars",
     )
     parser.add_argument(
         "--tb_histogram_interval",
         type=int,
-        default=500,
+        default=5000,
         help="Steps between logging histograms/images",
     )
 
