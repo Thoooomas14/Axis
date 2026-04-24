@@ -236,11 +236,11 @@ class LocalDataLoader(IterableDataset):
                             time.sleep(0.5)
 
                         ep = cast(h5py.Group, f[key])
-                        imgs = cast(h5py.Dataset, ep["images"])[:]
+                        img_dataset = cast(h5py.Dataset, ep["images"])
                         props = cast(h5py.Dataset, ep["proprio"])[:]
 
                         props[:, 9:12] *= 1000.0  # Scale to mm
-
+                        img_offset = 0
                         if len(props) > 1:
                             pos_deltas = np.linalg.norm(
                                 np.diff(props[:, 9:12], axis=0), axis=1
@@ -249,10 +249,10 @@ class LocalDataLoader(IterableDataset):
                             if moving_mask.any():
                                 first_moving = np.argmax(moving_mask)
                                 if first_moving > 0:
-                                    imgs = imgs[first_moving:]
+                                    img_offset = first_moving # Save the offset!
                                     props = props[first_moving:]
 
-                        if len(imgs) < self.buffer_size:
+                        if len(img_dataset) - img_offset < self.buffer_size:
                             continue
 
                         # Extract language instruction
@@ -286,7 +286,7 @@ class LocalDataLoader(IterableDataset):
                         twists = self._compute_episode_twists(props)
                         segments = self._segment_subtasks(props)
 
-                        seq_len = len(imgs)
+                        seq_len = len(props)
                         goals = np.zeros((seq_len, 38), dtype=np.float32)
                         subtask_ends = np.zeros((seq_len, 13), dtype=np.float32)
 
@@ -311,7 +311,8 @@ class LocalDataLoader(IterableDataset):
 
                         episode_buffer.append(
                             {
-                                "images": imgs,
+                                "image_dataset": img_dataset, # The HDF5 reference
+                                "img_offset": img_offset,       # The start index
                                 "proprio": props,
                                 "twists": twists,
                                 "goals": goals,
@@ -341,7 +342,7 @@ class LocalDataLoader(IterableDataset):
 
         # 1. Map pointers
         for ep_id, ep_data in enumerate(episode_buffer):
-            seq_len = len(ep_data["images"])
+            seq_len = len(ep_data["proprio"])
             max_start = seq_len - self.window_size - self.loss_horizon + 1
 
             if max_start <= 0:  # Episode too short to form any window
@@ -385,10 +386,14 @@ class LocalDataLoader(IterableDataset):
             pose_start = w_end
             pose_end = pose_start + self.loss_horizon
 
+            true_start = w_start + ep["img_offset"]
+            true_end = true_start + self.window_size
+
             # Slicing creates Views, not full copies, massively reducing overhead
             yield {
-                "images": torch.tensor(ep["images"][w_start:w_end], dtype=torch.float32)
-                / 255.0,  # (W, C, H, W)
+                "images": torch.tensor(
+                    ep["image_dataset"][true_start:true_end], dtype=torch.float32
+                ) / 255.0,
                 "proprio": torch.tensor(
                     ep["proprio"][w_start:w_end], dtype=torch.float32
                 ),  # (W, 13)
