@@ -177,7 +177,7 @@ def train(args):
             .clone()
         )
 
-        R_start_clean = orthonormalize_rotation(R_start)
+        R_start_clean = R_start
         T_pred[..., :3, :3] = R_start_clean
         T_pred[..., :3, 3] = p_start
 
@@ -234,6 +234,7 @@ def train(args):
 
     # --- Model ---
     model = AxisModel(config).to(device)
+    model = torch.compile(model)
     config = model.config  # Get config from model (handles defaults)
     log.info("Model initialized.")
 
