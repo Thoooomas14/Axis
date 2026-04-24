@@ -253,6 +253,7 @@ def train(args):
         split="train",
         split_start=0.0,
         split_end=1.0,
+        mix_episodes=8
     ) -> tuple[torch.utils.data.DataLoader, LocalDataLoader | RTXStreamLoader]:
         """Factory function to create/recreate dataloader with specified params."""
 
@@ -276,7 +277,7 @@ def train(args):
                 split_start=split_start,
                 split_end=split_end,
                 max_episodes=args.max_episodes,
-                mix_episodes=args.mix_episodes,
+                mix_episodes=mix_episodes,
                 ram_usage_limit=args.ram_limit,
             )
             # Local loader supports multi-worker
@@ -299,7 +300,7 @@ def train(args):
                 shuffle_buffer_size=shuffle_buffer,
                 use_subprocess=args.use_subprocess,
                 queue_size=64,
-                mix_episodes=args.mix_episodes,
+                mix_episodes=mix_episodes,
                 ram_usage_limit=args.ram_limit,
                 max_episodes=args.max_episodes,
             )
@@ -328,6 +329,7 @@ def train(args):
         split=train_split,
         split_start=0.0,
         split_end=args.train_split_pct,
+        mix_episodes=args.mix_episodes
     )
     if args.dataset == "droid":
         avg_episode_length = 250
@@ -363,6 +365,7 @@ def train(args):
         split=val_split,
         split_start=args.train_split_pct,
         split_end=1.0,
+        mix_episodes=1
     )
 
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
@@ -856,6 +859,8 @@ def train(args):
                         torch.cuda.empty_cache()
                         optimizer.zero_grad(set_to_none=True)
 
+                        model.train()
+
                         if consecutive_cuda_oom >= max_consecutive_ooms:
                             if microBatchSize > MIN_BATCH_SIZE:
                                 microBatchSize = max(
@@ -893,6 +898,8 @@ def train(args):
                             torch.cuda.empty_cache()
                             optimizer.zero_grad(set_to_none=True)
 
+                            model.train()
+
                             if consecutive_cuda_oom >= max_consecutive_ooms:
                                 if microBatchSize > MIN_BATCH_SIZE:
                                     microBatchSize = max(
@@ -926,6 +933,8 @@ def train(args):
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                         optimizer.zero_grad(set_to_none=True)
+
+                        model.train()
 
                         if consecutive_ram_oom >= max_consecutive_ooms:
                             # First try reducing shuffle buffer
@@ -1228,7 +1237,7 @@ if __name__ == "__main__":
         "--val_interval", type=int, default=5000, help="Steps between validation"
     )
     parser.add_argument(
-        "--val_batch_size", type=int, default=0, help="Validation batch size"
+        "--val_batch_size", type=int, default=1, help="Validation batch size"
     )
     parser.add_argument(
         "--val_batches", type=int, default=50, help="Batches per validation run"
