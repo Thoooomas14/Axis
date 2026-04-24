@@ -34,6 +34,8 @@ from imitation.utils.ema import EMA
 # Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
 tf.config.set_visible_devices([], "GPU")
 
+# Set PyTorch matmul precision to high for better performance on Ampere+ GPUs (can be overridden by user args if needed)
+torch.set_float32_matmul_precision('high')
 
 # --- Logging Setup ---
 def setup_logging(verbose: int = 1):
