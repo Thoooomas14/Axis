@@ -48,25 +48,12 @@ class VisionEncoder(nn.Module):
             trust_repo=True,
         ))
 
-        self.unidepthv2 = cast(nn.Module, torch.hub.load(
-            repo_or_dir="lpiccinelli-eth/UniDepth",
-            model="UniDepth",
-            version="v2",
-            backbone="vits14",
-            pretrained=pretrained,
-            trust_repo=True,
-        ))
-
         for param in self.dinov2.parameters():
             param.requires_grad = False
-        for param in self.unidepthv2.parameters():
-            param.requires_grad = False
 
-        setattr(self.unidepthv2, "resolution_level", 0.0)  # noqa: B010
-
-        # 384 (DINO) + 1 (unidepth) = 385
+        # 384 (DINO)
         self.fusion_block = nn.Sequential(
-            nn.Conv2d(385, 256, kernel_size=3, padding=1),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, 64, kernel_size=3, padding=1),
@@ -102,13 +89,7 @@ class VisionEncoder(nn.Module):
                 dino_out["x_norm_patchtokens"].permute(0, 2, 1).reshape(B, 384, 16, 16)
             )  # Turn into 384 chanels and 16x16 spatial map
 
-            uni_out = self.unidepthv2.infer(x)  # type: ignore
-            depth = uni_out["depth"]  # [B, 1, H, W]
-            depth_feats = self.depth_pool(depth)  # [B, 1, 16, 16]
-
-        combined = torch.cat([dino_feats, depth_feats], dim=1)
-
-        fused = self.fusion_block(combined)  # [B, 64, 4, 4]
+        fused = self.fusion_block(dino_feats)  # [B, 64, 4, 4]
         fused_flat = torch.flatten(fused, 1)  # [B, 1024]
 
         fused_flat = torch.cat(
