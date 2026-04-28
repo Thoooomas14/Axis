@@ -7,7 +7,7 @@ import time
 from gymnasium.wrappers import RecordVideo
 from scipy.spatial.transform import Rotation as R
 import numpy as np
-
+import torch
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -46,71 +46,56 @@ except ImportError:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
 
+# =========================================================================
+# SETUP ARGPARSE AND LAUNCH THE SIMULATION APP GLOBALLY FIRST
+# =========================================================================
+parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
+parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
+parser.add_argument("--robot", type=str, default="franka", choices=["franka", "google"], help="Robot type")
+parser.add_argument("--steps", type=int, default=1000, help="Max steps")
+parser.add_argument("--video", action="store_true", help="Record video")
+parser.add_argument("--model_refresh", type=float, default=30, help="Control frequency Hz")
+parser.add_argument("--chunk_size", type=int, default=10, help="Action chunk size used in model")
+parser.add_argument("--random_weights", action="store_true", help="Use random weights")
+parser.add_argument("--ignore_requery", action="store_true", help="Ignore model requery requests")
+parser.add_argument("--ensemble_k", type=float, default=0.01, help="Exponential weighting decay")
+
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args()
+
+# Launch App before any Torch imports
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+
+# =========================================================================
+# NOW IMPORT PYTORCH AND CUSTOM MODULES (CUDA context is now safe)
+# =========================================================================
+import torch
+from src.inference import AxisInference
+from src.utils.rotation_utils import quaternion_to_rotation_6d
+from imitation.data.goal_oracle import GoalOracle
+
+from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
+from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
+from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg
+
+
+# =========================================================================
+# GLOBAL HELPER FUNCTIONS
+# =========================================================================
 def quaternion_to_rot6d_numpy(quat_xyzw):
     """Helper to convert numpy quat [x,y,z,w] to 6D."""
-    # Using torch utility
+    # Torch is globally available here!
     q_tensor = torch.tensor(quat_xyzw, dtype=torch.float32)
     r6 = quaternion_to_rotation_6d(q_tensor).numpy()
     return r6
 
 
+# =========================================================================
+# MAIN LOOP
+# =========================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
-    parser.add_argument(
-        "--checkpoint", type=str, default=None, help="Path to model checkpoint"
-    )
-    parser.add_argument(
-        "--robot",
-        type=str,
-        default="franka",
-        choices=["franka", "google"],
-        help="Robot type",
-    )
-    parser.add_argument("--steps", type=int, default=1000, help="Max steps")
-    parser.add_argument("--video", action="store_true", help="Record video")
-    parser.add_argument(
-        "--model_refresh", type=float, default=30, help="Control frequency Hz"
-    )
-    parser.add_argument(
-        "--chunk_size", type=int, default=10, help="Action chunk size used in model"
-    )
-    parser.add_argument(
-        "--random_weights",
-        action="store_true",
-        help="Use random weights (no checkpoint)",
-    )
-    parser.add_argument(
-        "--ignore_requery", action="store_true", help="Ignore model requery requests"
-    )
-
-    parser.add_argument(
-        "--ensemble_k",
-        type=float,
-        default=0.01,
-        help="Exponential weighting decay for ensembling",
-    )
-
-    AppLauncher.add_app_launcher_args(parser)
-    args = parser.parse_args()
-
-    # Launch App
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
-
-    import torch
-
-    from src.inference import AxisInference
-    from src.utils.rotation_utils import quaternion_to_rotation_6d
-    from imitation.data.goal_oracle import GoalOracle
-
-    try:
-        from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
-        from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
-        from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg
-    except ImportError as e:
-        print(f"ERROR: Failed to import my_robot_ext: {e}")
-        simulation_app.close()
-        sys.exit(1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
