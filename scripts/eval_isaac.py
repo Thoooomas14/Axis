@@ -102,6 +102,7 @@ def main():
 
     # --- Load Axis V2 Inference ---
     print(f"Loading AxisInference from {args.checkpoint}...")
+    # TODO: Save/load config from checkpoint for robustness with custom configs
     config = 'AxisV2'
 
     try:
@@ -142,7 +143,8 @@ def main():
             )
 
         # Wrapper now returns 13D proprio
-        env = AxisObservationWrapper(env, window_size=10, device=device)
+        # Use model's window_size to match training config
+        env = AxisObservationWrapper(env, window_size=agent.config.get("window_size", 10), device=device)
     except Exception as e:
         print(f"Error initializing environment: {e}")
         simulation_app.close()

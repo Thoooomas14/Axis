@@ -3,29 +3,6 @@ import gymnasium as gym
 import isaaclab.utils.math as math_utils
 
 
-def _quat_to_rot6d(quat_xyzw):
-    """
-    Convert (B, 4) quaternion [x,y,z,w] to (B, 6) rotation 6D.
-    Inlined to avoid cross-module dependency issues in Isaac Sim extensions.
-    """
-    # Normalize
-    quat = quat_xyzw / (torch.norm(quat_xyzw, dim=-1, keepdim=True) + 1e-8)
-    x, y, z, w = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
-
-    # First column of rotation matrix
-    r00 = 1 - 2 * (y * y + z * z)
-    r10 = 2 * (x * y + z * w)
-    r20 = 2 * (x * z - y * w)
-
-    # Second column
-    r01 = 2 * (x * y - z * w)
-    r11 = 1 - 2 * (x * x + z * z)
-    r21 = 2 * (y * z + x * w)
-
-    # Stack columns (B, 6)
-    return torch.stack([r00, r10, r20, r01, r11, r21], dim=-1)
-
-
 class AxisObservationWrapper(gym.Wrapper):
     """
     Wraps the Isaac Lab environment to provide history-windowed observations
@@ -33,7 +10,7 @@ class AxisObservationWrapper(gym.Wrapper):
 
     Returns:
         images: (B, Window, C, H, W)
-        proprio: (B, Window, 10) -> [Pos(3), Rot6D(6), Gripper(1)]
+        proprio: (B, Window, 13) -> [Rot9(9), Pos_mm(3), Gripper(1)]
     """
 
     def __init__(self, env, window_size=8, device="cpu"):

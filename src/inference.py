@@ -204,17 +204,18 @@ class AxisInference:
         self.current_step += 1
 
         # 3. Safety Clean (Clamp Twist)
-        # Linear Velocity (0:3) - PyPose Convention
+        # PyPose se3 Convention: [ω(3), v(3), grip(1)]
+        # Angular Velocity (0:3)
         action_twist_smooth[:3] = np.clip(
             action_twist_smooth[:3],
-            -self.config.get("max_pos_delta", 10.0),
-            self.config.get("max_pos_delta", 10.0),
-        )
-        # Angular Velocity (3:6)
-        action_twist_smooth[3:6] = np.clip(
-            action_twist_smooth[3:6],
             -self.config.get("max_rot_delta", 0.1),
             self.config.get("max_rot_delta", 0.1),
+        )
+        # Linear Velocity (3:6)
+        action_twist_smooth[3:6] = np.clip(
+            action_twist_smooth[3:6],
+            -self.config.get("max_pos_delta", 10.0),
+            self.config.get("max_pos_delta", 10.0),
         )
 
         # 4. Integrate to Absolute Pose
