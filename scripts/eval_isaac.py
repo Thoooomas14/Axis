@@ -197,16 +197,17 @@ def main():
                 # Construct 13D Target Pose
                 target_pose_13d = np.zeros(13, dtype=np.float32)
 
-                # Rotation: Downward [0,1,0,0] xyzw -> 180 deg around Y
-                # This aligns the gripper opposite to X?
-                target_quat_xyzw = np.array([0.0, 1.0, 0.0, 0.0])
+                # Rotation: Downward → 180° around X axis
+                # DROID data shows Euler ≈ [170°, -8°, 2°] for downward gripper
+                # Pure 180° around X in xyzw: [1, 0, 0, 0]
+                target_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
                 target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
 
                 target_pose_13d[:9] = target_rot
                 target_pose_13d[9:12] = (
                     target_pos_model * 1000.0
                 )  # Meters -> Millimeters
-                target_pose_13d[12] = 1.0  # Close gripper
+                target_pose_13d[12] = 0.0  # Close gripper (DROID: 0=closed, 1=open)
 
                 # Encode Goal
                 # Task 1: Pick
