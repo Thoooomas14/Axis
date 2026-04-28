@@ -8,8 +8,8 @@ matplotlib
 pandas
 scipy
 apache_beam
-torchvision=0.17.1
-torchaudio=2.2.1
+torchvision==0.17.1
+torchaudio==2.2.1
 pytest
 flake8
 pyyaml

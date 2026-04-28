@@ -117,17 +117,7 @@ def main():
 
     # --- Load Axis V2 Inference ---
     print(f"Loading AxisInference from {args.checkpoint}...")
-    config = {
-        "device": device,
-        "proprio_dim": 13,  # 13D: [R_flat(9), p(3), g(1)]
-        "action_dim": 7,  # 7D: [v(3), w(3), g(1)] Twist
-        "goal_dim": 38,  # 38D Goal
-        "embed_dim": 256,
-        "window_size": 10,
-        "chunk_size": args.chunk_size,
-        "max_pos_delta": 10.0,  # mm/step limit (approx 20cm/s at 20Hz)
-        "max_rot_delta": 0.1,
-    }
+    config = 'AxisV2'
 
     try:
         agent = AxisInference(
