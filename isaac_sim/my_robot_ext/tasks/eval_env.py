@@ -62,8 +62,8 @@ class AxisSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.5, 0.0, -0.025)
-        ),  # Top surface at Z=0
+            pos=(0.5, 0.0, 0.175)
+        ),  # Top surface at Z=0.2m (200mm)
     )
 
     # 3. Lights
@@ -100,7 +100,7 @@ class AxisSceneCfg(InteractiveSceneCfg):
                 diffuse_color=(1.0, 0.0, 0.0), metallic=0.2
             ),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.2, 0.05)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.0, 0.225)), # Z=225mm, Y=0mm (within DROID bounds)
     )
     # 6. Camera
     camera = CameraCfg(

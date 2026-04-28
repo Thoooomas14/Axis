@@ -236,7 +236,6 @@ def main():
             if (
                 current_time - last_pred_time
             ) >= delta_pred_time or last_pred_time == 0:
-                print("Model Prediction Called!", flush=True)
                 model_run = True
                 last_pred_time = current_time
                 batch_result = agent.predict(
