@@ -85,6 +85,12 @@ parser.add_argument("--mode", type=str, default="gt",
                     choices=["gt", "predicted", "both", "diagnostic"],
                     help="gt=replay ground truth, predicted=replay model predictions, "
                          "both=print comparison, diagnostic=print data without sim")
+parser.add_argument("--image_source", type=str, default="dataset",
+                    choices=["dataset", "sim"],
+                    help="Source of images for predicted/both modes")
+parser.add_argument("--proprio_source", type=str, default="dataset",
+                    choices=["dataset", "sim"],
+                    help="Source of proprioception for predicted/both modes")
 parser.add_argument("--steps", type=int, default=200,
                     help="Max steps to replay")
 parser.add_argument("--speed", type=float, default=1.0,
@@ -412,22 +418,24 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     env.close()
 
 
-def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed):
-    """Replay open-loop model predictions in Isaac Sim using ground truth inputs."""
+def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset"):
+    """Replay open-loop model predictions in Isaac Sim using specified inputs."""
     import time
     from src.inference import AxisInference
     from imitation.data.goal_oracle import GoalOracle
+    from isaac_sim.my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Setup environment
     env_cfg = AxisEvalEnvCfg()
     env_cfg.robot = FrankaCfg()
-    env = AxisEvalEnv(cfg=env_cfg, render_mode=None)
+    env = AxisEvalEnv(cfg=env_cfg, render_mode="rgb_array")
+    env = AxisObservationWrapper(env, device=device)
 
     obs, info = env.reset()
     print(f"\n{'='*70}")
-    print("REPLAYING MODEL PREDICTIONS IN ISAAC SIM (OPEN LOOP)")
+    print(f"REPLAYING PREDICTIONS (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})")
     print(f"{'='*70}")
 
     # Initialize Agent
@@ -440,11 +448,18 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
 
     # Encode Goal
     oracle = GoalOracle(output_dim=38)
-    initial_pose_13d = props[start_frame]
+    
+    # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
+    
+    # Initial pose depends on the proprio source
+    if proprio_source == "sim":
+        initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
+    else:
+        initial_pose_13d = props[start_frame]
 
     # Guess task type from gripper transition
-    start_grip = initial_pose_13d[12]
+    start_grip = props[start_frame][12]
     end_grip = target_pose_13d[12]
     task_type = 2  # Default to Pick (Close)
     if start_grip < 0.5 and end_grip > 0.5:
@@ -460,7 +475,7 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     window_size = 10
 
     for i in range(start_frame, end_frame):
-        # Create Sliding Window
+        # Create Sliding Window for dataset inputs
         if i < window_size:
             w_start = 0
             w_end = i + 1
@@ -471,16 +486,28 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
         current_imgs = imgs[w_start:w_end]
         current_props = props[w_start:w_end]
 
-        # Pad if needed (e.g. at the beginning)
+        # Pad dataset inputs if needed
         if len(current_imgs) < window_size:
             pad_len = window_size - len(current_imgs)
             current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
             current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
 
+        # Select Image Source
+        if image_source == "sim":
+            final_imgs = obs["images"][0].cpu().numpy()
+        else:
+            final_imgs = current_imgs
+
+        # Select Proprio Source
+        if proprio_source == "sim":
+            final_props = obs["proprio"][0].cpu().numpy()
+        else:
+            final_props = current_props
+
         # Predict next action
         batch_result = agent.predict(
-            current_imgs,
-            current_props,
+            final_imgs,
+            final_props,
             goal_vector,
         )
 
@@ -520,22 +547,24 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     print(f"\nReplay complete. {end_frame - start_frame} frames predicted and replayed.")
     env.close()
 
-def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed):
+def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset"):
     """Replay ground truth in Sim, but run model inference at each step to compute 1-step prediction error (Teacher Forcing)."""
     import time
     from src.inference import AxisInference
     from imitation.data.goal_oracle import GoalOracle
+    from isaac_sim.my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Setup environment
     env_cfg = AxisEvalEnvCfg()
     env_cfg.robot = FrankaCfg()
-    env = AxisEvalEnv(cfg=env_cfg, render_mode=None)
+    env = AxisEvalEnv(cfg=env_cfg, render_mode="rgb_array")
+    env = AxisObservationWrapper(env, device=device)
 
     obs, info = env.reset()
     print(f"\n{'='*70}")
-    print("REPLAYING BOTH (TEACHER FORCING) IN ISAAC SIM")
+    print(f"REPLAYING BOTH (TEACHER FORCING) (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})")
     print(f"{'='*70}")
 
     # Initialize Agent
@@ -548,11 +577,18 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
 
     # Encode Goal
     oracle = GoalOracle(output_dim=38)
-    initial_pose_13d = props[start_frame]
+    
+    # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
+    
+    # Initial pose depends on the proprio source
+    if proprio_source == "sim":
+        initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
+    else:
+        initial_pose_13d = props[start_frame]
 
     # Guess task type from gripper transition
-    start_grip = initial_pose_13d[12]
+    start_grip = props[start_frame][12]
     end_grip = target_pose_13d[12]
     task_type = 2  # Default to Pick (Close)
     if start_grip < 0.5 and end_grip > 0.5:
@@ -584,10 +620,22 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
             current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
             current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
 
+        # Select Image Source
+        if image_source == "sim":
+            final_imgs = obs["images"][0].cpu().numpy()
+        else:
+            final_imgs = current_imgs
+
+        # Select Proprio Source
+        if proprio_source == "sim":
+            final_props = obs["proprio"][0].cpu().numpy()
+        else:
+            final_props = current_props
+
         # Predict next action
         batch_result = agent.predict(
-            current_imgs,
-            current_props,
+            final_imgs,
+            final_props,
             goal_vector,
         )
 
@@ -642,13 +690,13 @@ def main():
             print("ERROR: --checkpoint required for --mode both")
             sys.exit(1)
         print_diagnostics(props)
-        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed)
+        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source)
     elif args.mode == "predicted":
         if args.checkpoint is None:
             import sys
             print("ERROR: --checkpoint required for --mode predicted")
             sys.exit(1)
-        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed)
+        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source)
 
     if args.mode != "diagnostic":
         simulation_app.close()
