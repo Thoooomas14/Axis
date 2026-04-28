@@ -246,7 +246,28 @@ def main():
                 )
                 requery_flag_model = batch_result.get("requery", False)
                 requery_prob = batch_result.get("requery_prob", 0.0)
-                # print(f" Position: {batch_result['position']}")
+
+                # === DIAGNOSTIC DUMP (first 3 predictions) ===
+                if i < 30 and model_run:
+                    prop_last = proprio_13d_np[0, -1]  # Last frame in window
+                    print(f"\n{'='*60}")
+                    print(f"DIAGNOSTIC — Step {i}")
+                    print(f"{'='*60}")
+                    print(f"  INPUT proprio[-1] rot9:  {prop_last[:9].round(3)}")
+                    print(f"  INPUT proprio[-1] pos:   {prop_last[9:12].round(1)} mm")
+                    print(f"  INPUT proprio[-1] grip:  {prop_last[12]:.4f}")
+                    print(f"  INPUT goal[0:3] (task):  {goal_vector[0, :3]}")
+                    print(f"  INPUT goal[3:16] (start): pos={goal_vector[0, 12:15].round(1)} grip={goal_vector[0, 15]:.2f}")
+                    print(f"  INPUT goal[16:29] (tgt):  pos={goal_vector[0, 25:28].round(1)} grip={goal_vector[0, 28]:.2f}")
+                    print(f"  INPUT image range:       [{images_np.min():.3f}, {images_np.max():.3f}]")
+                    print(f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][:3].round(4)}")
+                    print(f"  OUTPUT twist v (lin):    {batch_result['action_twist'][3:6].round(4)}")
+                    print(f"  OUTPUT twist grip Δ:     {batch_result['action_twist'][6]:.4f}")
+                    print(f"  OUTPUT abs pos (mm):     {batch_result['position'].round(1)}")
+                    print(f"  OUTPUT abs grip:         {batch_result['gripper']:.4f}")
+                    twist_mag = np.linalg.norm(batch_result['action_twist'][:6])
+                    print(f"  OUTPUT twist magnitude:  {twist_mag:.4f}")
+                    print(f"{'='*60}\n")
 
             if i == 0:
                 # Debug: Save what the model sees
