@@ -7,7 +7,7 @@ import time
 from gymnasium.wrappers import RecordVideo
 from scipy.spatial.transform import Rotation as R
 import numpy as np
-import torch
+
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -45,12 +45,6 @@ except ImportError:
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
-
-# Import V2 Components
-from src.inference import AxisInference
-from src.utils.rotation_utils import quaternion_to_rotation_6d
-from imitation.data.goal_oracle import GoalOracle
-
 
 def quaternion_to_rot6d_numpy(quat_xyzw):
     """Helper to convert numpy quat [x,y,z,w] to 6D."""
@@ -102,6 +96,12 @@ def main():
     # Launch App
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
+
+    import torch
+
+    from src.inference import AxisInference
+    from src.utils.rotation_utils import quaternion_to_rotation_6d
+    from imitation.data.goal_oracle import GoalOracle
 
     try:
         from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
