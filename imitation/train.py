@@ -533,7 +533,7 @@ def train(args):
                         steps_per_epoch_actual  # Actual count from previous epoch
                     )
 
-                pbar = tqdm(total=epoch_total, desc=f"Epoch {epoch + 1}", smoothing=0.0)
+                pbar = tqdm(total=epoch_total, initial=start_step, desc=f"Epoch {epoch + 1}", smoothing=0.0)
                 monitor = ThroughputMonitor(window_size=100, total_steps=epoch_total)
 
             for full_batch in dataloader:
