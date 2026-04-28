@@ -318,9 +318,17 @@ def main():
                 [act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]]
             )
 
-            # Gripper Cmd — DROID convention: model output > 0.5 means "open"
+            # Gripper Cmd — with hysteresis to prevent oscillation
+            # DROID convention: > 0.5 = open, < 0.5 = closed
             # BinaryJointPositionAction: -1.0 = open, 1.0 = close
-            act_grip_cmd = -1.0 if act_grip > 0.5 else 1.0
+            # Hysteresis: once open, stay open until < 0.3; once closed, stay closed until > 0.7
+            if not hasattr(main, '_gripper_state'):
+                main._gripper_state = 1.0  # Start closed
+            if main._gripper_state == 1.0 and act_grip > 0.7:
+                main._gripper_state = -1.0  # Switch to open
+            elif main._gripper_state == -1.0 and act_grip < 0.3:
+                main._gripper_state = 1.0   # Switch to closed
+            act_grip_cmd = main._gripper_state
 
             # Compose
             env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [act_grip_cmd]])

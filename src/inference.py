@@ -203,20 +203,22 @@ class AxisInference:
         # Increment internal step counter
         self.current_step += 1
 
-        # 3. Safety Clean (Clamp Twist)
+        # 3. Safety Clamp (very permissive — make_gif uses NO clamp)
         # PyPose se3 Convention: [ω(3), v(3), grip(1)]
+        # NOTE: These defaults must be large enough to NOT saturate.
+        # The model's angular outputs were hitting the old 0.1 limit EVERY step,
+        # destroying the twist direction and causing constant downward drift.
+        max_rot = self.config.get("max_rot_delta", 1.0)   # Was 0.1 — far too tight
+        max_pos = self.config.get("max_pos_delta", 50.0)   # Was 10.0
+
         # Angular Velocity (0:3)
-        action_twist_smooth[:3] = np.clip(
-            action_twist_smooth[:3],
-            -self.config.get("max_rot_delta", 0.1),
-            self.config.get("max_rot_delta", 0.1),
-        )
+        ang_before = action_twist_smooth[:3].copy()
+        action_twist_smooth[:3] = np.clip(action_twist_smooth[:3], -max_rot, max_rot)
+        if np.any(np.abs(ang_before) > max_rot):
+            logging.debug(f"Angular clipped: {ang_before.round(3)} → {action_twist_smooth[:3].round(3)}")
+
         # Linear Velocity (3:6)
-        action_twist_smooth[3:6] = np.clip(
-            action_twist_smooth[3:6],
-            -self.config.get("max_pos_delta", 10.0),
-            self.config.get("max_pos_delta", 10.0),
-        )
+        action_twist_smooth[3:6] = np.clip(action_twist_smooth[3:6], -max_pos, max_pos)
 
         # 4. Integrate to Absolute Pose
         # Current pose is the last one in the window
