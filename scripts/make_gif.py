@@ -103,20 +103,11 @@ def make_gif(args):
         torch.cuda.empty_cache()
 
     # --- V2 Configuration ---
-    config = {
-        "device": device,
-        "goal_dim": 38,
-        "embed_dim": 256,
-        "num_heads": 4,
-        "num_layers": 4,
-        "proprio_dim": 13,  # 13D Pose
-        "action_dim": 7,  # 7D Twist
-        "use_rope": True,
-        "chunk_size": 10,
-    }
+    config = 'AxisV2'
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
+    config = model.config
 
     if args.random_weights:
         print("WARNING: Using Random Weights.")
