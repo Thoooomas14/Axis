@@ -412,6 +412,214 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     env.close()
 
 
+def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed):
+    """Replay open-loop model predictions in Isaac Sim using ground truth inputs."""
+    import time
+    from src.inference import AxisInference
+    from imitation.data.goal_oracle import GoalOracle
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Setup environment
+    env_cfg = AxisEvalEnvCfg()
+    env_cfg.robot = FrankaCfg()
+    env = AxisEvalEnv(cfg=env_cfg, render_mode=None)
+
+    obs, info = env.reset()
+    print(f"\n{'='*70}")
+    print("REPLAYING MODEL PREDICTIONS IN ISAAC SIM (OPEN LOOP)")
+    print(f"{'='*70}")
+
+    # Initialize Agent
+    print(f"Loading checkpoint from: {checkpoint_dir} ...")
+    agent = AxisInference(
+        checkpoint_dir=checkpoint_dir,
+        device=device,
+        window_size=10,
+    )
+
+    # Encode Goal
+    oracle = GoalOracle(output_dim=38)
+    initial_pose_13d = props[start_frame]
+    target_pose_13d = props[-1]
+
+    # Guess task type from gripper transition
+    start_grip = initial_pose_13d[12]
+    end_grip = target_pose_13d[12]
+    task_type = 2  # Default to Pick (Close)
+    if start_grip < 0.5 and end_grip > 0.5:
+        task_type = 1  # Open -> Place
+    elif start_grip > 0.5 and end_grip < 0.5:
+        task_type = 2  # Close -> Pick
+
+    g_emb = oracle.encode_goal(task_type, initial_pose_13d, target_pose_13d, object_props=None)
+    goal_vector = g_emb.numpy()
+
+    end_frame = min(start_frame + max_steps, len(props))
+    delay = (1.0 / 30.0) / speed
+    window_size = 10
+
+    for i in range(start_frame, end_frame):
+        # Create Sliding Window
+        if i < window_size:
+            w_start = 0
+            w_end = i + 1
+        else:
+            w_start = i - window_size + 1
+            w_end = i + 1
+
+        current_imgs = imgs[w_start:w_end]
+        current_props = props[w_start:w_end]
+
+        # Pad if needed (e.g. at the beginning)
+        if len(current_imgs) < window_size:
+            pad_len = window_size - len(current_imgs)
+            current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
+            current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
+
+        # Predict next action
+        batch_result = agent.predict(
+            current_imgs,
+            current_props,
+            goal_vector,
+        )
+
+        act_pos_mm = batch_result["position"]
+        act_quat_xyzw = batch_result["quaternion"]
+        act_grip = batch_result["gripper"]
+
+        act_pos_sim = act_pos_mm.copy() / 1000.0
+        act_quat_wxyz = np.array(
+            [act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]]
+        )
+        grip_cmd = -1.0 if act_grip > 0.5 else 1.0
+
+        env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [grip_cmd]])
+        env_action_t = torch.tensor(env_action, device=device, dtype=torch.float32).unsqueeze(0)
+
+        # Step Simulation
+        obs, rew, terminated, truncated, info = env.step(env_action_t)
+
+        # Get GT action for comparison
+        gt_pos_m, gt_quat_wxyz, gt_grip_cmd, _ = pose_13d_to_sim_action(props[i])
+
+        if i % 10 == 0:
+            frame_idx = i - start_frame
+            print(f"\nStep {frame_idx:3d} (Frame {i})")
+            print(f"  GT   pos (m): {gt_pos_m.round(4)}")
+            print(f"  PRED pos (m): {act_pos_sim.round(4)}")
+            err_pos = np.linalg.norm(gt_pos_m - act_pos_sim) * 1000
+            print(f"  Pos Error:    {err_pos:.1f} mm")
+
+        if terminated.any() or truncated.any():
+            print(f"\n!!! SIM RESET at step {i - start_frame}")
+            break
+
+        time.sleep(delay)
+
+    print(f"\nReplay complete. {end_frame - start_frame} frames predicted and replayed.")
+    env.close()
+
+def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed):
+    """Replay ground truth in Sim, but run model inference at each step to compute 1-step prediction error (Teacher Forcing)."""
+    import time
+    from src.inference import AxisInference
+    from imitation.data.goal_oracle import GoalOracle
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Setup environment
+    env_cfg = AxisEvalEnvCfg()
+    env_cfg.robot = FrankaCfg()
+    env = AxisEvalEnv(cfg=env_cfg, render_mode=None)
+
+    obs, info = env.reset()
+    print(f"\n{'='*70}")
+    print("REPLAYING BOTH (TEACHER FORCING) IN ISAAC SIM")
+    print(f"{'='*70}")
+
+    # Initialize Agent
+    print(f"Loading checkpoint from: {checkpoint_dir} ...")
+    agent = AxisInference(
+        checkpoint_dir=checkpoint_dir,
+        device=device,
+        window_size=10,
+    )
+
+    # Encode Goal
+    oracle = GoalOracle(output_dim=38)
+    initial_pose_13d = props[start_frame]
+    target_pose_13d = props[-1]
+
+    # Guess task type from gripper transition
+    start_grip = initial_pose_13d[12]
+    end_grip = target_pose_13d[12]
+    task_type = 2  # Default to Pick (Close)
+    if start_grip < 0.5 and end_grip > 0.5:
+        task_type = 1  # Open -> Place
+    elif start_grip > 0.5 and end_grip < 0.5:
+        task_type = 2  # Close -> Pick
+
+    g_emb = oracle.encode_goal(task_type, initial_pose_13d, target_pose_13d, object_props=None)
+    goal_vector = g_emb.numpy()
+
+    end_frame = min(start_frame + max_steps, len(props))
+    delay = (1.0 / 30.0) / speed
+    window_size = 10
+
+    for i in range(start_frame, end_frame):
+        # Create Sliding Window for Model (up to current frame i)
+        if i < window_size:
+            w_start = 0
+            w_end = i + 1
+        else:
+            w_start = i - window_size + 1
+            w_end = i + 1
+
+        current_imgs = imgs[w_start:w_end]
+        current_props = props[w_start:w_end]
+
+        if len(current_imgs) < window_size:
+            pad_len = window_size - len(current_imgs)
+            current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
+            current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
+
+        # Predict next action
+        batch_result = agent.predict(
+            current_imgs,
+            current_props,
+            goal_vector,
+        )
+
+        act_pos_mm = batch_result["position"]
+        act_pos_sim_pred = act_pos_mm.copy() / 1000.0
+
+        # Command the robot using the Ground Truth to keep it on track
+        gt_pos_m, gt_quat_wxyz, gt_grip_cmd, _ = pose_13d_to_sim_action(props[i])
+        
+        env_action = np.concatenate([gt_pos_m, gt_quat_wxyz, [gt_grip_cmd]])
+        env_action_t = torch.tensor(env_action, device=device, dtype=torch.float32).unsqueeze(0)
+
+        # Step Simulation
+        obs, rew, terminated, truncated, info = env.step(env_action_t)
+
+        if i % 10 == 0:
+            frame_idx = i - start_frame
+            print(f"\nStep {frame_idx:3d} (Frame {i})")
+            print(f"  GT   pos (m): {gt_pos_m.round(4)}")
+            print(f"  PRED pos (m): {act_pos_sim_pred.round(4)}")
+            err_pos = np.linalg.norm(gt_pos_m - act_pos_sim_pred) * 1000
+            print(f"  Pos Error:    {err_pos:.1f} mm")
+
+        if terminated.any() or truncated.any():
+            print(f"\n!!! SIM RESET at step {i - start_frame}")
+            break
+
+        time.sleep(delay)
+
+    print(f"\nReplay complete. {end_frame - start_frame} frames analyzed.")
+    env.close()
+
 # =========================================================================
 # MAIN
 # =========================================================================
@@ -429,14 +637,18 @@ def main():
     if args.mode == "gt":
         replay_in_sim(props, args.start_frame, args.steps, args.speed)
     elif args.mode == "both":
+        if args.checkpoint is None:
+            import sys
+            print("ERROR: --checkpoint required for --mode both")
+            sys.exit(1)
         print_diagnostics(props)
-        print("\n\nTo replay in sim, re-run with --mode gt")
+        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed)
     elif args.mode == "predicted":
         if args.checkpoint is None:
+            import sys
             print("ERROR: --checkpoint required for --mode predicted")
             sys.exit(1)
-        # TODO: Run model inference on the episode data and replay predictions
-        print("Predicted mode not yet implemented. Use --mode gt first.")
+        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed)
 
     if args.mode != "diagnostic":
         simulation_app.close()
