@@ -435,6 +435,7 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     agent = AxisInference(
         checkpoint_path=checkpoint_dir,
         device=device,
+        config="AxisV2"
     )
 
     # Encode Goal
@@ -542,6 +543,7 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     agent = AxisInference(
         checkpoint_path=checkpoint_dir,
         device=device,
+        config="AxisV2"
     )
 
     # Encode Goal
