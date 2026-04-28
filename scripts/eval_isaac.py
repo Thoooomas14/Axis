@@ -210,7 +210,7 @@ def main():
                 target_pose_13d[12] = 0.0  # Close gripper (DROID: 0=closed, 1=open)
 
                 # Encode Goal
-                # Task 1: Pick
+                # Task 2: Pick (Closing Gripper). Note: Model learned Task 1=Open, Task 2=Close!
                 # Oracle handles 13D logic internally now
                 # Define Object Props for Red Cube
                 # These must match the simulated object in AxisSceneCfg
@@ -220,7 +220,7 @@ def main():
                     "size": np.array([0.05, 0.05, 0.05], dtype=np.float32),  # 5cm
                 }
                 g_emb = oracle.encode_goal(
-                    1, initial_pose_13d, target_pose_13d, object_props=obj_props
+                    2, initial_pose_13d, target_pose_13d, object_props=obj_props
                 )
                 goal_vector[0] = g_emb.numpy()
 
@@ -259,8 +259,9 @@ def main():
                     print(f"  INPUT goal[3:16] (start): pos={goal_vector[0, 12:15].round(1)} grip={goal_vector[0, 15]:.2f}")
                     print(f"  INPUT goal[16:29] (tgt):  pos={goal_vector[0, 25:28].round(1)} grip={goal_vector[0, 28]:.2f}")
                     print(f"  INPUT image range:       [{images_np.min():.3f}, {images_np.max():.3f}]")
-                    print(f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][:3].round(4)}")
-                    print(f"  OUTPUT twist v (lin):    {batch_result['action_twist'][3:6].round(4)}")
+                    # PyPose se3: [v(3), w(3)]!
+                    print(f"  OUTPUT twist v (lin):    {batch_result['action_twist'][:3].round(4)}")
+                    print(f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][3:6].round(4)}")
                     print(f"  OUTPUT twist grip Δ:     {batch_result['action_twist'][6]:.4f}")
                     print(f"  OUTPUT abs pos (mm):     {batch_result['position'].round(1)}")
                     print(f"  OUTPUT abs grip:         {batch_result['gripper']:.4f}")
