@@ -99,7 +99,7 @@ class AxisInference:
     def __init__(
         self,
         checkpoint_path: str,
-        config: dict,
+        config: dict | str,
         device: str = "cuda",
         random_weights=False,
         ensemble_k=0.01,
@@ -112,12 +112,13 @@ class AxisInference:
             ensemble_k: Exponential weighting factor for ensembling
         """
         self.device = device
-        self.config = config
         self.random_weights = random_weights
         self.ensemble_k = ensemble_k
 
         # Initialize Model
         self.model = AxisModel(config).to(device)
+        config = self.model.config  # Get config from model (handles defaults)
+        self.config = config
         self.model.eval()
 
         if self.random_weights:
