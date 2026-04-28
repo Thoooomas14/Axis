@@ -253,7 +253,7 @@ class AxisInference:
 
         Args:
             current_pose: (13,) [R_flat(9), pos(3), gripper(1)]
-            action_twist: (7,) [lin_vel(3), ang_vel(3), gripper_prob(1)]
+            action_twist: (7,) [ang_vel(3), lin_vel(3), gripper_delta(1)]
 
         Returns:
             next_pose: (13,)

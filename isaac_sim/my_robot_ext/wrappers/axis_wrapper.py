@@ -161,9 +161,11 @@ class AxisObservationWrapper(gym.Wrapper):
         # Stack to (B, 9) flat
         rot9 = torch.stack([r00, r01, r02, r10, r11, r12, r20, r21, r22], dim=-1)
 
-        # Gripper
+        # Gripper — DROID convention: 1.0 = fully open, 0.0 = fully closed
+        # Franka finger joints: 0.04m = fully open, 0.0m = fully closed
+        # So g_meters / 0.04 directly maps to DROID convention (no inversion)
         g_meters = gripper_pos.mean(dim=1, keepdim=True)
-        g_norm = 1.0 - (g_meters / 0.04)
+        g_norm = g_meters / 0.04  # 0.04m (open) → 1.0, 0.0m (closed) → 0.0
         g_norm = torch.clamp(g_norm, 0.0, 1.0)
 
         # Output: [Rot9(9), Pos_mm(3), Gripper(1)] -> 13D

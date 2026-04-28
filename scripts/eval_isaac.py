@@ -296,8 +296,9 @@ def main():
                 [act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]]
             )
 
-            # Gripper Cmd
-            act_grip_cmd = 1.0 if act_grip > 0.5 else -1.0
+            # Gripper Cmd — DROID convention: model output > 0.5 means "open"
+            # BinaryJointPositionAction: -1.0 = open, 1.0 = close
+            act_grip_cmd = -1.0 if act_grip > 0.5 else 1.0
 
             # Compose
             env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [act_grip_cmd]])
@@ -318,7 +319,7 @@ def main():
                 print(f"  Target  Pos (m) : {act_pos_sim.round(3)}")
                 print(f"  Target  Rot (deg): {r_euler.round(1)} (XYZ)")
                 print(
-                    f"  Target  Grip    : {act_grip:.3f} ({'Close' if act_grip > 0.5 else 'Open'})"
+                    f"  Target  Grip    : {act_grip:.3f} ({'Open' if act_grip > 0.5 else 'Close'})"
                 )
                 print(f"  Requery Flag    : {requery_flag_model}")
                 if terminated.any() or truncated.any():
