@@ -111,22 +111,22 @@ def _episode_worker(
             rotmat = quat_to_rotmat(quat)
 
         # Gripper state
-        g = np.float16(0.0)
+        g = np.float32(0.0)
         if "gripper_closed" in obs:
-            g = obs["gripper_closed"].numpy().astype(np.float16)
+            g = obs["gripper_closed"].numpy().astype(np.float32)
         elif "gripper_position" in obs:
-            g = obs["gripper_position"].numpy().astype(np.float16)
+            g = obs["gripper_position"].numpy().astype(np.float32)
         elif "gripper_state" in obs:
-            g = obs["gripper_state"].numpy().astype(np.float16)
+            g = obs["gripper_state"].numpy().astype(np.float32)
 
         if not np.isscalar(g):
             g = g.item()
-            g = np.float16(g)
+            g = np.float32(g)
 
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
-        pose13 = np.zeros(13, dtype=np.float16)
-        pose13[:9] = rotmat.flatten().astype(np.float16)
-        pose13[9:12] = pos.astype(np.float16)
+        pose13 = np.zeros(13, dtype=np.float32)
+        pose13[:9] = rotmat.flatten()
+        pose13[9:12] = pos
         pose13[12] = g
         return pose13
 
@@ -324,6 +324,7 @@ def _episode_worker(
 
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
+            props[:, 9:12] *= 1000.0  # Scale positions from meters to millimeters
 
             # Skip stalled Start
             if len(props) > 1:
@@ -701,22 +702,22 @@ class RTXStreamLoader(IterableDataset):
             rotmat = self._quat_to_rotmat(quat)
 
         # Gripper state
-        g = np.float16(0.0)
+        g = np.float32(0.0)
         if "gripper_closed" in obs:
-            g = obs["gripper_closed"].numpy().astype(np.float16)
+            g = obs["gripper_closed"].numpy().astype(np.float32)
         elif "gripper_position" in obs:
-            g = obs["gripper_position"].numpy().astype(np.float16)
+            g = obs["gripper_position"].numpy().astype(np.float32)
         elif "gripper_state" in obs:
-            g = obs["gripper_state"].numpy().astype(np.float16)
+            g = obs["gripper_state"].numpy().astype(np.float32)
 
         if not np.isscalar(g):
             g = g.item()
-            g = np.float16(g)
+            g = np.float32(g)
 
         # 13D pose: [R_flat(9), pos(3), gripper(1)]
-        pose13 = np.zeros(13, dtype=np.float16)
-        pose13[:9] = rotmat.flatten().astype(np.float16)
-        pose13[9:12] = pos.astype(np.float16)
+        pose13 = np.zeros(13, dtype=np.float32)
+        pose13[:9] = rotmat.flatten()
+        pose13[9:12] = pos
         pose13[12] = g
         return pose13
 
@@ -938,6 +939,7 @@ class RTXStreamLoader(IterableDataset):
 
             imgs = np.array(imgs, dtype=np.float32)
             props = np.array(props, dtype=np.float32)
+            props[:, 9:12] *= 1000.0  # Scale positions from meters to millimeters
 
             # Skip initial stalled frames where arm isn't moving
             # Threshold: 0.1 cm (1mm) movement between frames (positions already scaled to cm)

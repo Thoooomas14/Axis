@@ -84,22 +84,22 @@ def get_pose(obs) -> np.ndarray:
         rotmat = quat_to_rotmat(quat)
 
     # Gripper state
-    g = np.float16(0.0)
+    g = np.float32(0.0)
     if "gripper_closed" in obs:
-        g = obs["gripper_closed"].numpy().astype(np.float16)
+        g = obs["gripper_closed"].numpy().astype(np.float32)
     elif "gripper_position" in obs:
-        g = obs["gripper_position"].numpy().astype(np.float16)
+        g = obs["gripper_position"].numpy().astype(np.float32)
     elif "gripper_state" in obs:
-        g = obs["gripper_state"].numpy().astype(np.float16)
+        g = obs["gripper_state"].numpy().astype(np.float32)
 
     if not np.isscalar(g):
         g = g.item()
-        g = np.float16(g)
+        g = np.float32(g)
 
     # 13D pose: [R_flat(9), pos(3), gripper(1)]
-    pose13 = np.zeros(13, dtype=np.float16)
-    pose13[:9] = rotmat.flatten().astype(np.float16)
-    pose13[9:12] = pos.astype(np.float16)
+    pose13 = np.zeros(13, dtype=np.float32)
+    pose13[:9] = rotmat.flatten()
+    pose13[9:12] = pos
     pose13[12] = g
     return pose13
 
@@ -346,7 +346,7 @@ def preprocess_dataset(args):
             # Stack arrays
             episode_lengths.append(len(processed_imgs))  # Track for metadata
             imgs = np.array(processed_imgs, dtype=np.uint8)  # (T, 3, H, W)
-            props = np.array(props, dtype=np.float16)  # (T, 13)
+            props = np.array(props, dtype=np.float32)  # (T, 13)
             episode_orig_size = original_sizes[0] if original_sizes else (0, 0)
 
             # Check disk space before writing (minimum 2GB buffer)
