@@ -7,7 +7,7 @@ This document visualizes the data flow and structure of the Axis V2 model.
 ```mermaid
 graph TD
     subgraph Inputs
-        IMG[("Images<br/>(B, W, 3, 128, 128)")]
+        IMG[("Images<br/>(B, W, 3, 224, 224)")]
         PROP[("Proprioception<br/>(B, W, 13)<br/>[R_flat(9), Pos, Gripper]")]
         GOAL[("Goal Embed<br/>(B, 64)")]
     end
@@ -20,7 +20,7 @@ graph TD
     end
 
     subgraph Token_Construction
-        CAT[("Per-Frame Concatenation<br/>[Proprio | Vision | Goal]<br/>128 + 256 + 128 = 512D")]
+        CAT[("Per-Frame Concatenation<br/>[Proprio | Vision | Goal]<br/>128 + 768 + 128 = 1024D")]
     end
 
     subgraph Backbone
@@ -85,7 +85,7 @@ Each timestep produces a single 512D token:
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Proprio (128D)  │  Vision (256D)  │  Goal (128D)  │
+│  Proprio (128D)  │  Vision (768D)  │  Goal (128D)  │
 └──────────────────────────────────────────────┘
                     512D total
 ```
@@ -96,7 +96,7 @@ The transformer sees a sequence of W=8 such tokens.
 
 ```mermaid
 graph LR
-    I[("Images (B, W, 3, 128, 128)")] -->|Flatten B*W| VE[("ResNet-18")]
+    I[("Images (B, W, 3, 224, 224)")] -->|Flatten B*W| VE[("ResNet-18")]
     VE -->|"(B*W, 256, H', W')"| FM[("Feature Map")]
     FM --> TL[("Token Learner")]
     TL -->|"(B*W, 1, 256)"| T[("Vision Tokens")]
@@ -146,7 +146,7 @@ During training, target = `exp(-action_loss / temperature)`.
 
 | Tensor | Shape | Description |
 |--------|-------|-------------|
-| Input Images | `(B, W, 3, 128, 128)` | RGB images |
+| Input Images | `(B, W, 3, 224, 224)` | RGB images |
 | Input Proprio | `(B, W, 13)` | 13D SE(3) poses |
 | Input Goal | `(B, 64)` | Semantic goal |
 | Vision Tokens | `(B, W, 256)` | 1 token per frame |

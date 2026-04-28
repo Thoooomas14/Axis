@@ -51,12 +51,12 @@ def visualize_requery(args):
     print("Generating Visualization...")
     for i, window in enumerate(windows):
         # Extract the last image of the window (the "current" observation)
-        # Window images shape: (8, 3, 128, 128)
+        # Window images shape: (8, 3, 224, 224)
         imgs = window["images"]  # Torch tensor or numpy? Loader yields tensors.
         if isinstance(imgs, torch.Tensor):
             imgs = imgs.numpy()
 
-        last_img = imgs[-1]  # (3, 128, 128)
+        last_img = imgs[-1]  # (3, 224, 224)
 
         # CHW -> HWC
         last_img = np.transpose(last_img, (1, 2, 0))

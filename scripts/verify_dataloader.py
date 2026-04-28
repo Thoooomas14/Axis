@@ -21,7 +21,7 @@ def create_fake_episode(length=20):
         gripper = 1.0 if i >= 10 else 0.0
 
         obs = {
-            "image": tf.zeros((128, 128, 3), dtype=tf.uint8),  # Fake image
+            "image": tf.zeros((224, 224, 3), dtype=tf.uint8),  # Fake image
             "ee_pose": tf.constant(np.random.randn(6).astype(np.float32)),
             "gripper_closed": tf.constant(np.array([gripper], dtype=np.float32)),
         }
@@ -67,7 +67,7 @@ def verify_loader_logic():
         print(f"  Action: {batch['action'].shape}")
         print(f"  Requery: {batch['requery'].shape}")
 
-        assert batch["images"].shape == (8, 3, 128, 128)
+        assert batch["images"].shape == (8, 3, 224, 224)
         assert batch["proprio"].shape == (8, 8)
         assert batch["goal"].shape == (64,)
         assert batch["action"].shape == (8,)

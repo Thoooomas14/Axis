@@ -77,7 +77,7 @@ Each batch contains (where H = `loss_horizon` and W = `window_size`):
 
 | Key | Shape | Description |
 |-----|-------|--------------|
-| `images` | `(B, W, 3, 128, 128)` | RGB images (observation window) |
+| `images` | `(B, W, 3, 224, 224)` | RGB images (observation window) |
 | `proprio` | `(B, W, 13)` | 13D SE(3) poses (observation window) |
 | `goal` | `(B, 38)` | Dynamic goal embedding |
 | `actions` | `(B, H, 7)` | 7D twist targets for future H steps |
@@ -116,7 +116,7 @@ loader = RTXStreamLoader(
 # Iterator dynamically slices batches of size 1 (loader output is (W, ...))
 iterator = iter(loader)
 for batch in iterator:
-    images = batch['images']      # (W, 3, 128, 128)
+    images = batch['images']      # (W, 3, 224, 224)
     proprio = batch['proprio']    # (W, 13)
 ```
 
@@ -145,7 +145,7 @@ python -m imitation.data.preprocessor --output ./test.h5 --max_episodes 10
 **Stored per episode:**
 | Field | Shape | Dtype |
 |-------|-------|-------|
-| images | (T, 3, 128, 128) | uint8 |
+| images | (T, 3, 224, 224) | uint8 |
 | proprio | (T, 13) | float32 |
 
 ### 2. LocalDataLoader (`imitation/data/local_loader.py`)
@@ -163,7 +163,7 @@ loader = LocalDataLoader(
 
 for batch in loader:
     # Same format as RTXStreamLoader
-    images = batch['images']      # (B, W, 3, 128, 128)
+    images = batch['images']      # (B, W, 3, 224, 224)
     proprio = batch['proprio']    # (B, W, 13)
     goal = batch['goal']          # (B, 64)
 ```

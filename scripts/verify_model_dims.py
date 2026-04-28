@@ -12,17 +12,7 @@ def verify_model():
     print("Verifying Axis Model Dimensions (SE(3) Update)...")
 
     # Config matching new requirements
-    config = {
-        "device": "cpu",
-        "proprio_dim": 7,  # 7D SE(3)
-        "action_dim": 7,  # 7D Twist
-        "goal_dim": 64,
-        "embed_dim": 128,  # Adjusted mainly by model internal logic but passed anyway
-        "hidden_dim": 128,
-        "vision_feature_dim": 256,
-        "num_heads": 4,
-        "num_layers": 2,
-    }
+    config = "AxisV2"  # This will trigger the default config with 7D proprio and 64D goal
 
     model = AxisModel(config)
     model.eval()
@@ -30,7 +20,7 @@ def verify_model():
     # Dummy Inputs
     B = 2
     W = 8  # Window size 8
-    C, H, W_img = 3, 128, 128
+    C, H, W_img = 3, 224, 224
 
     images = torch.randn(B, W, C, H, W_img)
     proprio = torch.randn(B, W, 7)  # 7D Input

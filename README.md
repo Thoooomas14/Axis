@@ -21,7 +21,7 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 
 ```
 Inputs:
-  - Images: (B, W, 3, 128, 128)     → ResNet-18 + TokenLearner → 256D
+  - Images: (B, W, 3, 224, 224)     → ResNet-18 + TokenLearner → 256D
   - Proprio: (B, W, 13)             → MLP → 128D  
   - Goal: (B, 38)                   → MLP → 128D
 

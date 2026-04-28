@@ -174,7 +174,7 @@ def make_gif(args):
             dataset_name=args.dataset,
             split="train",
             window_size=10,
-            image_size=(128, 128),
+            image_size=(224, 224),
             data_dir=args.data_dir,
             repeat=False,
             use_subprocess=False,

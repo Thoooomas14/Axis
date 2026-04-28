@@ -9,7 +9,7 @@ class AxisModel(nn.Module):
     """
     The Axis Model.
 
-    Uses a concatenated single token per timestep: [Proprio(128) | Vision(256) | Goal(128)] -> 512 dim.
+    Uses a concatenated single token per timestep: [Proprio(128) | Vision(768) | Goal(128)] -> 1024 dim.
     Predicts future trajectory from the LAST token only (Current State -> Future).
 
     Inputs:

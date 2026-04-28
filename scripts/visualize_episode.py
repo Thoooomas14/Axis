@@ -29,7 +29,7 @@ def visualize_episode(args):
             dataset_name=args.dataset,
             split="train",
             window_size=args.window_size,
-            image_size=(128, 128),
+            image_size=(224, 224),
             data_dir=args.data_dir,
             repeat=False,  # One epoch
             use_subprocess=True,

@@ -92,7 +92,7 @@ class AxisObservationWrapper(gym.Wrapper):
     def _process_image(self, obs):
         rgb = obs.get("policy", {}).get("rgb", None)
         if rgb is None:
-            return torch.zeros(self.num_envs, 3, 128, 128, device=self.device)
+            return torch.zeros(self.num_envs, 3, 224, 224, device=self.device)
         if rgb.shape[-1] == 4:
             rgb = rgb[..., :3]
         rgb = rgb.permute(0, 3, 1, 2)
@@ -112,9 +112,9 @@ class AxisObservationWrapper(gym.Wrapper):
             # Clamp to safe [0, 1]
             rgb = torch.clamp(rgb, 0.0, 1.0)
 
-        if rgb.shape[-2:] != (128, 128):
+        if rgb.shape[-2:] != (224, 224):
             rgb = torch.nn.functional.interpolate(
-                rgb, size=(128, 128), mode="bilinear", align_corners=False
+                rgb, size=(224, 224), mode="bilinear", align_corners=False
             )
 
         # --- MIRROR IMAGE ---

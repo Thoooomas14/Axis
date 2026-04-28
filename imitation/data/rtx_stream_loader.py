@@ -460,7 +460,7 @@ class RTXStreamLoader(IterableDataset):
         queue_size=32,
         shuffle_files=True,
         max_episodes=0,
-        image_size=(128, 128),
+        image_size=(224, 224),
         mix_episodes=8,
         ram_usage_limit=12.0,
         random_frames=False,
@@ -763,7 +763,7 @@ class RTXStreamLoader(IterableDataset):
         import cv2
 
         if img is None:
-            return np.zeros((3, 128, 128), dtype=np.float32)
+            return np.zeros((3, 224, 224), dtype=np.float32)
 
         if hasattr(img, "numpy"):
             img = img.numpy()

@@ -16,7 +16,7 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 ```mermaid
 graph TD
     subgraph Inputs
-        Img[Image Window<br/>B, W, 3, 128, 128]
+        Img[Image Window<br/>B, W, 3, 224, 224]
         Prop[Proprio Window<br/>B, W, 7]
         Goal[Goal Embedding<br/>B, 64]
     end
@@ -51,7 +51,7 @@ graph TD
     TL --> Concat
     PE --> Concat
     GE --> Concat
-    Concat[Concat: 256+128+128=512D] --> T
+    Concat[Concat: 128+768+128=1024D] --> T
     
     T --> LT
     LT --> AD
@@ -90,8 +90,8 @@ graph TD
 ### 2. Axis Transformer
 
 - **Type**: Transformer Encoder with RoPE (Rotary Position Embeddings)
-- **Embedding**: 512D (256 vision + 128 proprio + 128 goal concatenated per timestep)
-- **Token Order**: `[Proprio(128) | Vision(256) | Goal(128)]` per timestep
+- **Embedding**: 1024D (768 vision + 128 proprio + 128 goal concatenated per timestep)
+- **Token Order**: `[Proprio(128) | Vision(768) | Goal(128)]` per timestep
 - **Layers**: 4 layers, 8 heads
 
 The transformer processes a sliding window of W=8 timesteps, with each timestep's tokens concatenated into a single 512D vector.

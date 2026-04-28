@@ -91,7 +91,7 @@ def evaluate_sequence(args):
             dataset_name=args.dataset,
             split="train",
             window_size=8,
-            image_size=(128, 128),
+            image_size=(224, 224),
             data_dir=args.data_dir,
             repeat=False,  # Don't repeat for eval
             use_subprocess=False,  # In-process is sufficient for 1 episode

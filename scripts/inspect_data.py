@@ -195,7 +195,7 @@ def inspect_streaming(dataset: str, num_windows: int = 100, data_dir: str = None
         split="train",
         window_size=8,
         loss_horizon=1,
-        image_size=(128, 128),
+        image_size=(224, 224),
         data_dir=data_dir,
         repeat=False,
         use_subprocess=False,
