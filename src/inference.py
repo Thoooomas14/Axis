@@ -192,8 +192,6 @@ class AxisInference:
             0
         ).cpu()  # Keep as tensor for ensembler
 
-        print(action_chunk_prev)
-
         # 2. Ensemble
         self.ensembler.update(self.current_step, action_chunk_prev)
         action_twist_smooth = self.ensembler.get_action(
