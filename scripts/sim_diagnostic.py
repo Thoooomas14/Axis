@@ -452,6 +452,32 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
     
+    # --- BURN-IN PHASE ---
+    print("\n" + "="*50)
+    print("Starting Burn-in Phase to reach in-distribution pose...")
+    print("="*50)
+    
+    # Use the helper function to get sim commands for the first frame
+    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(props[start_frame])
+    burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
+    burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0)
+    
+    for b in range(60):
+        obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
+        time.sleep(1.0 / 60.0)
+        
+    print("Burn-in complete. Wiping history and initializing Agent...")
+    
+    # Wipe the sliding windows to erase the burn-in movement
+    last_image = obs["images"][:, -1] # (1, C, H, W)
+    last_proprio = obs["proprio"][:, -1] # (1, 13)
+    env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+    env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+    
+    obs["images"] = env.image_window
+    obs["proprio"] = env.proprio_window
+    # ---------------------
+
     # Initial pose depends on the proprio source
     if proprio_source == "sim":
         initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
@@ -581,6 +607,31 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
     
+    # --- BURN-IN PHASE ---
+    print("\n" + "="*50)
+    print("Starting Burn-in Phase to reach in-distribution pose...")
+    print("="*50)
+    
+    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(props[start_frame])
+    burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
+    burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0)
+    
+    for b in range(60):
+        obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
+        time.sleep(1.0 / 60.0)
+        
+    print("Burn-in complete. Wiping history and initializing Agent...")
+    
+    # Wipe the sliding windows to erase the burn-in movement
+    last_image = obs["images"][:, -1] # (1, C, H, W)
+    last_proprio = obs["proprio"][:, -1] # (1, 13)
+    env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+    env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+    
+    obs["images"] = env.image_window
+    obs["proprio"] = env.proprio_window
+    # ---------------------
+
     # Initial pose depends on the proprio source
     if proprio_source == "sim":
         initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
