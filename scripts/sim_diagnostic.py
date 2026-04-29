@@ -667,6 +667,10 @@ def replay_predicted_in_sim(
         # Select Proprio Source
         if proprio_source == "sim" and i > 20 + start_frame:
             final_props = obs["proprio"][0].cpu().numpy()
+            if final_props[12] > 0.5:
+                final_props[12] = 1.0  # Ensure gripper open
+            else:
+                final_props[12] = 0.0  # Ensure gripper closed
         else:
             final_props = current_props
 
