@@ -91,6 +91,9 @@ parser.add_argument("--image_source", type=str, default="dataset",
 parser.add_argument("--proprio_source", type=str, default="dataset",
                     choices=["dataset", "sim"],
                     help="Source of proprioception for predicted/both modes")
+parser.add_argument("--goal_source", type=str, default=None,
+                    choices=["dataset", "sim"],
+                    help="Source for goal vector start pose. Defaults to --proprio_source if not set.")
 parser.add_argument("--steps", type=int, default=200,
                     help="Max steps to replay")
 parser.add_argument("--speed", type=float, default=1.0,
@@ -258,8 +261,8 @@ def pose_13d_to_sim_action(pose_13d):
     # Convert to wxyz for Isaac Sim
     quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
 
-    # Gripper: DROID convention (1=open, 0=closed) -> Isaac (-1=open, 1=close)
-    grip_cmd = -1.0 if grip > 0.5 else 1.0
+    # Gripper: DROID convention (1=open, 0=closed) -> Isaac (1=open, -1=close)
+    grip_cmd = 1.0 if grip > 0.5 else -1.0
 
     return pos_m, quat_wxyz, grip_cmd, quat_xyzw
 
@@ -418,7 +421,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     env.close()
 
 
-def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset"):
+def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset", goal_source=None):
     """Replay open-loop model predictions in Isaac Sim using specified inputs."""
     import time
     from src.inference import AxisInference
@@ -478,11 +481,14 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     obs["proprio"] = env.proprio_window
     # ---------------------
 
-    # Initial pose depends on the proprio source
-    if proprio_source == "sim":
-        initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
+    # Goal source defaults to proprio_source if not explicitly set
+    effective_goal_source = goal_source if goal_source is not None else proprio_source
+
+    # Goal vector start pose depends on goal_source
+    if effective_goal_source == "sim":
+        goal_initial_pose = obs["proprio"][0, -1].cpu().numpy()
     else:
-        initial_pose_13d = props[start_frame]
+        goal_initial_pose = props[start_frame]
 
     # Guess task type from gripper transition
     start_grip = props[start_frame][12]
@@ -493,8 +499,46 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     elif start_grip > 0.5 and end_grip < 0.5:
         task_type = 2  # Close -> Pick
 
-    g_emb = oracle.encode_goal(task_type, initial_pose_13d, target_pose_13d, object_props=None)
+    g_emb = oracle.encode_goal(task_type, goal_initial_pose, target_pose_13d, object_props=None)
     goal_vector = g_emb.numpy()
+    print(f"  Goal built from: {effective_goal_source.upper()} proprio")
+
+    # --- GOAL VECTOR COMPARISON DIAGNOSTIC ---
+    # Always compute both goal vectors so we can see the difference
+    dat_initial = props[start_frame]
+    sim_initial = obs["proprio"][0, -1].cpu().numpy()
+    
+    g_dat = oracle.encode_goal(task_type, dat_initial, target_pose_13d, object_props=None).numpy()
+    g_sim = oracle.encode_goal(task_type, sim_initial, target_pose_13d, object_props=None).numpy()
+    
+    print(f"\n{'='*70}")
+    print("GOAL VECTOR COMPARISON (Step 0)")
+    print(f"{'='*70}")
+    print(f"  Using:          {'SIM' if proprio_source == 'sim' else 'DATASET'} proprio for goal")
+    print(f"  Task type:      {task_type} ({'Move' if task_type==0 else 'Pick' if task_type==1 else 'Place'})")
+    print(f"")
+    print(f"  --- Start Pose (goal[3:16]) ---")
+    print(f"  DAT start rot:  {g_dat[3:12].round(3)}")
+    print(f"  SIM start rot:  {g_sim[3:12].round(3)}")
+    print(f"  DAT start pos:  {g_dat[12:15].round(1)} mm")
+    print(f"  SIM start pos:  {g_sim[12:15].round(1)} mm")
+    print(f"  DAT start grip: {g_dat[15]:.3f}")
+    print(f"  SIM start grip: {g_sim[15]:.3f}")
+    print(f"")
+    print(f"  --- Target Pose (goal[16:29]) --- (should be identical)")
+    print(f"  DAT target pos: {g_dat[25:28].round(1)} mm")
+    print(f"  SIM target pos: {g_sim[25:28].round(1)} mm")
+    print(f"  DAT target grip:{g_dat[28]:.3f}")
+    print(f"  SIM target grip:{g_sim[28]:.3f}")
+    print(f"")
+    print(f"  --- Full Diff (|DAT - SIM|) ---")
+    diff = np.abs(g_dat - g_sim)
+    nonzero = np.where(diff > 0.001)[0]
+    for idx in nonzero:
+        print(f"    goal[{idx:2d}]: DAT={g_dat[idx]:+.4f}  SIM={g_sim[idx]:+.4f}  Δ={diff[idx]:.4f}")
+    if len(nonzero) == 0:
+        print(f"    (identical)")
+    print(f"{'='*70}\n")
 
     end_frame = min(start_frame + max_steps, len(props))
     delay = (1.0 / 30.0) / speed
@@ -575,7 +619,7 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     print(f"\nReplay complete. {end_frame - start_frame} frames predicted and replayed.")
     env.close()
 
-def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset"):
+def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset", goal_source=None):
     """Replay ground truth in Sim, but run model inference at each step to compute 1-step prediction error (Teacher Forcing)."""
     import time
     from src.inference import AxisInference
@@ -634,11 +678,14 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     obs["proprio"] = env.proprio_window
     # ---------------------
 
-    # Initial pose depends on the proprio source
-    if proprio_source == "sim":
-        initial_pose_13d = obs["proprio"][0, -1].cpu().numpy()
+    # Goal source defaults to proprio_source if not explicitly set
+    effective_goal_source = goal_source if goal_source is not None else proprio_source
+
+    # Goal vector start pose depends on goal_source
+    if effective_goal_source == "sim":
+        goal_initial_pose = obs["proprio"][0, -1].cpu().numpy()
     else:
-        initial_pose_13d = props[start_frame]
+        goal_initial_pose = props[start_frame]
 
     # Guess task type from gripper transition
     start_grip = props[start_frame][12]
@@ -649,8 +696,9 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     elif start_grip > 0.5 and end_grip < 0.5:
         task_type = 2  # Close -> Pick
 
-    g_emb = oracle.encode_goal(task_type, initial_pose_13d, target_pose_13d, object_props=None)
+    g_emb = oracle.encode_goal(task_type, goal_initial_pose, target_pose_13d, object_props=None)
     goal_vector = g_emb.numpy()
+    print(f"  Goal built from: {effective_goal_source.upper()} proprio")
 
     end_frame = min(start_frame + max_steps, len(props))
     delay = (1.0 / 30.0) / speed
@@ -757,13 +805,13 @@ def main():
             print("ERROR: --checkpoint required for --mode both")
             sys.exit(1)
         print_diagnostics(props)
-        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source)
+        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source, args.goal_source)
     elif args.mode == "predicted":
         if args.checkpoint is None:
             import sys
             print("ERROR: --checkpoint required for --mode predicted")
             sys.exit(1)
-        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source)
+        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source, args.goal_source)
 
     if args.mode != "diagnostic":
         simulation_app.close()

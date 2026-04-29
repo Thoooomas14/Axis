@@ -216,7 +216,26 @@ def main():
                 cube_pos = np.zeros(3)
 
             if initial_pose_13d is None or requery_flag:
-                initial_pose_13d = current_pose_13d.copy()
+                # -----------------------------------------------------
+                # FIX 1: Canonical Start Pose
+                # DO NOT use the Sim's current (potentially sagging) position.
+                # Use the perfect, in-distribution DROID start pose.
+                # -----------------------------------------------------
+                canonical_start_pose = np.zeros(13, dtype=np.float32)
+                
+                # Rotation: Downward → 180° around X axis (w=0, x=1, y=0, z=0)
+                start_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
+                start_rot = R.from_quat(start_quat_xyzw).as_matrix().flatten()
+                canonical_start_pose[:9] = start_rot
+                
+                # Position: [0.3226, 0.1198, 0.5174] in millimeters
+                canonical_start_pos = np.array([0.3226, 0.1198, 0.5174], dtype=np.float32) * 1000.0
+                canonical_start_pose[9:12] = canonical_start_pos
+                
+                # Gripper: Closed (0.0 in DROID convention)
+                canonical_start_pose[12] = 0.0
+                
+                initial_pose_13d = canonical_start_pose
 
                 # Goal Target: Cube Pos (converted to Model Frame)
                 target_pos_model = cube_pos.copy()
@@ -225,23 +244,14 @@ def main():
                 # Construct 13D Target Pose
                 target_pose_13d = np.zeros(13, dtype=np.float32)
 
-                # Rotation: Downward → 180° around X axis
-                # DROID data shows Euler ≈ [170°, -8°, 2°] for downward gripper
-                # Pure 180° around X in xyzw: [1, 0, 0, 0]
                 target_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
                 target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
 
                 target_pose_13d[:9] = target_rot
-                target_pose_13d[9:12] = (
-                    target_pos_model * 1000.0
-                )  # Meters -> Millimeters
-                target_pose_13d[12] = 0.0  # Close gripper (DROID: 0=closed, 1=open)
+                target_pose_13d[9:12] = target_pos_model * 1000.0
+                target_pose_13d[12] = 0.0  # Close gripper
 
                 # Encode Goal
-                # Task 2: Pick (Closing Gripper). Note: Model learned Task 1=Open, Task 2=Close!
-                # Oracle handles 13D logic internally now
-                # Define Object Props for Red Cube
-                # These must match the simulated object in AxisSceneCfg
                 obj_props = {
                     "color": np.array([1.0, 0.0, 0.0], dtype=np.float32),  # Red
                     "shape": np.array([1.0, 0.0, 0.0], dtype=np.float32),  # Cube
