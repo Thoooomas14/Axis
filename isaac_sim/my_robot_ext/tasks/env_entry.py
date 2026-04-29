@@ -11,6 +11,7 @@ except ImportError:
             def __init__(self, cfg, **kwargs):
                 pass
 
+
 class MyRobotEnv(ManagerBasedRLEnv):
     """
     A skeleton environment class for RL tasks using the Axis model.
@@ -21,10 +22,10 @@ class MyRobotEnv(ManagerBasedRLEnv):
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
         # Initialize the parent class
         super().__init__(cfg, render_mode=render_mode, **kwargs)
-        
+
         # Determine device
         self.device = self.sim.device if hasattr(self, "sim") else "cpu"
-        
+
         print(f"Initialized MyRobotEnv on device: {self.device}")
 
     def step(self, action):

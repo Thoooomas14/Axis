@@ -1,124 +1,212 @@
+import warnings
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class FiLMLayer(nn.Module):
-    """
-    Feature-wise Linear Modulation (FiLM) layer.
-    Applies an affine transformation to the input feature map based on a conditioning embedding.
-    """
-    def __init__(self, num_features, cond_dim):
-        super().__init__()
-        self.num_features = num_features
-        self.fc = nn.Linear(cond_dim, 2 * num_features)
+from typing import cast
 
-    def forward(self, x, cond):
-        """
-        Args:
-            x: Input feature map (B, C, H, W) or (B, C)
-            cond: Conditioning embedding (B, cond_dim)
-        """
-        # Project condition to scale (gamma) and shift (beta)
-        params = self.fc(cond)
-        gamma, beta = torch.split(params, self.num_features, dim=1)
+# Suppress unfixable 3rd-party library warnings from DINOv2 and UniDepth
+warnings.filterwarnings("ignore", message=".*xFormers is not available.*")
+warnings.filterwarnings(
+    "ignore", message=".*Importing from timm.models.layers is deprecated.*"
+)
+warnings.filterwarnings("ignore", message=".*To run evaluation you need KNN.*")
+warnings.filterwarnings(
+    "ignore",
+    message=".*User provided device_type of 'cuda', but CUDA is not available.*",
+)
+warnings.filterwarnings("ignore", message=".*weights_only.*")
+warnings.filterwarnings("ignore", message=".*self\\.resolution_level not set.*")
 
-        # Reshape for broadcasting
-        if x.dim() == 4:
-            gamma = gamma.view(gamma.size(0), gamma.size(1), 1, 1)
-            beta = beta.view(beta.size(0), beta.size(1), 1, 1)
-        else:
-            gamma = gamma.view(gamma.size(0), gamma.size(1))
-            beta = beta.view(beta.size(0), beta.size(1))
-
-        return (1 + gamma) * x + beta
 
 class VisionEncoder(nn.Module):
-    """
-    Encodes RGB images into a feature map, conditioned on a goal embedding via FiLM.
-    Uses a simplified ResNet-like structure for real-time performance.
-    """
-    def __init__(self, input_channels=3, base_channels=32, cond_dim=256):
+    def __init__(
+        self, img_size=(224, 224), feature_dim=768, pretrained=True, goal_dim=128
+    ) -> None:
         super().__init__()
-        
-        self.conv1 = nn.Conv2d(input_channels, base_channels, kernel_size=7, stride=2, padding=3)
-        self.bn1 = nn.BatchNorm2d(base_channels)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # Layer 1
-        self.conv2 = nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(base_channels * 2)
-        self.film1 = FiLMLayer(base_channels * 2, cond_dim)
+        if img_size[0] != img_size[1]:
+            raise ValueError(
+                f"VisionEncoder currently only supports square images. Got {img_size}. "
+                "Please resize your input images to be square."
+            )
+        if img_size[0] % 16 != 0:
+            raise ValueError(
+                f"VisionEncoder currently requires input image dimensions to be divisible by 16. Got {img_size}. "
+                "Please resize your input images accordingly."
+            )
+        self.image_size = img_size
 
-        # Layer 2
-        self.conv3 = nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1)
-        self.bn3 = nn.BatchNorm2d(base_channels * 4)
-        self.film2 = FiLMLayer(base_channels * 4, cond_dim)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", category=FutureWarning, module="torch.hub"
+            )
+        # Load Backbones
+        self.dinov2 = cast(
+            nn.Module,
+            torch.hub.load(
+                repo_or_dir="facebookresearch/dinov2",
+                model="dinov2_vits14_reg",
+                pretrained=pretrained,
+                trust_repo=True,
+            ),
+        )
 
-        # Layer 3
-        self.conv4 = nn.Conv2d(base_channels * 4, base_channels * 8, kernel_size=3, stride=2, padding=1)
-        self.bn4 = nn.BatchNorm2d(base_channels * 8)
-        self.film3 = FiLMLayer(base_channels * 8, cond_dim)
-        
-        self.act = nn.ReLU(inplace=True)
+        for param in self.dinov2.parameters():
+            param.requires_grad = False
 
-    def forward(self, x, cond):
-        """
-        Args:
-            x: Images (B, C, H, W)
-            cond: Goal embedding (B, cond_dim)
-        Returns:
-            Feature map (B, C_out, H_out, W_out)
-        """
-        x = self.act(self.bn1(self.conv1(x)))
-        x = self.pool(x)
+        # 384 (DINO)
+        self.fusion_block = nn.Sequential(
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            # Downsample spatially to 4x4 to match the 1024 input of self.latent
+            nn.AdaptiveAvgPool2d((4, 4)),
+        )
 
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.film1(x, cond)
-        x = self.act(x)
+        self.latent = nn.Sequential(
+            nn.Linear(1024 + goal_dim, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, feature_dim),
+            nn.ReLU(),
+        )
 
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.film2(x, cond)
-        x = self.act(x)
+        kernel = img_size[0] // 16
+        self.depth_pool = nn.AvgPool2d(
+            kernel_size=kernel, stride=kernel
+        )  # convert 224x224 depth image into 16x16 feature map
 
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.film3(x, cond)
-        x = self.act(x)
+    def forward(self, x, goal: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
 
-        return x
+        if (H, W) != self.image_size:
+            raise ValueError(
+                f"Expected input image size {self.image_size}, but got {(H, W)}. "
+                "Please resize the input images accordingly."
+            )
+
+        with torch.no_grad():
+            dino_out = self.dinov2.forward_features(x)  # type: ignore #Returns [B, 261, 384] (1 CLS + 4 Reg + 256 Patches)
+            dino_feats = (
+                dino_out["x_norm_patchtokens"].permute(0, 2, 1).reshape(B, 384, 16, 16)
+            )  # Turn into 384 chanels and 16x16 spatial map
+
+        fused = self.fusion_block(dino_feats)  # [B, 64, 4, 4]
+        fused_flat = torch.flatten(fused, 1)  # [B, 1024]
+
+        fused_flat = torch.cat(
+            [fused_flat, goal], dim=-1
+        )  # Simple fusion of goal info by adding mean goal embedding to each spatial location
+
+        return self.latent(fused_flat)  # [B, feature_dim]
+
 
 class ProprioEncoder(nn.Module):
     """
     Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
-    Default input_dim=7 (3 Pos + 3 Rot + 1 Gripper).
+    Encodes robot proprioceptive state (End-Effector Pose) into a latent vector.
+    Default input_dim=7 (3 Rotation Vector + 3 Translation + 1 Gripper).
+
+    Args:
+        input_dim: Dimension of proprioceptive input (default 7)
+        output_dim: Dimension of output embedding
+        hidden_dim: Dimension of hidden layers
+        normalize: If True, apply running normalization using EMA statistics
     """
-    def __init__(self, input_dim=7, output_dim=256, hidden_dim=128):
+
+    def __init__(self, input_dim=7, output_dim=256, hidden_dim=128, normalize=True):
         super().__init__()
+        self.input_dim = input_dim
+        self.normalize = normalize
+
+        # Running statistics buffers for normalization
+        if normalize:
+            self.register_buffer("running_mean", torch.zeros(input_dim))
+            self.register_buffer("running_std", torch.ones(input_dim))
+            self.register_buffer(
+                "count", torch.tensor(0, dtype=torch.long).unsqueeze(0)
+            )
+            self.ema_alpha = 0.1
+
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(hidden_dim, output_dim),
         )
 
+    def update_stats(self, x):
+        """
+        Update running mean and std with EMA (alpha=0.1).
+        Only call during training.
+
+        Args:
+            x: Input tensor of shape (B, input_dim) or (B, T, input_dim)
+        """
+        if not self.normalize:
+            return
+
+        # Flatten to (N, input_dim) if needed
+        if x.dim() == 3:
+            x = x.reshape(-1, x.size(-1))
+
+        # Compute batch statistics
+        batch_mean = x.mean(dim=0)
+        batch_std = x.std(dim=0)
+
+        # EMA update
+        if self.count == 0:
+            # First update: initialize with batch stats
+            self.running_mean.copy_(batch_mean)
+            self.running_std.copy_(batch_std.clamp(min=1e-6))
+        else:
+            # EMA: new = (1 - alpha) * old + alpha * batch
+            self.running_mean.copy_(
+                (1 - self.ema_alpha) * self.running_mean + self.ema_alpha * batch_mean
+            )
+            self.running_std.copy_(
+                (1 - self.ema_alpha) * self.running_std
+                + self.ema_alpha * batch_std.clamp(min=1e-6)
+            )
+
+        self.count += 1
+
     def forward(self, x):
+        """
+        Args:
+            x: Proprioceptive state (B, input_dim) or (B, T, input_dim)
+        Returns:
+            Encoded embedding of same batch shape with output_dim
+        """
+        # Apply normalization if enabled
+        if self.normalize:
+            # Update stats during training
+            if self.training:
+                self.update_stats(x)
+
+            # Normalize: (x - mean) / std
+            # Clamp std to avoid division by zero
+            std_clamped = self.running_std.clamp(min=1e-6)
+            x = (x - self.running_mean) / std_clamped
+
         return self.net(x)
+
 
 class GoalEncoder(nn.Module):
     """
     Project semantic goal embeddings (from LLM/Gemini) into the model's dimension.
     """
-    def __init__(self, input_dim=64, output_dim=256): # Default input_dim 64 for parsed Gemini embeddings
+
+    def __init__(self, input_dim=64, output_dim=256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, output_dim),
             nn.LayerNorm(output_dim),
             nn.ReLU(),
-            nn.Linear(output_dim, output_dim)
+            nn.Linear(output_dim, output_dim),
         )
 
     def forward(self, x):

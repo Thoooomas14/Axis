@@ -1,348 +1,472 @@
-
 # scripts/eval_isaac.py
 import argparse
 import os
 import sys
 import time
-import gymnasium as gym
+
 from gymnasium.wrappers import RecordVideo
-from scipy.spatial.transform import Rotation as R
-from PIL import Image
-import json
+import pypose as pp
 import numpy as np
-import matplotlib.pyplot as plt
-# Required for 3D plotting
-from mpl_toolkits.mplot3d import Axes3D
+import torch
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 0. Bootstrap Isaac Sim (Required for 4.0+)
 try:
-    import isaacsim
+    import isaacsim  # type: ignore  # noqa: F401
 except ImportError:
-    pass 
+    pass
 
-# 1. Path Setup for Isaac Lab (Legacy vs Standard)
+# 1. Path Setup for Isaac Lab
 cwd = os.getcwd()
 possible_extension_paths = [
-    os.path.join(cwd, "source"), 
-    os.path.join(cwd, "source", "isaaclab")
+    os.path.join(cwd, "source"),
+    os.path.join(cwd, "source", "isaaclab"),
 ]
 for p in possible_extension_paths:
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
 
-# 2. AppLauncher Import using Fallbacks
+# Add local extension path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+isaac_sim_path = os.path.join(project_root, "isaac_sim")
+
+if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
+    print(f"Adding to sys.path: {isaac_sim_path}")
+    sys.path.append(isaac_sim_path)
+
 try:
-    from omni.isaac.lab.app import AppLauncher
+    from omni.isaac.lab.app import AppLauncher  # type: ignore
 except ImportError:
     try:
-        from isaaclab.app import AppLauncher
+        from isaaclab.app import AppLauncher  # type: ignore
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
 
+# =========================================================================
+# SETUP ARGPARSE AND LAUNCH THE SIMULATION APP GLOBALLY FIRST
+# =========================================================================
+parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
+parser.add_argument(
+    "--checkpoint", type=str, default=None, help="Path to model checkpoint"
+)
+parser.add_argument(
+    "--robot",
+    type=str,
+    default="franka",
+    choices=["franka", "google"],
+    help="Robot type",
+)
+parser.add_argument("--steps", type=int, default=1000, help="Max steps")
+parser.add_argument("--video", action="store_true", help="Record video")
+parser.add_argument(
+    "--model_refresh", type=float, default=30, help="Control frequency Hz"
+)
+parser.add_argument(
+    "--chunk_size", type=int, default=10, help="Action chunk size used in model"
+)
+parser.add_argument("--random_weights", action="store_true", help="Use random weights")
+parser.add_argument(
+    "--ignore_requery", action="store_true", help="Ignore model requery requests"
+)
+parser.add_argument(
+    "--ensemble_k", type=float, default=0.01, help="Exponential weighting decay"
+)
+
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args()
+
+# Launch App before any Torch imports
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+
+# =========================================================================
+# NOW IMPORT PYTORCH AND CUSTOM MODULES (CUDA context is now safe)
+# =========================================================================
+import torch  # noqa: E402, F811
+from src.inference import AxisInference  # noqa: E402
+from src.utils.rotation_utils import quaternion_to_rotation_6d  # noqa: E402
+from imitation.data.goal_oracle import GoalOracle  # noqa: E402
+
+from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg  # noqa: E402
+from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper  # noqa: E402
+from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg  # noqa: E402
+
+
+# =========================================================================
+# GLOBAL HELPER FUNCTIONS
+# =========================================================================
+def quaternion_to_rot6d_numpy(quat_xyzw):
+    """Helper to convert numpy quat [x,y,z,w] to 6D."""
+    # Torch is globally available here!
+    q_tensor = torch.tensor(quat_xyzw, dtype=torch.float32)
+    r6 = quaternion_to_rotation_6d(q_tensor).numpy()
+    return r6
+
+
+# =========================================================================
+# MAIN LOOP
+# =========================================================================
 def main():
-    # 3. Parse Args
-    parser = argparse.ArgumentParser(description="Evaluate Axis Model in Isaac Lab")
-    parser.add_argument('--checkpoint', type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument('--robot', type=str, default='franka', choices=['franka', 'google'], help="Robot to use")
-    parser.add_argument('--steps', type=int, default=1000, help="Number of steps to run")
-    parser.add_argument('--video', action='store_true', help="Record video of the evaluation")
-    parser.add_argument('--model_refresh', type=int, default=60, help="Hz for model updates")
-    
-    # AppLauncher Args
-    AppLauncher.add_app_launcher_args(parser)
-    args = parser.parse_args()
 
-    # 4. Launch App
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
-
-    # 5. Imports
-    import torch
-    
-    try:
-        from src.models.axis_v1 import AxisModel
-    except ImportError as e:
-         print(f"ERROR: Could not import AxisModel. {e}")
-         simulation_app.close()
-         sys.exit(1)
-
-    try:
-        from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
-        from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
-        from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg
-    except ImportError as e:
-        print(f"ERROR: Failed to import my_robot_ext: {e}")
-        simulation_app.close()
-        sys.exit(1)
-        
-    try:
-        from imitation.data.goal_oracle import GoalOracle
-    except ImportError:
-        print("ERROR: Could not import GoalOracle.")
-        simulation_app.close()
-        sys.exit(1)
-
-    # 6. Run Evaluation
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load Model
-    print(f"Loading model from {args.checkpoint}...")
-    config = {
-        'device': device,
-        'goal_dim': 64, 
-        'embed_dim': 256,
-        'window_size': 8,
-    }
-    
-    try:
-        model = AxisModel(config).to(device)
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-            keys_to_remove = [k for k in state_dict.keys() if 'latent_queue.queue' in k]
-            for k in keys_to_remove:
-                del state_dict[k]
-        
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        model.eval()
-        print("Model loaded successfully.")
-        
-        oracle = GoalOracle(output_dim=64)
-    except Exception as e:
-        print(f"Failed to load checkpoint: {e}")
-        simulation_app.close()
-        return
+    # --- Load Axis V2 Inference ---
+    print(f"Loading AxisInference from {args.checkpoint}...")
+    # TODO: Save/load config from checkpoint for robustness with custom configs
+    config = "AxisV2"
 
-    # Setup Environment
+    try:
+        agent = AxisInference(
+            args.checkpoint,
+            config,
+            device=device,
+            random_weights=args.random_weights,
+            ensemble_k=args.ensemble_k,
+        )
+        print("Model loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load agent: {e}")
+        simulation_app.close()
+        sys.exit(1)
+
+    oracle = GoalOracle(output_dim=38)  # Updated to 38D
+
+    # --- Setup Environment ---
     try:
         env_cfg = AxisEvalEnvCfg()
-        if args.robot == 'franka': env_cfg.robot = FrankaCfg()
-        elif args.robot == 'google': env_cfg.robot = GoogleRobotCfg()
-        
+        if args.robot == "franka":
+            env_cfg.robot = FrankaCfg()
+        elif args.robot == "google":
+            env_cfg.robot = GoogleRobotCfg()
+
         render_mode = "rgb_array" if args.video else None
         env = AxisEvalEnv(cfg=env_cfg, render_mode=render_mode)
-        
+
         if args.video:
             video_folder = os.path.join(os.path.dirname(args.checkpoint), "videos")
-            
-            class CameraRenderWrapper(gym.Wrapper):
-                def render(self):
-                    try:
-                        cam_sensor = self.unwrapped.scene["camera"]
-                        rgb = cam_sensor.data.output["rgb"][0] # (H, W, 4)
-                        img = rgb.cpu().numpy()
-                        if img.shape[-1] == 4: img = img[..., :3]
-                        if img.dtype != np.uint8:
-                            if img.max() <= 1.05: img = (img * 255).astype(np.uint8)
-                            else: img = img.astype(np.uint8)
-                        return img
-                    except:
-                        return np.zeros((128, 128, 3), dtype=np.uint8)
+            env = RecordVideo(
+                env,
+                video_folder=video_folder,
+                step_trigger=lambda step: step == 0,
+                video_length=args.steps,
+                name_prefix="eval_v2",
+            )
 
-            env = CameraRenderWrapper(env)
-            env = RecordVideo(env, video_folder=video_folder, step_trigger=lambda step: step == 0, video_length=args.steps, name_prefix="eval_run")
-            
-        env = AxisObservationWrapper(env, window_size=8, device=device)
+        # Wrapper now returns 13D proprio
+        # Use model's window_size to match training config
+        env = AxisObservationWrapper(
+            env, window_size=agent.config.get("window_size", 10), device=device
+        )
     except Exception as e:
         print(f"Error initializing environment: {e}")
         simulation_app.close()
         return
 
-    # Loop
+    # --- Evaluation Loop ---
     try:
         obs, info = env.reset()
-        
+
+        # --- BURN-IN PHASE ---
+        print("\n" + "=" * 50)
+        print("Starting Burn-in Phase to reach in-distribution pose...")
+        print("=" * 50)
+        # Target: [0.3226, 0.1198, 0.5174] (from DROID episode 0)
+        burn_in_pos = np.array([0.3226, 0.1198, 0.5174], dtype=np.float32)
+        burn_in_quat = np.array(
+            [0.0, 1.0, 0.0, 0.0], dtype=np.float32
+        )  # wxyz, downward
+        burn_in_grip = 1.0  # Close the gripper
+
+        burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
+        burn_in_action_t = (
+            torch.tensor(burn_in_action, device=device, dtype=torch.float32)
+            .unsqueeze(0)
+            .repeat(env.num_envs, 1)
+        )
+
+        for b in range(60):
+            obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
+            time.sleep(1.0 / 60.0)
+
+        print("Burn-in complete. Initializing Agent...")
+
+        agent.reset()  # Reset inference state (cache/ensembler)
+
+        # Wipe the sliding windows to erase the burn-in movement
+        last_image = obs["images"][:, -1]  # (B, C, H, W)
+        last_proprio = obs["proprio"][:, -1]  # (B, 13)
+        env.image_buffer = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+        env.proprio_buffer = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+
+        obs["images"] = env.image_buffer
+        obs["proprio"] = env.proprio_buffer
+        # ---------------------
+
         B = env.num_envs
-        goal_emb = torch.zeros(B, 64, device=device)
-        target_dt = 1.0 / args.model_refresh
-        last_command_time = 0
-        requery = 0.0
-        
-        initial_pose_np = None
-        target_quat = None
 
-        # --- STUCK DETECTION ---
-        stuck_timer = time.time()
-        last_stuck_pos = None
-        STUCK_THRESHOLD = 0.01 # 1cm
-        STUCK_TIME = 3.0       # 3 seconds
-        # -----------------------
+        # State
+        initial_pose_13d = None
+        goal_vector = np.zeros((B, 38), dtype=np.float32)  # 38D
+        requery_flag = True
+        requery_prob = 0.0
+        last_pred_time = 0
+        delta_pred_time = (1 / args.model_refresh) * 1000
+        model_run = False
+        last_goal_time = -100
+        print("Starting Control Loop...")
 
-        history_actual, history_pred, history_target = [], [], []
-        print("Starting Simulation Loop (Model Control)...")
-        
-        env_actions = torch.zeros((B, 8), device=device)
-        pos_pred = np.zeros(3)
-        
         for i in range(args.steps):
-            with torch.no_grad():
-                images = obs['images'] # (B, W, C, H, W)
-                proprio = obs['proprio'] # (B, W, 8)
-                
-                if i == 0:
-                    print("\n[Input Validation]")
-                    assert images.shape[1] == 8
-                    assert images.shape[-2:] == (128, 128)
-                    print("Input shapes validated: OK")
-                    print(f"INIT Proprio (Mirrored Y Tip): {proprio[0, -1].cpu().numpy()}")
+            # 1. Get Observations (Torch -> Numpy)
+            # Images: (B, W, C, H, W)
+            images_np = obs["images"].cpu().numpy()
+            # Proprio: (B, W, 13) [rot9, pos3, grip1]
+            proprio_13d_np = obs["proprio"].cpu().numpy()
 
-                # --- Goal Logic ---
-                if initial_pose_np is None:
-                    initial_pose_np = proprio[0, -1, :7].cpu().numpy()
-                    target_quat = initial_pose_np[3:] 
-                    print("Goal Logic: Latched Start Pose & Target Quat")
+            # Use last proprio in window as current state
+            current_pose_13d = proprio_13d_np[0, -1]  # (13,)
 
-                # Get Cube Pos (Sim Frame)
-                if 'cube' in env.unwrapped.scene.keys():
-                    cube_pos = env.unwrapped.scene['cube'].data.root_pos_w[:, :3]
-                    cube_pos_np = cube_pos[0].cpu().numpy()
+            # 3. Goal Logic (Sim specific hacking)
+            if "cube" in env.unwrapped.scene.keys():
+                cube_pos = (
+                    env.unwrapped.scene["cube"].data.root_pos_w[0, :3].cpu().numpy()
+                )
+            else:
+                cube_pos = np.zeros(3)
+
+            if initial_pose_13d is None or requery_flag:
+                # -----------------------------------------------------
+                # FIX 1: Canonical Start Pose
+                # DO NOT use the Sim's current (potentially sagging) position.
+                # Use the perfect, in-distribution DROID start pose.
+                # -----------------------------------------------------
+                canonical_start_pose = np.zeros(13, dtype=np.float32)
+
+                # Rotation: Downward → 180° around X axis (w=0, x=1, y=0, z=0)
+                start_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
+                start_rot = (
+                    pp.SO3(torch.tensor(start_quat_xyzw, dtype=torch.float32))
+                    .matrix()
+                    .flatten()
+                    .numpy()
+                )
+                canonical_start_pose[:9] = start_rot
+
+                # Position: [0.3226, 0.1198, 0.5174] in millimeters
+                canonical_start_pos = (
+                    np.array([0.3226, 0.1198, 0.5174], dtype=np.float32) * 1000.0
+                )
+                canonical_start_pose[9:12] = canonical_start_pos
+
+                # Gripper: Closed (0.0 in DROID convention)
+                canonical_start_pose[12] = 0.0
+
+                initial_pose_13d = canonical_start_pose
+
+                # Goal Target: Cube Pos (converted to Model Frame)
+                target_pos_model = cube_pos.copy()
+
+                # Goal Pose: Target Pos + Fixed Downward Orientation
+                # Construct 13D Target Pose
+                target_pose_13d = np.zeros(13, dtype=np.float32)
+
+                target_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
+                target_rot = (
+                    pp.SO3(torch.tensor(target_quat_xyzw, dtype=torch.float32))
+                    .matrix()
+                    .flatten()
+                    .numpy()
+                )
+
+                target_pose_13d[:9] = target_rot
+                target_pose_13d[9:12] = target_pos_model * 1000.0
+                target_pose_13d[12] = 0.0  # Close gripper
+
+                # Encode Goal
+                obj_props = {
+                    "color": np.array([1.0, 0.0, 0.0], dtype=np.float32),  # Red
+                    "shape": np.array([1.0, 0.0, 0.0], dtype=np.float32),  # Cube
+                    "size": np.array([0.05, 0.05, 0.05], dtype=np.float32),  # 5cm
+                }
+                g_emb = oracle.encode_goal(
+                    2, initial_pose_13d, target_pose_13d, object_props=obj_props
+                )
+                goal_vector[0] = g_emb.numpy()
+
+                print(f"Goal Updated! Target: {target_pos_model.round(3)}")
+                requery_flag = False
+                last_goal_time = i
+
+            # 4. Predict
+            # Call agent with single sample (remove batch dim)
+            current_time = int(time.time() * 1000)
+            model_run = False
+
+            if (
+                current_time - last_pred_time
+            ) >= delta_pred_time or last_pred_time == 0:
+                model_run = True
+                last_pred_time = current_time
+                batch_result = agent.predict(
+                    images_np[0],  # (W, C, H, W)
+                    proprio_13d_np[0],  # (W, 13)
+                    goal_vector[0],  # (38,)
+                )
+                requery_flag_model = batch_result.get("requery", False)
+                requery_prob = batch_result.get("requery_prob", 0.0)
+
+                # === DIAGNOSTIC DUMP (first 3 predictions) ===
+                if i < 30 and model_run:
+                    prop_last = proprio_13d_np[0, -1]  # Last frame in window
+                    print(f"\n{'=' * 60}")
+                    print(f"DIAGNOSTIC — Step {i}")
+                    print(f"{'=' * 60}")
+                    print(f"  INPUT proprio[-1] rot9:  {prop_last[:9].round(3)}")
+                    print(f"  INPUT proprio[-1] pos:   {prop_last[9:12].round(1)} mm")
+                    print(f"  INPUT proprio[-1] grip:  {prop_last[12]:.4f}")
+                    print(f"  INPUT goal[0:3] (task):  {goal_vector[0, :3]}")
+                    print(
+                        f"  INPUT goal[3:16] (start): pos={goal_vector[0, 12:15].round(1)} grip={goal_vector[0, 15]:.2f}"
+                    )
+                    print(
+                        f"  INPUT goal[16:29] (tgt):  pos={goal_vector[0, 25:28].round(1)} grip={goal_vector[0, 28]:.2f}"
+                    )
+                    print(
+                        f"  INPUT image range:       [{images_np.min():.3f}, {images_np.max():.3f}]"
+                    )
+                    # PyPose se3: [v(3), w(3)]!
+                    print(
+                        f"  OUTPUT twist v (lin):    {batch_result['action_twist'][:3].round(4)}"
+                    )
+                    print(
+                        f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][3:6].round(4)}"
+                    )
+                    print(
+                        f"  OUTPUT twist grip Δ:     {batch_result['action_twist'][6]:.4f}"
+                    )
+                    print(
+                        f"  OUTPUT abs pos (mm):     {batch_result['position'].round(1)}"
+                    )
+                    print(f"  OUTPUT abs grip:         {batch_result['gripper']:.4f}")
+                    twist_mag = np.linalg.norm(batch_result["action_twist"][:6])
+                    print(f"  OUTPUT twist magnitude:  {twist_mag:.4f}")
+                    print(f"{'=' * 60}\n")
+
+            if i == 0:
+                # Debug: Save what the model sees
+                import cv2
+
+                # Image is (C, H, W) float 0-1. Convert to (H, W, C) uint8 0-255
+                debug_img = images_np[0, -1].transpose(1, 2, 0)
+                debug_img = (debug_img * 255).astype(np.uint8)
+                # RGB -> BGR for OpenCV
+                debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite("debug_view.png", debug_img)
+                print(f"Saved debug view to {os.path.abspath('debug_view.png')}")
+                print(
+                    f"Image Stats: Min={images_np.min()}, Max={images_np.max()}, Mean={images_np.mean()}, Shape={images_np.shape}"
+                )
+
+            if i % 10 == 0:
+                print(f"Requery Flag: {requery_flag_model} (Prob: {requery_prob:.3f})")
+
+            if args.ignore_requery:
+                requery_flag = False
+            else:
+                # Debounce Goal Updates to prevent loops
+                # Only update if probability is high (>0.8) OR if we haven't updated in 50 steps
+                # And ensure we don't spam updates every frame
+                time_since_last_goal = i - last_goal_time
+
+                if requery_flag_model and time_since_last_goal > 150:
+                    requery_flag = True
                 else:
-                    cube_pos_np = np.zeros(3)
+                    requery_flag = False
 
-                # --- VISUALIZATION CALCS ---
-                # Proprio is Tip Frame (Mirrored Y)
-                pos_tip_mirrored = proprio[0, -1, :3].cpu().numpy()
-                quat_xyzw = proprio[0, -1, 3:7].cpu().numpy()
-                
-                # UN-MIRROR for plotting (Sim Frame)
-                pos_tip_sim = pos_tip_mirrored.copy()
-                pos_tip_sim[1] *= -1.0
-                
-                # Append TIP for Plotting (Sim Frame)
-                history_actual.append(pos_tip_sim)
-                
-                # Command Plotting:
-                # Command is Model Frame (Mirrored Y).
-                # Flip to visualize in Sim Frame.
-                pos_pred_sim = pos_pred.copy()
-                pos_pred_sim[1] *= -1.0
-                history_pred.append(pos_pred_sim)
-                
-                history_target.append(cube_pos_np)
+            # 5. Execute
+            # Model Output: 'action_absolute' is what Inference class returns.
+            # Inference now returns 13D absolute pose in mm.
 
-                # --- STUCK CHECK ---
-                stuck_trigger = False
-                current_time_sim = time.time()
-                
-                if last_stuck_pos is None:
-                     last_stuck_pos = pos_tip_sim
-                     stuck_timer = current_time_sim
-                else:
-                    dist = np.linalg.norm(pos_tip_sim - last_stuck_pos)
-                    if dist > STUCK_THRESHOLD:
-                        last_stuck_pos = pos_tip_sim
-                        stuck_timer = current_time_sim
-                    elif (current_time_sim - stuck_timer) > STUCK_TIME:
-                        print(f"[Warn] Stuck Detected! (No mov > {STUCK_THRESHOLD}m for {STUCK_TIME}s). Requerying...", flush=True)
-                        stuck_trigger = True
-                        stuck_timer = current_time_sim 
-                # -------------------
+            act_pos_mm = batch_result["position"]  # (3,) mm
+            act_quat_xyzw = batch_result["quaternion"]  # (4,)
+            act_grip = batch_result["gripper"]
 
-                # Construct Goal
-                end_p = np.zeros(7, dtype=np.float32)
-                end_p[:3] = cube_pos_np
-                
-                # --- GOAL Y INVERSION ---
-                # To match Mirrored Proprio.
-                end_p[1] *= -1.0 
-                # ------------------------
-                
-                # Force Downward Orientation for Goal
-                end_p[3:] = np.array([0.0, 0.0, 1.0, 0.0]) 
-                
-                if i == 0 or float(requery) > 0.6 or stuck_trigger:
-                    # Update Start Pose to Current Pose (Tip Frame) for Requery
-                    initial_pose_np = proprio[0, -1, :7].cpu().numpy()
+            # Flip Y for Sim (Model -> Sim)
+            # AND Convert mm -> meters
+            act_pos_sim = act_pos_mm.copy() / 1000.0
+            # act_pos_sim[1] *= -1.0 (Disabled)
 
-                    task_type = 1 
-                    g_emb = oracle.encode_goal(task_type, initial_pose_np, end_p).to(device)
-                    goal_emb[0] = g_emb
-                    print(f"Goal Re-generated! Start: {initial_pose_np[:3].round(3)}", flush=True)
+            # Quat conversion xyzw -> wxyz for Isaac
+            act_quat_wxyz = np.array(
+                [act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]]
+            )
 
-                # Model Forward Pass
-                current_time = time.time()
-                model_ran = False
-                if current_time - last_command_time >= target_dt:
-                    t0 = time.time()
-                    with torch.inference_mode():
-                        actions, _, requery_logit = model(images, proprio, goal_embedding=goal_emb, update_queue=False, use_memory=False)
-                        requery = torch.sigmoid(requery_logit)
-                    dt = (time.time() - t0) * 1000
-                    last_command_time = current_time
-                    pos_pred = actions[0, :3].cpu().numpy()
-                    model_ran = True
+            # Gripper Cmd — with hysteresis to prevent oscillation
+            # DROID convention: > 0.5 = open, < 0.5 = closed
+            # BinaryJointPositionAction: -1.0 = open, 1.0 = close
+            # Hysteresis: once open, stay open until < 0.3; once closed, stay closed until > 0.7
+            if not hasattr(main, "_gripper_state"):
+                main._gripper_state = -1.0  # Start closed
+            if main._gripper_state == -1.0 and act_grip > 0.7:
+                main._gripper_state = 1.0  # Switch to open
+            elif main._gripper_state == 1.0 and act_grip < 0.3:
+                main._gripper_state = -1.0  # Switch to closed
+            act_grip_cmd = main._gripper_state
 
-                # --- LOGGING ---
-                if i % 10 == 0:
-                    delta = pos_tip_sim - cube_pos_np
-                    print(f"S:{i} | Tip:{pos_tip_sim.round(3)} | Cube:{cube_pos_np.round(3)} | D:{np.linalg.norm(delta):.3f} | dZ:{delta[2]:.3f}")
-                
-                 # Step
-                
-                if model_ran:
-                    act_pos = actions[:, :3]
-                    act_quat_xyzw = actions[:, 3:7]
-                    act_grip = actions[:, 7:]
-                    
-                    # --- ACTION INVERSION ---
-                    # Model commands Mirrored Y. Flip to Sim Y.
-                    act_pos_sim = act_pos.clone()
-                    act_pos_sim[:, 1] *= -1.0 
-                    # ------------------------
-                    
-                    act_quat_wxyz = torch.cat([act_quat_xyzw[:, 3:4], act_quat_xyzw[:, :3]], dim=1)
-                    
-                    act_grip_prob = torch.sigmoid(act_grip)
-                    act_grip_cmd = torch.where(act_grip_prob > 0.5, 
-                                            torch.tensor(1.0, device=device), 
-                                            torch.tensor(-1.0, device=device))
-                    
-                    env_actions = torch.cat([act_pos_sim, act_quat_wxyz, act_grip_cmd], dim=1)
-                
-                obs, reward, terminated, truncated, info = env.step(env_actions)
-                        
+            # Compose
+            env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [act_grip_cmd]])
+            env_action_t = torch.tensor(env_action, device=device).unsqueeze(
+                0
+            )  # (1, 8)
+
+            # Step
+            obs, reward, terminated, truncated, info = env.step(env_action_t, model_run)
+
+            if i % 10 == 0:
+                print(f"Step {i} --------------------------------------------------")
+                print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
+                r_euler = (
+                    pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32))
+                    .euler()
+                    .numpy()
+                    * 180.0
+                    / np.pi
+                )
+                print(
+                    f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}"
+                )
+                print(f"  Target  Pos (m) : {act_pos_sim.round(3)}")
+                print(f"  Target  Rot (deg): {r_euler.round(1)} (XYZ)")
+                print(
+                    f"  Target  Grip    : {act_grip:.3f} ({'Open' if act_grip > 0.5 else 'Close'})"
+                )
+                print(f"  Requery Flag    : {requery_flag_model}")
                 if terminated.any() or truncated.any():
-                    print(f"!!! RESET triggered at step {i} !!!")
+                    print(f"!!! RESET TRIGGERED (Step {i}) !!!", flush=True)
+                    print(f"  Terminated: {terminated}", flush=True)
+                    print(f"  Truncated: {truncated}", flush=True)
+                    print(f"  Info: {info}", flush=True)
+
                     obs, info = env.reset()
-                    initial_pose_np = None 
-                    
-        # Plotting
-        print("Generating 3D Trajectory Plot...")
-        traj_actual = np.array(history_actual)
-        traj_pred = np.array(history_pred)
-        traj_target = np.array(history_target)
+                    agent.reset()  # Reset inference state
+                    initial_pose_13d = None
+                    requery_flag = True
 
-        fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection='3d')
-
-        ax.plot(traj_actual[:, 0], traj_actual[:, 1], traj_actual[:, 2], label='Actual TIP Path', color='blue')
-        ax.scatter(traj_actual[0,0], traj_actual[0,1], traj_actual[0,2], color='blue', marker='o')
-        
-        # Plot commands in Red. Note these are PRE-FLIP (Model Output).
-        ax.plot(traj_pred[:, 0], traj_pred[:, 1], traj_pred[:, 2], label='Model Commands (Flipped)', color='red', linestyle='--')
-        
-        ax.plot(traj_target[:, 0], traj_target[:, 1], traj_target[:, 2], label='Cube Path', color='green', alpha=0.6)
-        ax.scatter(traj_target[-1,0], traj_target[-1,1], traj_target[-1,2], color='green', marker='*', s=200, label='Cube End')
-
-        ax.set_title(f'Sim-to-Real Debug: Trajectory Analysis\nSteps: {len(traj_actual)}')
-        ax.legend()
-        plt.savefig(os.path.join(os.path.dirname(args.checkpoint), "debug_trajectory_3d.png"))
-        plt.close()
-        
         print("Evaluation Complete.")
+
     except Exception as e:
-        print(f"Runtime error: {e}")
+        print(f"Runtime Error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
-        if 'env' in locals(): env.close()
         simulation_app.close()
+
 
 if __name__ == "__main__":
     main()

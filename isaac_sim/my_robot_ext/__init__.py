@@ -1,12 +1,15 @@
 """
 Root package initialization for the custom robot extension.
 """
+
 import os
 import toml
+
 
 # Convenience function to get the extension path
 def get_extension_path():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 # Load extension config
 try:
@@ -17,4 +20,4 @@ except Exception:
     __version__ = "0.1.0"
 
 # Import submodules to trigger registration
-from . import tasks, config, wrappers
+from . import tasks as tasks, config as config, wrappers as wrappers  # noqa: E402

@@ -13,15 +13,17 @@ except ImportError:
 # Configuration for specific robots
 ##
 
+
 class FrankaCfg(ArticulationCfg):
     """Configuration for the Franka Emika Panda robot."""
+
     def __init__(self, **kwargs):
         super().__init__(
             prim_path="/World/envs/env_.*/Robot",
             spawn=sim_utils.UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/FrankaRobotics/FrankaPanda/franka.usd",
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False,
+                    disable_gravity=True,
                     retain_accelerations=False,
                     linear_damping=0.0,
                     angular_damping=0.0,
@@ -30,7 +32,9 @@ class FrankaCfg(ArticulationCfg):
                     max_depenetration_velocity=1.0,
                 ),
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                    enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+                    enabled_self_collisions=False,
+                    solver_position_iteration_count=4,
+                    solver_velocity_iteration_count=0,
                 ),
             ),
             init_state=ArticulationCfg.InitialStateCfg(
@@ -52,15 +56,15 @@ class FrankaCfg(ArticulationCfg):
                     joint_names_expr=["panda_joint[1-4]"],
                     effort_limit=87.0,
                     velocity_limit=2.175,
-                    stiffness=400.0,
-                    damping=40.0,
+                    stiffness=4000.0,
+                    damping=400.0,
                 ),
                 "panda_forearm": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[5-7]"],
                     effort_limit=12.0,
                     velocity_limit=2.61,
-                    stiffness=400.0,
-                    damping=40.0,
+                    stiffness=4000.0,
+                    damping=400.0,
                 ),
                 "panda_hand": ImplicitActuatorCfg(
                     joint_names_expr=["panda_finger_joint.*"],
@@ -72,8 +76,10 @@ class FrankaCfg(ArticulationCfg):
             },
         )
 
+
 class GoogleRobotCfg(ArticulationCfg):
     """Configuration for the Google Robot (Placeholder)."""
+
     def __init__(self, **kwargs):
         super().__init__(
             prim_path="/World/envs/env_.*/Robot",

@@ -3,248 +3,432 @@ import sys
 import torch
 import argparse
 import numpy as np
-import tensorflow_datasets as tfds
-import tensorflow as tf
+
+# Suppress TF logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.models.axis_v1 import AxisModel
+from src.models.axis import AxisModel
 from imitation.utils.visualizer import Visualizer
-from imitation.data.goal_oracle import GoalOracle
+from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.local_loader import LocalDataLoader
 
-from scipy.spatial.transform import Rotation as R
 
-def load_episode(dataset_name, data_dir, split='train'):
-    """Loads a single random episode from the dataset safely."""
-    print(f"Loading dataset {dataset_name} from {data_dir}...")
-    
-    # Special handling for fractal on GCS
-    if data_dir and data_dir.startswith('gs://') and 'fractal' in dataset_name:
-        full_path = f"{data_dir}/{dataset_name}/0.1.0"
-        builder = tfds.builder_from_directory(builder_dir=full_path)
-        ds = builder.as_dataset(split=split, shuffle_files=True)
-    else:
-        # Standard load for Droid and others
-        ds = tfds.load(dataset_name, split=split, shuffle_files=True, data_dir=data_dir)
-    
-    # Use safe iteration
-    iterator = iter(ds)
-    episode = next(iterator)
-    
-    steps = list(episode['steps'])
-    images = []
-    proprio = []
-    
-    # Image keys to check
-    image_keys = ['image', 'exterior_image_1_left', 'wrist_image_left', 'exterior_image_2_left']
-    
-    for s in steps:
-        obs = s['observation']
-        
-        # Image
-        img = None
-        for key in image_keys:
-            if key in obs:
-                img = obs[key]
-                break
-        
-        if img is not None:
-            img = tf.image.resize(img, (128, 128))
-            img = tf.cast(img, tf.float32) / 255.0
-            images.append(tf.transpose(img, [2, 0, 1]).numpy())
-        else:
-            images.append(np.zeros((3, 128, 128), dtype=np.float32))
-        
-        # 8D Pose: [x, y, z, qx, qy, qz, qw, g]
-        p = np.zeros(7, dtype=np.float32)
-        
-        if 'base_pose_tool_reached' in obs:
-            p = obs['base_pose_tool_reached'].numpy()
-        elif 'cartesian_position' in obs:
-            # Droid: 6D [x, y, z, rx, ry, rz]
-            p6 = obs['cartesian_position'].numpy()
-            if p6.shape[0] == 6:
-                pos = p6[:3]
-                euler = p6[3:]
-                quat = R.from_euler('xyz', euler).as_quat()
-                p = np.concatenate([pos, quat])
-        elif 'ee_pose' in obs: p = obs['ee_pose'].numpy()
-        elif 'pose' in obs: p = obs['pose'].numpy()
-        
-        # Gripper
-        g = 0.0
-        if 'gripper_closed' in obs: g = obs['gripper_closed'].numpy()
-        elif 'gripper_position' in obs: g = obs['gripper_position'].numpy()
-        elif 'gripper_state' in obs: g = obs['gripper_state'].numpy()
-        
-        if not np.isscalar(g): g = g.item() if g.size == 1 else g[0]
-        
-        p8 = np.zeros(8, dtype=np.float32)
-        if p.shape[0] == 7: p8[:7] = p
-        elif p.shape[0] == 6: p8[:6] = p
-        p8[7] = g
-        proprio.append(p8)
-        
-    return np.array(images), np.array(proprio)
+class TemporalEnsembler:
+    """
+    Simulates temporal ensembling by aggregating overlapping action chunks.
+
+    Maintains a buffer of recent action chunks. For the current timestep t,
+    it gathers all predictions covering t made at previous steps (t, t-1, t-2...).
+    Then computes an exponentially weighted average.
+    """
+
+    def __init__(self, horizon, k=0.01):
+        self.horizon = horizon
+        self.k = k
+        # List of (start_step, chunk_tensor)
+        self.active_chunks = []
+
+    def reset(self):
+        self.active_chunks = []
+
+    def update(self, start_step, chunk):
+        """
+        Add a new chunk prediction starting at start_step.
+        chunk: (ChunkSize, ActionDim) tensor
+        """
+        if not isinstance(chunk, torch.Tensor):
+            chunk = torch.tensor(chunk, dtype=torch.float32)
+
+        self.active_chunks.append((start_step, chunk))
+
+    def get_action(self, current_step):
+        """
+        Get the aggregated action for the current_step.
+        """
+        actions = []
+        weights = []
+
+        # Filter relevant chunks
+        new_active = []
+        for start_t, chunk in self.active_chunks:
+            # Check if this chunk covers current_step
+            # Index in chunk = current_step - start_t
+            idx = current_step - start_t
+
+            if idx >= 0 and idx < self.horizon:
+                # Valid overlap
+                actions.append(chunk[idx])
+                # Exponential weight based on "freshness"
+                w = np.exp(-self.k * idx)
+                weights.append(w)
+                new_active.append((start_t, chunk))
+            elif idx < 0:
+                # Future chunk?
+                new_active.append((start_t, chunk))
+            else:
+                # Expired chunk
+                pass
+
+        self.active_chunks = new_active
+
+        if not actions:
+            # Fallback if no coverage
+            return torch.zeros(7)
+
+        # Weighted Average
+        actions_stack = torch.stack(actions, dim=0)  # (N, 7)
+        weights_stack = torch.tensor(weights, device=actions_stack.device).unsqueeze(
+            1
+        )  # (N, 1)
+
+        weighted_sum = (actions_stack * weights_stack).sum(dim=0)
+        total_weight = weights_stack.sum()
+
+        return weighted_sum / total_weight
+
 
 def make_gif(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
-    # Clear cache
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # --- Configuration ---
-    config = {
-        'device': device,
-        'goal_dim': 64, 
-        'cond_dim': 256,
-        'vision_feature_dim': 256,
-        'num_vision_tokens': 8,
-        'window_size': 8,
-        'latent_dim': 256,
-        'queue_size': 10,
-        'embed_dim': 256,
-        'num_heads': 4,
-        'num_layers': 4,
-        'proprio_dim': 8, # 3 Pos + 4 Quat + 1 Gripper
-        'action_dim': 8
-    }
+    # --- V2 Configuration ---
+    config = "AxisV2"
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
-    model.eval()
+    config = model.config
 
-    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
-    if not os.path.exists(checkpoint_path):
-        print(f"Checkpoint not found: {checkpoint_path}")
-        # Try looking for run_*.pt files
-        files = [f for f in os.listdir(args.checkpoint_dir) if f.startswith('run_') and f.endswith('.pt')]
-        if files:
-            files.sort(key=lambda x: os.path.getmtime(os.path.join(args.checkpoint_dir, x)))
-            checkpoint_path = os.path.join(args.checkpoint_dir, files[-1])
-            print(f"Using latest run checkpoint: {checkpoint_path}")
-        else:
-            return
+    if args.random_weights:
+        print("WARNING: Using Random Weights.")
+        model.eval()
+    else:
+        model.eval()
+        checkpoint_path = os.path.join(args.checkpoint_dir, "checkpoint_latest.pt")
+        if not os.path.exists(checkpoint_path):
+            print(f"Checkpoint not found: {checkpoint_path}")
+            # Try finding runs
+            if os.path.exists(args.checkpoint_dir):
+                files = [
+                    f for f in os.listdir(args.checkpoint_dir) if f.endswith(".pt")
+                ]
+                if files:
+                    files.sort(
+                        key=lambda x: os.path.getmtime(
+                            os.path.join(args.checkpoint_dir, x)
+                        )
+                    )
+                    checkpoint_path = os.path.join(args.checkpoint_dir, files[-1])
+                    print(f"Using latest found checkpoint: {checkpoint_path}")
+                else:
+                    print("No checkpoints found.")
+                    return
+            else:
+                print(f"Checkpoint dir {args.checkpoint_dir} does not exist.")
+                return
 
-    print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Filter state dict
-    state_dict = checkpoint['model_state_dict']
-    model_state = model.state_dict()
-    filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state and v.shape == model_state[k].shape}
-    model.load_state_dict(filtered_state_dict, strict=False)
-    
-    step = checkpoint.get('step', 0)
-    print(f"Loaded model at step {step}")
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded model at step {checkpoint.get('step', 'unknown')}")
 
     # --- Load Data ---
-    print("Loading one episode...")
-    images_np, proprio_np = load_episode(args.dataset, args.data_dir)
-    
-    if images_np is None:
-        print("Failed to load episode.")
-        return
+    if args.local_data_path:
+        print(f"Loading from LOCAL HDF5: {args.local_data_path}")
+        # If random, we load ALL episodes (max_episodes=0) and shuffle.
+        # Otherwise, we take the first N (usually 1).
+        local_max_episodes = (
+            0 if args.random else (args.max_episodes if args.max_episodes > 0 else 1)
+        )
+        loader = LocalDataLoader(
+            data_path=args.local_data_path,
+            window_size=10,
+            loss_horizon=10,
+            shuffle=args.random,
+            repeat=False,
+            max_episodes=local_max_episodes,
+        )
+    else:
+        print(f"Initializing RTXStreamLoader for {args.dataset}...")
+        loader = RTXStreamLoader(
+            dataset_name=args.dataset,
+            split="train",
+            window_size=10,
+            image_size=(224, 224),
+            data_dir=args.data_dir,
+            repeat=False,
+            use_subprocess=False,
+            shuffle_buffer_size=0,
+            shuffle_files=args.random,
+            max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
+        )
 
-    T = images_np.shape[0]
-    print(f"Episode length: {T}")
+    iterator = iter(loader)
 
-    # Prepare Inputs
-    images = torch.tensor(images_np, dtype=torch.float32).to(device).unsqueeze(0) # (1, T, 3, 128, 128)
-    proprio = torch.tensor(proprio_np, dtype=torch.float32).to(device).unsqueeze(0) # (1, T, 8)
-    
-    # --- Goal Oracle ---
-    oracle = GoalOracle(output_dim=64)
-    
-    # Infer task type (simple heuristic)
-    start_grip = proprio_np[0][7] # Index 7 is gripper
-    end_grip = proprio_np[-1][7]
-    task_type = 0
-    if start_grip < 0.5 and end_grip > 0.5: task_type = 1 # Pick
-    elif start_grip > 0.5 and end_grip < 0.5: task_type = 2 # Place
-    
-    print(f"Inferred Task Type: {task_type} (Start Grip: {start_grip:.2f}, End Grip: {end_grip:.2f})")
-    
-    goal_emb = oracle.encode_goal(task_type, proprio_np[0], proprio_np[-1])
-    goal_emb = goal_emb.to(device).unsqueeze(0) # (1, 64)
+    # --- Visualization Setup ---
+    viz = Visualizer(args.checkpoint_dir)
+
+    # --- Temporal Ensembling ---
+    ensembler = TemporalEnsembler(horizon=config["chunk_size"], k=args.ensemble_k)
 
     # --- Inference Loop ---
     pred_actions = []
     requery_preds = []
-    
-    model.reset_memory(1)
-    W = config['window_size']
-    
-    import time
-    
-    print("Running inference (Autoregressive)...")
+    images_collected = []
+    gt_twists = []
+
+    # Store Poses
+    gt_poses = []
+    pred_poses = []
+
     inference_times = []
-    
-    # Clone proprio for autoregressive updates
-    simulated_proprio = proprio.clone()
-    
+
+    print(f"Processing {args.length} steps...")
+
+    # Initialize predicted pose with first GT pose
+    # We need to get the first batch to initialize this.
+    # But iterator gives batches one by one.
+    # We'll initialize on the first step.
+    curr_pred_pose_13d = None
+    current_proprio_window = None
+
+    # Initialize KV-Cache and Subtask Collection
+    cached_tokens = None
+    subtask_goal_poses_collected = []
+    prev_proprio = None
+
     with torch.no_grad():
-        for t in range(T):
-            if t % 10 == 0: print(f"Step {t}/{T}")
-            # Construct Window ending at t using simulated_proprio
-            if t < W:
-                pad_len = W - 1 - t
-                curr_imgs = images[:, :t+1]
-                curr_props = simulated_proprio[:, :t+1]
-                pad_imgs = curr_imgs[:, 0:1].repeat(1, pad_len, 1, 1, 1)
-                pad_props = curr_props[:, 0:1].repeat(1, pad_len, 1)
-                win_imgs = torch.cat([pad_imgs, curr_imgs], dim=1)
-                win_props = torch.cat([pad_props, curr_props], dim=1)
+        for i in range(args.length):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                print("Dataset exhausted.")
+                break
+
+            if i % 10 == 0:
+                print(f"Step {i}/{args.length}")
+
+            # Unpack Batch
+            images = batch["images"].to(device)
+            if images.dim() == 4:
+                images = images.unsqueeze(0)
+
+            proprio = batch["proprio"].to(device)
+            if proprio.dim() == 2:
+                proprio = proprio.unsqueeze(0)
+
+            # Check for discontinuity (new episode)
+            # The loader yields windows with step 1.
+            # So window[t][-1] (last frame) should equal window[t+1][-2] (second to last frame).
+            if i > 0 and prev_proprio is not None:
+                prev_last = prev_proprio[0, -1]
+                curr_second_last = proprio[0, -2]
+                # Compare
+                if torch.linalg.norm(prev_last - curr_second_last) > 1e-3:
+                    print(
+                        f"Episode discontinuity detected at step {i} (Diff: {torch.linalg.norm(prev_last - curr_second_last)}). Stopping collection."
+                    )
+                    break
+
+            prev_proprio = proprio
+
+            goal = batch["goal"].to(device)
+            if goal.dim() == 1:
+                goal = goal.unsqueeze(0)
+
+            # Initialize Prediction state if needed
+            if curr_pred_pose_13d is None:
+                # Start from the LAST proprio of the FIRST window?
+                # Actually, make_gif usually iterates sequential windows.
+                # The "current" state is the last item in the window input.
+                curr_pred_pose_13d = proprio[0, -1].cpu().numpy()  # (13,)
+
+                # Also store initial poses
+                pred_poses.append(curr_pred_pose_13d)
+
+            # Collect GT Pose (current state at end of window)
+            gt_pose_curr = proprio[0, -1].cpu().numpy()  # (13,)
+            gt_poses.append(gt_pose_curr)
+
+            # Determine Proprio Input
+            if args.closed_loop:
+                if current_proprio_window is None:
+                    # Initialize with GT from first batch
+                    current_proprio_window = proprio.clone()
+                proprio_input = current_proprio_window
             else:
-                win_imgs = images[:, t-W+1 : t+1]
-                win_props = simulated_proprio[:, t-W+1 : t+1]
-            
-            # Measure inference time
+                proprio_input = proprio
+
+            # Collect Subtask Goal from Input Vector (Indices 16-29)
+            # goal is (B, 38)
+            current_subtask_goal = goal[0, 16:29].cpu().numpy()  # (13,)
+            subtask_goal_poses_collected.append(current_subtask_goal)
+
+            # Forward Pass with Caching
+            import time
+
             start_time = time.time()
-            pred_act, _, req_logit = model(
-                win_imgs, 
-                win_props, 
-                goal_emb, 
-                update_queue=True, 
-                use_memory=True
+
+            pred_chunk, req_logit, cached_tokens = model(
+                images,
+                proprio_input,
+                goal,
+                cached_tokens=cached_tokens,
+                return_tokens=True,
             )
+
+            # Update KV-Cache: Keep last (W-1) tokens to form window for NEXT step
+            # cached_tokens is (B, W, 512). We want (B, W-1, 512) representing indices 1..W
+            if cached_tokens.shape[1] > 1:
+                cached_tokens = cached_tokens[:, 1:, :]
+            else:
+                cached_tokens = cached_tokens  # Should not happen if W=10
+
             end_time = time.time()
             inference_times.append(end_time - start_time)
-            
-            # Autoregressive update: If we are not at the last step, update the NEXT step's input
-            # Predicted action corresponds to state at t+1
-            if t + 1 < T:
-                 # pred_act is (1, 8), simulated_proprio is (1, T, 8)
-                 simulated_proprio[:, t+1, :] = pred_act
-            
-            pred_actions.append(pred_act.cpu())
-            requery_preds.append(torch.sigmoid(req_logit).cpu())
 
-    pred_actions = torch.stack(pred_actions, dim=1).squeeze(0) # (T, 8)
-    requery_preds = torch.stack(requery_preds, dim=1).squeeze(0) # (T, 1)
-    
-    # Target actions: Shift proprio by 1
-    targets = np.zeros_like(proprio_np)
-    targets[:-1] = proprio_np[1:]
-    targets[-1] = proprio_np[-1]
-    targets = torch.tensor(targets, dtype=torch.float32)
+            # Debug Requery (First 5 steps)
+            if i % 10 == 0:
+                print(f"DEBUG: Step {i} Raw Requery Logit from Model: {req_logit}")
+
+            # Action: Ensembling
+            current_chunk = pred_chunk[0].cpu()  # (Chunk, 7)
+            ensembler.update(i, current_chunk)
+
+            # Get aggregated action for NOW (step i)
+            current_pred_action = ensembler.get_action(i).unsqueeze(0)  # (1, 7)
+
+            # Use raw logit as requested by user
+            current_req = req_logit.cpu()  # (1, 1)
+
+            pred_actions.append(current_pred_action)
+            requery_preds.append(current_req)
+
+            # Integrate Prediction
+            integration_start_state = curr_pred_pose_13d
+            integrated = viz.integrate_twist(
+                integration_start_state, current_pred_action
+            )
+            next_pred_pose = integrated[0]
+
+            curr_pred_pose_13d = next_pred_pose
+            pred_poses.append(curr_pred_pose_13d)
+
+            # Update proprio window for Closed Loop
+            if args.closed_loop:
+                next_pose_tensor = (
+                    torch.tensor(next_pred_pose, device=device, dtype=torch.float32)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                )
+                current_proprio_window = torch.cat(
+                    [current_proprio_window[:, 1:], next_pose_tensor], dim=1
+                )
+
+            # Collect Visualization Data (Image)
+            last_img = images[0, -1].cpu()  # (3, H, W)
+            images_collected.append(last_img)
+
+            # GT Twist (Future)
+            if "actions" in batch:
+                gt = batch["actions"][0, 0].cpu()  # (7,)
+                gt_twists.append(gt)
+            else:
+                gt_twists.append(torch.zeros(7))
+
+    if not images_collected:
+        print("No data collected.")
+        return
+
+    # Stack results
+    pred_actions_stack = torch.cat(pred_actions, dim=0)
+    requery_preds_stack = torch.cat(requery_preds, dim=0)
+    images_stack = torch.stack(images_collected, dim=0)
+    gt_stack = torch.stack(gt_twists, dim=0)
+
+    # Image[t], Twist[t], Pose[t] (state AT t)
+    gt_poses_stack = torch.tensor(np.array(gt_poses), dtype=torch.float32)
+    pred_poses_stack = torch.tensor(np.array(pred_poses[:-1]), dtype=torch.float32)
+    subtask_goal_poses_tensor = torch.tensor(
+        np.stack(subtask_goal_poses_collected), dtype=torch.float32
+    )
+
+    print(f"Collected {len(images_collected)} frames. Poses: {gt_poses_stack.shape}")
+
+    # Debug Requery Stats
+    if len(requery_preds) > 0:
+        req_tensor = torch.stack(requery_preds)
+        print(
+            f"DEBUG: Requery Stats - Min: {req_tensor.min().item():.4f}, Max: {req_tensor.max().item():.4f}, Mean: {req_tensor.mean().item():.4f}"
+        )
+        if (req_tensor.max() - req_tensor.min()) < 1e-6:
+            print(
+                "DEBUG: Requery signal is static (model is likely outputting constant 0 logit)."
+            )
 
     # --- Generate GIF ---
     print("Generating GIF...")
-    viz = Visualizer(args.checkpoint_dir)
-    # Use 'manual' prefix to distinguish from training GIFs
-    # Use higher DPI for manual generation
-    viz.create_gif(step, images[0], targets, pred_actions, requery_preds, inference_times=inference_times, save_prefix='manual_episode', dpi=100)
+    viz.create_gif(
+        0,
+        images_stack,
+        gt_stack,
+        pred_actions_stack,
+        gt_poses=gt_poses_stack,
+        pred_poses=pred_poses_stack,
+        requery_preds=requery_preds_stack,
+        inference_times=inference_times,
+        subtask_goal_poses=subtask_goal_poses_tensor,
+        save_prefix="episode_stream_viz",
+        dpi=100,
+    )
     print("Done!")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='fractal20220817_data')
-    parser.add_argument('--data_dir', type=str, default='gs://gresearch/robotics')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-    
+    parser.add_argument("--dataset", type=str, default="droid")
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument(
+        "--local_data_path",
+        type=str,
+        default=None,
+        help="Path to local HDF5 file (overrides streaming)",
+    )
+    parser.add_argument(
+        "--max_episodes",
+        type=int,
+        default=1,
+        help="Max episodes to use (default: 1 for overfit testing)",
+    )
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument(
+        "--random_weights", action="store_true", help="Use random weights"
+    )
+    parser.add_argument(
+        "--random", action="store_true", help="Select from random episodes"
+    )
+    parser.add_argument(
+        "--closed_loop",
+        action="store_true",
+        help="Use closed-loop proprioception feedback",
+    )
+    parser.add_argument(
+        "--length", type=int, default=100, help="Number of steps to visualize"
+    )
+    parser.add_argument(
+        "--ensemble_k",
+        type=float,
+        default=0.01,
+        help="Exponential weighting decay for ensembling",
+    )
+
     args = parser.parse_args()
     make_gif(args)

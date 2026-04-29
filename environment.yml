@@ -11,8 +11,8 @@ dependencies:
   - pip
   # Pin PyTorch to match requirements.txt
   - pytorch=2.2.1
-  - torchvision
-  - torchaudio
+  - torchvision=0.17.1
+  - torchaudio=2.2.1
   - pytorch-cuda=12.1
   - tqdm
   - pip:
@@ -29,6 +29,16 @@ dependencies:
       - flake8
       - pyyaml
       - pillow
+      - opencv-python-headless
       - psutil
       - toml
       - gymnasium
+      - pypose
+      - h5py
+      - sympy
+      - tensorboard
+      - torchsummary
+      - torchinfo
+      - huggingface-hub
+      - timm
+      - wandb

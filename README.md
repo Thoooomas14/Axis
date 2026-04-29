@@ -1,87 +1,137 @@
-# Axis: Adaptive Robot Control Policy
+# Axis: SE(3) Robot Control Policy
 
-Axis is a PyTorch-based robot learning framework designed for real-time, adaptive motion control. It integrates vision, semantic goals, and latent memory into a unified transformer-based policy, capable of controlling multiple robot embodiments (e.g., UR3e, WidowX).
+Axis is a PyTorch transformer-based robot learning framework for end-effector control using SE(3) Lie group representations. Trained on DROID and Fractal datasets via imitation learning.
 
 ## Latest Results
-![Eval Episode latest](fractal_episode_step_59108.gif)
-![Driod Eval Episode latest](images/driod_100_episode_step_41600.GIF)
+![DROID Eval](images/V2_latest.gif)
 
-## Features
+## Key Features
 
--   **Multi-Modal Input**: Consumes RGB images, Proprioception (7D EE Pose), and Semantic Goal Embeddings (64D).
--   **Window-Based Control**: Processes a sliding window of observations ($W=8$) to capture temporal dynamics.
--   **GCS Streaming**: Streams large datasets directly from Google Cloud Storage, enabling training on massive datasets without local storage overhead.
--   **Semantic Goal Oracle**: Deterministically encodes task types (Pick/Place/Move) and POIs into dense goal vectors.
--   **Latent Memory**: Utilizes a latent queue to maintain long-term context (optional).
--   **Requery Mechanism**: Predicts when a sub-task is complete or requires re-evaluation.
+| Feature | Description |
+|---------|-------------|
+| **SE(3) Twists** | Actions represented as 7D Lie algebra twists (`[ω, v, gripper]`) for geometrically consistent control |
+| **SE(3) State** | Proprioception as 13D SE(3) pose (`[R_flat(9), pos(3), gripper(1)]`) using PyPose |
+| **Action Chunking** | Predicts W future actions in parallel (no autoregressive rollout) |
+| **Temporal Ensembling** | Smooth action output via overlapping chunk averaging |
+| **Endpoint Chordal Loss** | Task-oriented SE(3) chordal loss (trig-free Frobenius norm) |
+| **Sim Diagnostics** | Automated trajectory comparison tool for Sim-to-Real alignment |
+| **Self-Supervised Confidence** | Learns to predict own accuracy (requery signal) |
+| **Local + Streaming Data** | Train from GCS or preprocessed HDF5 files |
+
+## Architecture
+
+```
+Inputs:
+  - Images: (B, W, 3, 224, 224)     → DINOv2 (ViT-S/14) → 768D
+  - Proprio: (B, W, 13)             → MLP → 128D  
+  - Goal: (B, 38)                   → MLP → 128D
+
+Token: [Proprio | Vision | Goal] = 1024D per timestep
+
+Backbone: Transformer (8 layers, 16 heads, RoPE positional encoding)
+
+Output: (B, W, 7) twist actions + (B, 1) confidence
+```
 
 ## Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Thoooomas14/Axis.git
-    cd Axis
-    ```
+```bash
+git clone https://github.com/Thoooomas14/Axis.git
+cd Axis
+conda env create -f environment.yml
+conda activate axis_env
+```
 
-2.  **Quick Setup (Conda)**:
-    ```bash
-    conda env create -f environment.yml
-    conda activate axis_env
-    ```
-
-For detailed instructions, see the [Installation Guide](docs/installation.md).
+See [Installation Guide](docs/installation.md) for details.
 
 ## Quick Start
 
-### 1. GCS Authentication (Required)
+### Training
 
-To stream data, you must authenticate with Google Cloud.
--   **Local**: `gcloud auth application-default login`
--   **Remote/SSH**: `gcloud auth application-default login --no-launch-browser`
-
-See [Training Process](docs/training_process.md) for a full walkthrough.
-
-### 2. Training
-
-To start training (streaming `fractal20220817_data` from GCS):
-
+**Option A: Stream from GCS**
 ```bash
-python training/train.py \
+gcloud auth application-default login  # Required once
+
+python imitation/train.py \
     --dataset fractal20220817_data \
     --batch_size 32 \
-    --viz \
-    --viz_interval 1000
+    --steps 10000
 ```
 
-### 3. Evaluation
-
-To visualize model predictions on a test episode:
-
+**Option B: Local preprocessed** (recommended for DROID)
 ```bash
-python scripts/evaluate_sequence.py \
-    --checkpoint_dir checkpoints
+# 1. Preprocess once
+python -m imitation.data.preprocessor --output E:/data/droid.h5 --dataset droid
+
+# 2. Train
+python imitation/train.py --local_data_path E:/data/droid.h5 --batch_size 32
 ```
 
-For more configuration options, run:
+### Evaluation
+
+**Closed-loop Isaac Sim Evaluation:**
 ```bash
-python training/train.py --help
+python scripts/eval_isaac.py --checkpoint checkpoints/latest.pt --robot franka
 ```
+
+**Trajectory Comparison (Diagnostic):**
+```bash
+python scripts/sim_diagnostic.py --mode both --proprio_source sim --checkpoint checkpoints/latest.pt
+```
+
+**Dataset sequence evaluation:**
+```bash
+python scripts/evaluate_sequence.py --checkpoint_dir checkpoints
+```
+
+### Key Training Args
+
+| Arg | Description | Default |
+|-----|-------------|---------|
+| `--local_data_path` | Preprocessed HDF5 (overrides streaming) | None |
+| `--window_size` | Temporal context / action chunk size | 10 |
+| `--loss_horizon` | Steps to rollout before loss (1=immediate) | 1 |
+| `--omega_rot` | Rotation loss weight | 1.0 |
+| `--omega_trans` | Translation loss weight | 1.0 |
+
+Run `python imitation/train.py --help` for all options.
 
 ## Documentation
 
-Detailed documentation is available in the `docs/` directory:
-
--   [Model Design](docs/model_design.md): Architecture details (64D Goal, 7D Proprio).
--   [Training Process](docs/training_process.md): GCS Auth, Configuration, and Checkpointing.
--   [Data Pipeline](docs/data_pipeline.md): Explanation of `RTXStreamLoader` and `GoalOracle`.
--   [Isaac Lab Integration](docs/isaac_integration.md): Guide for RL & Simulation.
--   [References](docs/references.md): Related papers and concepts.
+| Doc | Description |
+|-----|-------------|
+| [Model Design](docs/model_design.md) | Architecture, 13D poses, 38D goals |
+| [Training Process](docs/training_process.md) | Loss functions, checkpointing, OOM recovery |
+| [Data Pipeline](docs/data_pipeline.md) | RTXStreamLoader, LocalDataLoader, preprocessing |
+| [Isaac Integration](docs/isaac_integration.md) | Simulation deployment |
 
 ## Project Structure
 
--   `training/`: Core training logic and model definitions.
-    -   `model/`: Neural network architecture (AxisModel, Transformer).
-    -   `data/`: Data loading utilities (RTXStreamLoader, GoalOracle).
-    -   `utils/`: Logging and Visualization tools.
--   `scripts/`: Utility scripts (Verification, Evaluation).
--   `docs/`: Project documentation.
+```
+src/
+  models/         # AxisModel, encoders, decoders, transformer
+  inference.py    # Production wrapper with ensembling
+  utils/          # SE(3) utilities, rotation conversions
+
+imitation/
+  train.py        # Training script
+  data/           # Data loaders, preprocessor, goal oracle
+
+scripts/          # Evaluation, verification utilities
+  eval_isaac.py   # Closed-loop Isaac Sim evaluation
+  sim_diagnostic.py # Trajectory comparison and frame alignment tool
+  make_gif.py     # Visualization script
+docs/             # Documentation
+```
+
+## Citation
+
+If you use Axis in your research:
+```bibtex
+@software{axis2025,
+  title={Axis: SE(3) Robot Control Policy},
+  author={Thomas},
+  year={2025},
+  url={https://github.com/Thoooomas14/Axis}
+}
+```

@@ -1,0 +1,233 @@
+import torch
+import torch.nn as nn
+from .encoders import VisionEncoder, ProprioEncoder, GoalEncoder
+from .transformer import AxisTransformer
+from .decoders import ActionDecoder, RequeryDecoder, SafeActionDecoder
+
+
+class AxisModel(nn.Module):
+    """
+    The Axis Model.
+
+    Uses a concatenated single token per timestep: [Proprio(128) | Vision(768) | Goal(128)] -> 1024 dim.
+    Predicts future trajectory from the LAST token only (Current State -> Future).
+
+    Inputs:
+        - images: (B, W, C, H, W) - window of RGB images
+        - proprio: (B, W, 13) - window of 13D SE(3) poses
+        - goal: (B, 38) - standardized goal vector
+
+    Outputs:
+        - action: (B, ChunkSize, 7) - predicted future trajectory
+        - requery: (B, 1) - prediction confidence
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        if isinstance(config, str):
+            if config == "AxisV2":
+                config = {
+                    "goal_dim": 38,
+                    "proprio_dim": 13,
+                    "hidden_dim": 128,
+                    "num_heads": 16,
+                    "num_layers": 8,
+                    "use_rope": True,
+                    "action_dim": 7,
+                    "chunk_size": 10,
+                }
+                self.config = config
+            else:
+                raise ValueError(
+                    f"Unknown config string: {config}. "
+                    "Please provide a valid config name or a custom dictionary of parameters."
+                )
+        elif isinstance(config, dict):
+            self.config = config
+        else:
+            raise ValueError(
+                "Config must be either a str matching a default config or a custom dictionary of parameters."
+            )
+
+        # Dimensions
+        self.vision_dim = 768
+        self.proprio_dim = 128
+        self.goal_dim = 128
+        self.embed_dim = self.vision_dim + self.proprio_dim + self.goal_dim  # 1024
+
+        # --- Encoders ---
+
+        self.goal_encoder = GoalEncoder(
+            input_dim=config.get("goal_dim", 38), output_dim=self.goal_dim
+        )
+
+        self.vision_encoder = VisionEncoder(
+            img_size=config.get("img_size", (224, 224)),
+            feature_dim=self.vision_dim,
+            goal_dim=config.get("goal_dim", 38),
+        )
+
+        self.proprio_encoder = ProprioEncoder(
+            input_dim=config.get("proprio_dim", 13),
+            output_dim=self.proprio_dim,
+            hidden_dim=config.get("hidden_dim", 128),
+        )
+
+        # --- Backbone ---
+        self.transformer = AxisTransformer(
+            embed_dim=self.embed_dim,
+            num_heads=config.get("num_heads", 16),  # Increased heads for 512 dim
+            num_layers=config.get("num_layers", 8),
+            use_rope=config.get("use_rope", True),
+        )
+
+        # --- Decoders ---
+        action_dim = config.get("action_dim", 7)
+        chunk_size = config.get("chunk_size", 10)
+
+        base_decoder = ActionDecoder(
+            input_dim=self.embed_dim,
+            output_dim=action_dim,
+            hidden_dim=config.get("hidden_dim", 1024),
+            chunk_size=chunk_size,
+        )
+
+        self.action_decoder = SafeActionDecoder(base_decoder)
+        self.requery_decoder = RequeryDecoder(embed_dim=self.embed_dim)
+
+    def get_config(self):
+        return self.config
+
+    def forward(
+        self,
+        images,
+        proprio,
+        raw_goal,
+        cached_tokens=None,
+        return_tokens=False,
+        return_attn_weights=False,
+    ):
+        """
+        Forward pass for Axis V2.
+
+        Args:
+            images: (B, W, C, H, W) - window of RGB images
+            proprio: (B, W, 10) - window of 10D proprioceptive states
+            raw_goal: (B, 38) or (B, W, 38) - standardized raw goal vector
+            cached_tokens: (B, W-1, 512) - optional cached tokens from previous step
+            return_tokens: bool - whether to return input tokens for caching
+
+        Returns:
+            pred_action: (B, 10) or (B, chunk_size, 10) - predicted action(s)
+            requery_logit: (B, 1) - subtask completion logit
+            tokens: (B, W, 512) - (Optional) full token sequence if return_tokens=True
+            attn_weights: (Optional) list of attention matrices if return_attn_weights=True
+        """
+        B, W, C, H, _ = images.shape
+
+        if cached_tokens is not None and cached_tokens.shape[1] == W - 1:
+            # OPTIMIZED PATH: Process only the NEWEST frame (index -1)
+
+            # Extract NEWEST raw goal first to pass to VisionEncoder
+            if raw_goal.dim() == 3:
+                goal_raw_new = raw_goal[:, -1, :]  # (B, 38)
+            else:
+                goal_raw_new = raw_goal  # (B, 38) assumed constant
+
+            # Encode NEWEST goal for transformer backbone
+            goal_feat_new = self.goal_encoder(goal_raw_new)  # (B, 128)
+            goal_tokens_new = goal_feat_new.unsqueeze(1)  # (B, 1, 128)
+
+            # Encode NEWEST vision frame (passing RAW goal)
+            # images slice: (B, 1, C, H, W) -> flatten to (B*1, C, H, W)
+            images_new = images[:, -1:, ...].reshape(B, C, H, -1)
+            vision_tokens_new = self.vision_encoder(
+                images_new, goal=goal_raw_new
+            )  # pass RAW goal!
+            vision_tokens_new = vision_tokens_new.unsqueeze(1)  # (B, 1, 768)
+
+            # Encode NEWEST proprio frame
+            proprio_new = proprio[:, -1:, ...].reshape(B, -1)  # (B, 10)
+            proprio_tokens_new = self.proprio_encoder(proprio_new)  # (B, 128)
+            proprio_tokens_new = proprio_tokens_new.unsqueeze(1)  # (B, 1, 128)
+
+            # Concatenate for the new frame
+            new_tokens = torch.cat(
+                [proprio_tokens_new, vision_tokens_new, goal_tokens_new], dim=-1
+            )  # (B, 1, 512)
+
+            # Combine with cache
+            input_tokens = torch.cat([cached_tokens, new_tokens], dim=1)  # (B, W, 512)
+
+        else:
+            # STANDARD PATH: Process FULL window
+
+            # 1. Process Raw Goal & Encode for Backbone
+            if raw_goal.dim() == 3:
+                # Need raw goal sequence for vision encoder
+                goal_raw_flat = raw_goal.reshape(B * W, -1)  # (B*W, 38)
+
+                # Encode for backbone
+                goal_tokens_flat = self.goal_encoder(goal_raw_flat)  # (B*W, 128)
+                goal_tokens = goal_tokens_flat.reshape(B, W, 128)
+            else:
+                # Raw goal is constant across window
+                goal_raw_flat = raw_goal.repeat_interleave(W, dim=0)  # (B*W, 38)
+
+                # Encode for backbone
+                goal_feat = self.goal_encoder(goal_raw_flat)  # (B*W, 128)
+                goal_tokens = goal_feat.reshape(B, W, 128)  # (B, W, 128)
+
+            # 2. Encode vision (passing RAW goal)
+            images_flat = images.reshape(B * W, C, H, -1)
+
+            vision_tokens = self.vision_encoder(
+                images_flat, goal=goal_raw_flat
+            )  # (B*W, 768)
+            vision_tokens = vision_tokens.reshape(B, W, self.vision_dim)  # (B, W, 768)
+
+            # 3. Encode proprio
+            proprio_flat = proprio.reshape(B * W, -1)
+            proprio_tokens = self.proprio_encoder(proprio_flat)  # (B*W, 128)
+            proprio_tokens = proprio_tokens.reshape(B, W, 128)  # (B, W, 128)
+
+            # 4. Concatenate: [Proprio, Vision, Goal]
+            input_tokens = torch.cat(
+                [proprio_tokens, vision_tokens, goal_tokens], dim=-1
+            )  # (B, W, 1024)
+
+        # 5. Transformer backbone
+        if return_attn_weights:
+            output_tokens, attn_weights = self.transformer(
+                input_tokens, return_attn_weights=True
+            )
+        else:
+            output_tokens = self.transformer(input_tokens)  # (B, W, 1024)
+
+        if self.training:
+            # DENSE SUPERVISION: Decode from every token in the window
+            pred_actions = []
+            requery_logits = []
+
+            for i in range(output_tokens.size(1)):
+                token = output_tokens[:, i, :]  # (B, 1024)
+                pred_actions.append(self.action_decoder(token))
+                requery_logits.append(self.requery_decoder(token))
+
+            # Stack along the window dimension (dim=1)
+            pred_action = torch.stack(pred_actions, dim=1)  # (B, W, ChunkSize, 7)
+            requery_logit = torch.stack(requery_logits, dim=1)  # (B, W, 1)
+
+        else:
+            # INFERENCE: Decode ONLY from the final token
+            last_token = output_tokens[:, -1, :]  # (B, 1024)
+            pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
+            requery_logit = self.requery_decoder(last_token)  # (B, 1)
+
+        if return_tokens and return_attn_weights:
+            return pred_action, requery_logit, input_tokens, attn_weights
+        if return_tokens:
+            return pred_action, requery_logit, input_tokens
+        if return_attn_weights:
+            return pred_action, requery_logit, attn_weights
+        return pred_action, requery_logit

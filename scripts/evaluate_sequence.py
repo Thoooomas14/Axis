@@ -1,198 +1,216 @@
 import os
 import sys
 import torch
-import matplotlib.pyplot as plt
 import numpy as np
 import argparse
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Assuming script is in scripts/ and project root is one level up
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.getcwd())  # Safe fallback for running from root
 
-from src.models.axis_v1 import AxisModel
-from imitation.data.rtx_loader import RTXDataset
+from src.models.axis import AxisModel
+from imitation.data.rtx_stream_loader import RTXStreamLoader
+from imitation.data.local_loader import LocalDataLoader
+from imitation.utils.visualizer import Visualizer
+
 
 def evaluate_sequence(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # --- Configuration ---
     config = {
-        'device': device,
-        'goal_dim': 64,
-        'cond_dim': 256,
-        'vision_feature_dim': 256,
-        'num_vision_tokens': 8,
-        'window_size': 8,
-        'latent_dim': 256,
-        'queue_size': 10,
-        'embed_dim': 256,
-        'num_heads': 4,
-        'num_layers': 4,
-        'proprio_dim': 8,
-        'action_dim': 8
+        "device": device,
+        "goal_dim": 38,
+        "cond_dim": 256,
+        "vision_feature_dim": 256,
+        "num_vision_tokens": 10,
+        "window_size": 10,
+        "latent_dim": 256,
+        "queue_size": 10,
+        "embed_dim": 256,
+        "num_heads": 4,
+        "num_layers": 4,
+        "proprio_dim": 13,  # [R(9), p(3), g(1)]
+        "action_dim": 7,  # [v(3), w(3), g(1)]
+        "use_action_chunking": True,
+        "chunk_size": 1,  # Default
     }
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
-    model.eval()
 
-    if not os.path.exists(args.checkpoint_dir):
-        print(f"Checkpoint directory {args.checkpoint_dir} not found.")
-        return
+    if args.random_weights:
+        print("WARNING: Using Random Weights (Untrained Model) for testing.")
+        model.eval()
+    else:
+        model.eval()
+        if not os.path.exists(args.checkpoint_dir):
+            print(f"Checkpoint directory {args.checkpoint_dir} not found.")
+            return
 
-    checkpoints = [f for f in os.listdir(args.checkpoint_dir) if f.endswith('.pt')]
-    if not checkpoints:
-        print("No checkpoints found.")
-        return
+        checkpoints = [f for f in os.listdir(args.checkpoint_dir) if f.endswith(".pt")]
+        if not checkpoints:
+            print("No checkpoints found.")
+            return
 
-    checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-    latest_checkpoint = checkpoints[-1]
-    checkpoint_path = os.path.join(args.checkpoint_dir, latest_checkpoint)
-    
-    print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Filter out latent_queue state if shapes don't match (e.g. different batch size)
-    state_dict = checkpoint['model_state_dict']
-    model_state = model.state_dict()
-    
-    filtered_state_dict = {}
-    for k, v in state_dict.items():
-        if k in model_state:
-            if v.shape != model_state[k].shape:
-                print(f"Skipping {k} due to shape mismatch: {v.shape} vs {model_state[k].shape}")
-                continue
-            filtered_state_dict[k] = v
-            
-    model.load_state_dict(filtered_state_dict, strict=False)
+        checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]))
+        latest_checkpoint = checkpoints[-1]
+        checkpoint_path = os.path.join(args.checkpoint_dir, latest_checkpoint)
 
-    # --- Load Data ---
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        # Filter out latent_queue state if shapes don't match
+        state_dict = checkpoint["model_state_dict"]
+        model_state = model.state_dict()
+
+        filtered_state_dict = {}
+        for k, v in state_dict.items():
+            if k in model_state:
+                if v.shape != model_state[k].shape:
+                    print(
+                        f"Skipping {k} due to shape mismatch: {v.shape} vs {model_state[k].shape}"
+                    )
+                    continue
+                filtered_state_dict[k] = v
+
+        model.load_state_dict(filtered_state_dict, strict=False)
+
     # --- Load Data ---
     print("Loading data...")
-    
-    if args.use_processed_data:
-        from imitation.data.processed_loader import ProcessedDataset
-        from torch.utils.data import DataLoader
-        
-        dataset = ProcessedDataset(args.data_dir, max_len=64)
-        loader = DataLoader(dataset, batch_size=1, shuffle=True)
-        iterator = iter(loader)
-        batch = next(iterator)
-        # Unpack
-        images, proprio, target_action, goal_embs, mask, requery_labels = batch
+    if args.local_path:
+        print(f"Loading local data from {args.local_path}")
+        dataset = LocalDataLoader(
+            data_path=args.local_path, batch_size=1, window_size=8, repeat=False
+        )
     else:
-        # Note: RTXDataset now yields full episodes (B, T, ...)
-        dataset = RTXDataset(
-            dataset_name=args.dataset, 
-            split='train', 
-            batch_size=1, # Get 1 episode
-            image_size=(128, 128),
+        print(f"Loading streaming data {args.dataset}")
+        dataset = RTXStreamLoader(
+            dataset_name=args.dataset,
+            split="train",
+            window_size=10,
+            image_size=(224, 224),
             data_dir=args.data_dir,
-            shuffle=False
+            repeat=False,  # Don't repeat for eval
+            use_subprocess=False,  # In-process is sufficient for 1 episode
+            shuffle_buffer_size=0,  # No buffer = direct streaming
+            shuffle_files=False,  # Sequential read
         )
 
-        # Get one batch (one episode)
-        iterator = iter(dataset)
-        # Unpack 6 items: images, proprio, action, goal_embs, mask, requery_labels
+    # Get one batch
+    iterator = iter(dataset)
+    try:
         batch = next(iterator)
-        images, proprio, target_action, goal_embs, mask = batch[0], batch[1], batch[2], batch[3], batch[4]
+    except StopIteration:
+        print("Dataset empty.")
+        return
 
-    # Move to device
-    # Shape: (B, T, ...)
-    images = images.to(device)
-    proprio = proprio.to(device)
-    goal_embs = goal_embs.to(device)
-    mask = mask.to(device)
+    # Unpack batch (torch tensors)
+    images = batch["images"].to(device)  # (W, 3, H, W) or (B, W, 3, H, W)
+    proprio = batch["proprio"].to(device)  # (W, 13) or (B, W, 13)
+    goal = batch["goal"].to(device)  # (38) or (B, 38)
+    gt_action = batch["actions"].to(device)  # (H, 7) or (B, H, 7)
 
-    B, T = images.shape[0], images.shape[1]
-    print(f"Loaded episode with shape: {images.shape}")
+    # Add Batch Dimension if missing
+    if images.dim() == 4:
+        images = images.unsqueeze(0)
+    if proprio.dim() == 2:
+        proprio = proprio.unsqueeze(0)
+    if goal.dim() == 1:
+        goal = goal.unsqueeze(0)
+    if gt_action.dim() == 2:
+        gt_action = gt_action.unsqueeze(0)
 
-    # --- Inference Loop ---
-    pred_actions = []
-    
-    # Reset memory
-    model.reset_memory(B)
-    
-    W_size = config['window_size']
-    
+    # Check target_poses
+    if "target_poses" in batch:
+        target_poses = batch["target_poses"].to(device)
+        if target_poses.dim() == 2:
+            target_poses = target_poses.unsqueeze(0)
+        batch["target_poses"] = target_poses
+
+    # Update batch dict so visualizer gets correct shapes
+    batch["images"] = images
+    batch["proprio"] = proprio
+    batch["goal"] = goal
+    batch["actions"] = gt_action
+
+    print(f"Loaded batch: Img {images.shape}, Prop {proprio.shape}, Goal {goal.shape}")
+
+    # --- Prediction ---
+    # Model V2 (AxisModel) typically doesn't need explicit memory reset if passing full window
+    # or it handles caching internally if we pass cache. Here we just pass the window.
+
     with torch.no_grad():
-        for t in range(T):
-            # Slice window
-            if t < W_size - 1:
-                pad_len = W_size - 1 - t
-                img_slice = images[:, :t+1]
-                prop_slice = proprio[:, :t+1]
-                img_pad = img_slice[:, 0:1].repeat(1, pad_len, 1, 1, 1)
-                prop_pad = prop_slice[:, 0:1].repeat(1, pad_len, 1)
-                img_window = torch.cat([img_pad, img_slice], dim=1)
-                prop_window = torch.cat([prop_pad, prop_slice], dim=1)
+        # Forward pass
+        # model expects (B, W, ...)
+        # Current AxisModel forward: (images, proprio, goal_embedding, cached_tokens=None, return_tokens=False)
+        # Goal is (B, 38).
+
+        output = model(
+            images,
+            proprio,
+            goal,  # (B, 38)
+        )
+
+        # Output is (pred_action, requery_logit)
+        if isinstance(output, tuple):
+            if len(output) == 2:
+                pred_action_chunk, requery = output
+            elif len(output) == 3:
+                pred_action_chunk, requery, _ = output
             else:
-                img_window = images[:, t-W_size+1 : t+1]
-                prop_window = proprio[:, t-W_size+1 : t+1]
+                print(f"Unexpected tuple length from model: {len(output)}")
+                pred_action_chunk = output[0]  # Try first
+        elif isinstance(output, dict):
+            pred_action_chunk = output.get("action_chunks", output.get("action"))
+        else:
+            pred_action_chunk = output
 
-            # Forward
-            pred_action, _, _ = model(
-                img_window, 
-                prop_window, 
-                goal_embs[:, t], # Pass goal for current step (B, 77)
-                robot_name='default', 
-                update_queue=True, # Update memory during inference
-                use_memory=True
-            )
-            pred_actions.append(pred_action.cpu())
+        # pred_action_chunk: (B, ChunkSize, 7)
+        # We pass the FULL chunk for multi-step visualization
+        pred_action = pred_action_chunk  # (B, ChunkSize, 7)
 
-    pred_actions = torch.stack(pred_actions, dim=1) # (B, T, 7)
+    # --- Debug Stats ---
+    gt_act_np = gt_action.cpu().numpy()
+    pred_act_np = pred_action.cpu().numpy()
+
+    print("\n--- Action Statistics ---")
+    # Just stats for first step to avoid noise
+    print(
+        f"GT Action (Step 0)  | Mean: {np.mean(np.abs(gt_act_np[:, 0])):6f} | Max: {np.max(np.abs(gt_act_np[:, 0])):6f}"
+    )
+    print(
+        f"Pred Action (Step 0)| Mean: {np.mean(np.abs(pred_act_np[:, 0])):6f} | Max: {np.max(np.abs(pred_act_np[:, 0])):6f}"
+    )
+    print("-------------------------\n")
 
     # --- Visualization ---
     print("Generating visualization...")
-    
-    # Take first element in batch
-    images_np = images[0].cpu().permute(0, 2, 3, 1).numpy()
-    target_action_np = target_action[0].cpu().numpy()
-    pred_action_np = pred_actions[0].numpy()
-    mask_np = mask[0].cpu().numpy()
-    
-    # Limit to first 20 steps or T
-    viz_steps = min(T, 20)
-    
-    # Create figure
-    # Create figure
-    fig, axes = plt.subplots(viz_steps, 2, figsize=(12, 4 * viz_steps))
-    action_labels = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'g']
+    viz = Visualizer(save_dir=".")
+    viz.visualize_batch(
+        step=0, batch=batch, pred_action=pred_action, save_prefix="eval_test"
+    )
+    print("Done.")
 
-    for i in range(viz_steps):
-        # 1. Image
-        ax_img = axes[i, 0]
-        ax_img.imshow(images_np[i])
-        ax_img.set_title(f"Step {i} (Mask: {mask_np[i]})")
-        ax_img.axis('off')
-        
-        # 2. Action Comparison
-        ax_act = axes[i, 1]
-        x = np.arange(8)
-        width = 0.35
-        
-        ax_act.bar(x - width/2, target_action_np[i], width, label='Ground Truth', color='green', alpha=0.7)
-        ax_act.bar(x + width/2, pred_action_np[i], width, label='Prediction', color='red', alpha=0.7)
-        
-        ax_act.set_ylabel('Value')
-        ax_act.set_title('Action Prediction')
-        ax_act.set_xticks(x)
-        ax_act.set_xticklabels(action_labels)
-        if i == 0: ax_act.legend()
-        ax_act.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    output_path = 'evaluation_sequence.png'
-    plt.savefig(output_path)
-    print(f"Saved sequential visualization to {output_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='fractal20220817_data')
-    parser.add_argument('--data_dir', type=str, default='data/content/axis_data/fractal20220817_data/0.1.0')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-    parser.add_argument('--use_processed_data', action='store_true', help='Use preprocessed .pt files instead of raw TFDS')
-    
+    parser.add_argument("--dataset", type=str, default="fractal20220817_data")
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument(
+        "--local_path",
+        type=str,
+        default=None,
+        help="Path to local .h5 file. Uses LocalLoader if set.",
+    )
+    parser.add_argument(
+        "--random_weights",
+        action="store_true",
+        help="Initialize model with random weights (no checkpoint)",
+    )
+
     args = parser.parse_args()
     evaluate_sequence(args)

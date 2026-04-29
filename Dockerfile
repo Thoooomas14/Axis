@@ -5,19 +5,25 @@ FROM continuumio/miniconda3:latest
 WORKDIR /app
 
 # Install system dependencies
-# libgl1-mesa-glx and libglib2.0-0 are often required for OpenCV/rendering tasks
+# COMBINED: All apt packages in one layer, followed immediately by the cleanup
 RUN apt-get update && apt-get install -y \
     git \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
+    build-essential \
+    gcc \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the environment file
 COPY environment.yml .
 
-# Create the Conda environment
-# We use the name 'axis_env' as defined in the yaml file
-RUN conda env create -f environment.yml
+# Create the Conda environment and IMMEDIATELY wipe the cache
+# - conda clean -afy removes cached tarballs and unused packages
+# - rm -rf /root/.cache/pip clears the pip cache if your yaml uses pip dependencies
+RUN conda env create -f environment.yml \
+    && conda clean -afy \
+    && rm -rf /root/.cache/pip
 
 # Make RUN commands use the new environment
 SHELL ["conda", "run", "-n", "axis_env", "/bin/bash", "-c"]
