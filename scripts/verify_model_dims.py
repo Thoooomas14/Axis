@@ -19,7 +19,7 @@ def verify_model():
 
     # Dummy Inputs
     B = 2
-    W = 8  # Window size 8
+    W = 10  # Window size 10
     C, H, W_img = 3, 224, 224
 
     images = torch.randn(B, W, C, H, W_img)

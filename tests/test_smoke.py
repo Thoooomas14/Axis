@@ -23,7 +23,7 @@ def test_model_dimensions():
         "goal_dim": 38,
         "embed_dim": 256,
         "vision_feature_dim": 256,
-        "num_vision_tokens": 8,
+        "num_vision_tokens": 10,
         "num_heads": 4,
         "num_layers": 2,  # Small for speed
     }
@@ -33,7 +33,7 @@ def test_model_dimensions():
 
     # Dummy Inputs
     B = 2
-    W = 8  # Window size 8
+    W = 10  # Window size 10
     C, H, W_img = 3, 224, 224
 
     images = torch.randn(B, W, C, H, W_img)

@@ -14,7 +14,7 @@ from imitation.data.rtx_stream_loader import RTXStreamLoader
 def visualize_requery(args):
     print(f"Initializing Loader for {args.dataset}...")
     loader = RTXStreamLoader(
-        dataset_name=args.dataset, data_dir=args.data_dir, window_size=8
+        dataset_name=args.dataset, data_dir=args.data_dir, window_size=10
     )
 
     # Initialize TFDS builder
@@ -51,7 +51,7 @@ def visualize_requery(args):
     print("Generating Visualization...")
     for i, window in enumerate(windows):
         # Extract the last image of the window (the "current" observation)
-        # Window images shape: (8, 3, 224, 224)
+        # Window images shape: (10, 3, 224, 224)
         imgs = window["images"]  # Torch tensor or numpy? Loader yields tensors.
         if isinstance(imgs, torch.Tensor):
             imgs = imgs.numpy()

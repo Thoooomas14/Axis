@@ -13,7 +13,7 @@ class AxisObservationWrapper(gym.Wrapper):
         proprio: (B, Window, 13) -> [Rot9(9), Pos_mm(3), Gripper(1)]
     """
 
-    def __init__(self, env, window_size=8, device="cpu"):
+    def __init__(self, env, window_size=10, device="cpu"):
         super().__init__(env)
         self.window_size = window_size
         self.device = device

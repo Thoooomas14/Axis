@@ -451,7 +451,7 @@ class RTXStreamLoader(IterableDataset):
         dataset_name,
         split="train",
         batch_size=1,
-        window_size=8,
+        window_size=10,
         loss_horizon=1,
         image_key=None,
         shuffle_buffer_size=1000,

@@ -25,8 +25,8 @@ def evaluate_sequence(args):
         "goal_dim": 38,
         "cond_dim": 256,
         "vision_feature_dim": 256,
-        "num_vision_tokens": 8,
-        "window_size": 8,
+        "num_vision_tokens": 10,
+        "window_size": 10,
         "latent_dim": 256,
         "queue_size": 10,
         "embed_dim": 256,
@@ -90,7 +90,7 @@ def evaluate_sequence(args):
         dataset = RTXStreamLoader(
             dataset_name=args.dataset,
             split="train",
-            window_size=8,
+            window_size=10,
             image_size=(224, 224),
             data_dir=args.data_dir,
             repeat=False,  # Don't repeat for eval

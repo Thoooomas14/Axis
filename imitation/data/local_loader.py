@@ -39,7 +39,7 @@ class LocalDataLoader(IterableDataset):
     def __init__(
         self,
         data_path: str,
-        window_size: int = 8,
+        window_size: int = 10,
         loss_horizon: int = 1,
         shuffle: bool = True,
         repeat: bool = True,

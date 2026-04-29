@@ -293,7 +293,7 @@ def make_gif(args):
             if cached_tokens.shape[1] > 1:
                 cached_tokens = cached_tokens[:, 1:, :]
             else:
-                cached_tokens = cached_tokens  # Should not happen if W=8
+                cached_tokens = cached_tokens  # Should not happen if W=10
 
             end_time = time.time()
             inference_times.append(end_time - start_time)

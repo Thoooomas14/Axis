@@ -83,7 +83,7 @@ if __name__ == "__main__":
         default=None,
         help="Path to .h5 file. If provided, uses LocalDataLoader.",
     )
-    parser.add_argument("--window_size", type=int, default=8)
+    parser.add_argument("--window_size", type=int, default=10)
 
     args = parser.parse_args()
     visualize_episode(args)
