@@ -521,6 +521,8 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
         # Select Image Source
         if image_source == "sim":
             final_imgs = obs["images"][0].cpu().numpy()
+        elif image_source == "black":
+            final_imgs = np.zeros_like(current_imgs)
         else:
             final_imgs = current_imgs
 
@@ -674,6 +676,8 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
         # Select Image Source
         if image_source == "sim":
             final_imgs = obs["images"][0].cpu().numpy()
+        elif image_source == "black":
+            final_imgs = np.zeros_like(current_imgs)
         else:
             final_imgs = current_imgs
 
