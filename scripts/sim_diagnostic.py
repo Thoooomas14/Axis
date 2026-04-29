@@ -701,13 +701,13 @@ def replay_predicted_in_sim(
         if i % 10 == 0:
             frame_idx = i - start_frame
             print(f"\nStep {frame_idx:3d} (Frame {i})")
-            print(f"  GT   pos (m): {current_props[9:12].cpu().numpy()}")
-            print(f"  PRED pos (m): {act_pos_sim.round(4)}")
-            print(f"  SIM  pos (m): {(obs['proprio'][0, -1][9:12].cpu().numpy() / 1000.0).round(4)}")
+            print(f"  GT   pos (mm): {current_props[9:12]}")
+            print(f"  PRED pos (mm): {act_pos_sim.round(4) * 1000}")
+            print(f"  SIM  pos (mm): {(obs['proprio'][0, -1][9:12].cpu().numpy()).round(4)}")
             err_pos = np.linalg.norm(gt_pos_m - act_pos_sim) * 1000
             print(f"  Pos Error:    {err_pos:.1f} mm")
             print()
-            print(f"  GT model input pos: {current_props.cpu().numpy()}")
+            print(f"  GT model input pos: {current_props}")
             print(f"  SIM proprio pos:     {obs['proprio'][0, -1].cpu().numpy()}")
             
 
