@@ -33,19 +33,18 @@ class TemporalEnsembler:
         # List of (start_step, chunk_tensor)
         self.active_chunks = []
 
+    def reset(self):
+        self.active_chunks = []
+
     def update(self, start_step, chunk):
         """
         Add a new chunk prediction starting at start_step.
-        chunk: (ChunkSize, ActionDim)
+        chunk: (ChunkSize, ActionDim) tensor
         """
-        self.active_chunks.append((start_step, chunk))
+        if not isinstance(chunk, torch.Tensor):
+            chunk = torch.tensor(chunk, dtype=torch.float32)
 
-        # Remove old chunks that no longer cover ANY future steps relative to start_step
-        # Actually, we just need to prune chunks that strictly ended before start_step?
-        # But we only query for 'current_step'.
-        # A chunk covers [start, start + horizon).
-        # We can clean up in get_action or here.
-        pass
+        self.active_chunks.append((start_step, chunk))
 
     def get_action(self, current_step):
         """
@@ -64,23 +63,21 @@ class TemporalEnsembler:
             if idx >= 0 and idx < self.horizon:
                 # Valid overlap
                 actions.append(chunk[idx])
-                # Exponential weight based on "freshness" (how recent was the prediction?)
-                # Freshness = current_step - start_t (0 is freshest)
-                # w = exp(-k * idx)
+                # Exponential weight based on "freshness"
                 w = np.exp(-self.k * idx)
                 weights.append(w)
                 new_active.append((start_t, chunk))
             elif idx < 0:
-                # Future chunk? Should not happen in this streaming setup
+                # Future chunk?
                 new_active.append((start_t, chunk))
             else:
-                # Expired chunk (current_step > start_t + horizon)
+                # Expired chunk
                 pass
 
         self.active_chunks = new_active
 
         if not actions:
-            # Fallback if no coverage (shouldn't happen once started)
+            # Fallback if no coverage
             return torch.zeros(7)
 
         # Weighted Average
@@ -232,7 +229,7 @@ def make_gif(args):
             # The loader yields windows with step 1.
             # So window[t][-1] (last frame) should equal window[t+1][-2] (second to last frame).
             if i > 0:
-                prev_last = prev_proprio[0, -1]
+                prev_last = prev_proprio[0, -1]  # noqa: F821
                 curr_second_last = proprio[0, -2]
                 # Compare
                 if torch.linalg.norm(prev_last - curr_second_last) > 1e-3:

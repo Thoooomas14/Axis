@@ -75,11 +75,8 @@ class TemporalEnsembler:
         self.active_chunks = new_active
 
         if not actions:
-            return (
-                torch.zeros(chunk.shape[-1], device=chunk.device)
-                if chunk is not None
-                else torch.zeros(7)
-            )
+            # Fallback if no coverage
+            return torch.zeros(7)
 
         # Weighted Average
         actions_stack = torch.stack(actions, dim=0)  # (N, 7)
@@ -194,6 +191,8 @@ class AxisInference:
         action_chunk_prev = action_chunk.squeeze(
             0
         ).cpu()  # Keep as tensor for ensembler
+
+        print(action_chunk_prev)
 
         # 2. Ensemble
         self.ensembler.update(self.current_step, action_chunk_prev)

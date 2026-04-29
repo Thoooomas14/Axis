@@ -520,7 +520,7 @@ def replay_predicted_in_sim(
     # Initialize Agent
     print(f"Loading checkpoint from: {checkpoint_dir} ...")
     agent = AxisInference(
-        checkpoint_path=checkpoint_dir, device=device, config="AxisV2"
+        checkpoint_path=checkpoint_dir, device=device, config="AxisV2", ensemble_k=0.0
     )
 
     # Encode Goal
