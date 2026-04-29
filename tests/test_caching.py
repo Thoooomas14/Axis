@@ -60,7 +60,9 @@ def test_token_caching():
     # tokens_w1 shape: (B, W, 512) -> we want indices 1..W-1 (which correspond to time steps 1..3)
     cached_tokens = tokens_w1[:, 1:, :]
 
-    logging.info(f"Cached tokens shape: {cached_tokens.shape} (Expected: {B}, {W - 1}, {512})")
+    logging.info(
+        f"Cached tokens shape: {cached_tokens.shape} (Expected: {B}, {W - 1}, {512})"
+    )
 
     # Run Window 2 with cache
     # We pass the full window images/proprio, but the model should only use the last frame

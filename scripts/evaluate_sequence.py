@@ -136,7 +136,6 @@ def evaluate_sequence(args):
     batch["goal"] = goal
     batch["actions"] = gt_action
 
-    B, W = images.shape[0], images.shape[1]
     print(f"Loaded batch: Img {images.shape}, Prop {proprio.shape}, Goal {goal.shape}")
 
     # --- Prediction ---

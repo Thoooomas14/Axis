@@ -80,10 +80,10 @@ class AxisSceneCfg(InteractiveSceneCfg):
         "panda_joint1": 0.0,
         "panda_joint2": -0.785398,  # Standard -pi/4
         "panda_joint3": 0.0,
-        "panda_joint4": -2.35619,   # Standard -3pi/4
+        "panda_joint4": -2.35619,  # Standard -3pi/4
         "panda_joint5": 0.0,
-        "panda_joint6": 1.57079,    # Standard pi/2
-        "panda_joint7": 0.785398,   # Standard pi/4
+        "panda_joint6": 1.57079,  # Standard pi/2
+        "panda_joint7": 0.785398,  # Standard pi/4
         "panda_finger_joint1": 0.04,
         "panda_finger_joint2": 0.04,
     }

@@ -12,7 +12,9 @@ def verify_model():
     print("Verifying Axis Model Dimensions (SE(3) Update)...")
 
     # Config matching new requirements
-    config = "AxisV2"  # This will trigger the default config with 7D proprio and 64D goal
+    config = (
+        "AxisV2"  # This will trigger the default config with 7D proprio and 64D goal
+    )
 
     model = AxisModel(config)
     model.eval()

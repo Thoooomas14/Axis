@@ -41,12 +41,15 @@ class VisionEncoder(nn.Module):
                 "ignore", category=FutureWarning, module="torch.hub"
             )
         # Load Backbones
-        self.dinov2 = cast(nn.Module, torch.hub.load(
-            repo_or_dir="facebookresearch/dinov2",
-            model="dinov2_vits14_reg",
-            pretrained=pretrained,
-            trust_repo=True,
-        ))
+        self.dinov2 = cast(
+            nn.Module,
+            torch.hub.load(
+                repo_or_dir="facebookresearch/dinov2",
+                model="dinov2_vits14_reg",
+                pretrained=pretrained,
+                trust_repo=True,
+            ),
+        )
 
         for param in self.dinov2.parameters():
             param.requires_grad = False

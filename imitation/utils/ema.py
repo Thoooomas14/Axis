@@ -1,5 +1,6 @@
 import torch
 
+
 class EMA:
     """
     Exponential Moving Average for model parameters.
@@ -24,7 +25,9 @@ class EMA:
                     # Skip if shape mismatch (e.g. dynamic buffers like latent_queue)
                     if k in self.shadow and msd[k].shape != self.shadow[k].shape:
                         continue
-                    self.shadow[k].copy_(self.decay * self.shadow[k] + (1.0 - self.decay) * msd[k])
+                    self.shadow[k].copy_(
+                        self.decay * self.shadow[k] + (1.0 - self.decay) * msd[k]
+                    )
                 else:
                     # Directly copy non-floating point tensors (like integer step counters)
                     if k in self.shadow:

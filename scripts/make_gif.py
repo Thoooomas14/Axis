@@ -100,7 +100,7 @@ def make_gif(args):
         torch.cuda.empty_cache()
 
     # --- V2 Configuration ---
-    config = 'AxisV2'
+    config = "AxisV2"
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
@@ -188,7 +188,6 @@ def make_gif(args):
     # Store Poses
     gt_poses = []
     pred_poses = []
-    subtask_goal_poses = []
 
     inference_times = []
 
@@ -204,6 +203,7 @@ def make_gif(args):
     # Initialize KV-Cache and Subtask Collection
     cached_tokens = None
     subtask_goal_poses_collected = []
+    prev_proprio = None
 
     with torch.no_grad():
         for i in range(args.length):
@@ -228,8 +228,8 @@ def make_gif(args):
             # Check for discontinuity (new episode)
             # The loader yields windows with step 1.
             # So window[t][-1] (last frame) should equal window[t+1][-2] (second to last frame).
-            if i > 0:
-                prev_last = prev_proprio[0, -1]  # noqa: F821
+            if i > 0 and prev_proprio is not None:
+                prev_last = prev_proprio[0, -1]
                 curr_second_last = proprio[0, -2]
                 # Compare
                 if torch.linalg.norm(prev_last - curr_second_last) > 1e-3:

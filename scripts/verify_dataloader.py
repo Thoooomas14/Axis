@@ -3,6 +3,10 @@ import sys
 import os
 import numpy as np
 import tensorflow as tf
+import argparse
+import time
+import shutil
+from tqdm import tqdm
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -96,12 +100,6 @@ def verify_loader_logic():
 
     else:
         print("\n❌ Verification Failed: No windows generated.")
-
-
-import argparse
-import time
-import shutil
-from tqdm import tqdm
 
 
 def stress_test(args):

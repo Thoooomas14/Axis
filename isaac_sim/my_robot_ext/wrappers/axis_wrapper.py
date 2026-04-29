@@ -2,6 +2,7 @@ import torch
 import gymnasium as gym
 import pypose as pp
 
+
 class AxisObservationWrapper(gym.Wrapper):
     """
     Wraps the Isaac Lab environment to provide history-windowed observations
@@ -122,15 +123,19 @@ class AxisObservationWrapper(gym.Wrapper):
         wrist_se3 = pp.SE3(torch.cat([pos_wrist, quat_xyzw], dim=1))
 
         # PyPose SE3 for the offset
-        offset_pos = torch.tensor([[0.0, 0.0, 0.107]], device=self.device).repeat(pos_wrist.shape[0], 1)
-        offset_quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=self.device).repeat(pos_wrist.shape[0], 1)
+        offset_pos = torch.tensor([[0.0, 0.0, 0.107]], device=self.device).repeat(
+            pos_wrist.shape[0], 1
+        )
+        offset_quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=self.device).repeat(
+            pos_wrist.shape[0], 1
+        )
         offset_se3 = pp.SE3(torch.cat([offset_pos, offset_quat], dim=1))
 
         # Apply offset to get tip pose
         tip_se3 = wrist_se3 @ offset_se3
 
         pos_tip = tip_se3.translation()
-        
+
         # --- SCALING: METERS -> MILLIMETERS ---
         pos_tip_mm = pos_tip * 1000.0
 

@@ -214,7 +214,9 @@ class AxisInference:
         ang_before = action_twist_smooth[3:6].copy()
         action_twist_smooth[3:6] = np.clip(action_twist_smooth[3:6], -max_rot, max_rot)
         if np.any(np.abs(ang_before) > max_rot):
-            logging.debug(f"Angular clipped: {ang_before.round(3)} → {action_twist_smooth[3:6].round(3)}")
+            logging.debug(
+                f"Angular clipped: {ang_before.round(3)} → {action_twist_smooth[3:6].round(3)}"
+            )
 
         # 4. Integrate to Absolute Pose
         # Current pose is the last one in the window

@@ -14,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 0. Bootstrap Isaac Sim (Required for 4.0+)
 try:
-    import isaacsim # type: ignore  # noqa: F401
+    import isaacsim  # type: ignore  # noqa: F401
 except ImportError:
     pass
 
@@ -38,10 +38,10 @@ if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
     sys.path.append(isaac_sim_path)
 
 try:
-    from omni.isaac.lab.app import AppLauncher # type: ignore
+    from omni.isaac.lab.app import AppLauncher  # type: ignore
 except ImportError:
     try:
-        from isaaclab.app import AppLauncher # type: ignore
+        from isaaclab.app import AppLauncher  # type: ignore
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
@@ -50,15 +50,31 @@ except ImportError:
 # SETUP ARGPARSE AND LAUNCH THE SIMULATION APP GLOBALLY FIRST
 # =========================================================================
 parser = argparse.ArgumentParser(description="Evaluate Axis V2 in Isaac Lab")
-parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
-parser.add_argument("--robot", type=str, default="franka", choices=["franka", "google"], help="Robot type")
+parser.add_argument(
+    "--checkpoint", type=str, default=None, help="Path to model checkpoint"
+)
+parser.add_argument(
+    "--robot",
+    type=str,
+    default="franka",
+    choices=["franka", "google"],
+    help="Robot type",
+)
 parser.add_argument("--steps", type=int, default=1000, help="Max steps")
 parser.add_argument("--video", action="store_true", help="Record video")
-parser.add_argument("--model_refresh", type=float, default=30, help="Control frequency Hz")
-parser.add_argument("--chunk_size", type=int, default=10, help="Action chunk size used in model")
+parser.add_argument(
+    "--model_refresh", type=float, default=30, help="Control frequency Hz"
+)
+parser.add_argument(
+    "--chunk_size", type=int, default=10, help="Action chunk size used in model"
+)
 parser.add_argument("--random_weights", action="store_true", help="Use random weights")
-parser.add_argument("--ignore_requery", action="store_true", help="Ignore model requery requests")
-parser.add_argument("--ensemble_k", type=float, default=0.01, help="Exponential weighting decay")
+parser.add_argument(
+    "--ignore_requery", action="store_true", help="Ignore model requery requests"
+)
+parser.add_argument(
+    "--ensemble_k", type=float, default=0.01, help="Exponential weighting decay"
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -103,7 +119,7 @@ def main():
     # --- Load Axis V2 Inference ---
     print(f"Loading AxisInference from {args.checkpoint}...")
     # TODO: Save/load config from checkpoint for robustness with custom configs
-    config = 'AxisV2'
+    config = "AxisV2"
 
     try:
         agent = AxisInference(
@@ -144,7 +160,9 @@ def main():
 
         # Wrapper now returns 13D proprio
         # Use model's window_size to match training config
-        env = AxisObservationWrapper(env, window_size=agent.config.get("window_size", 10), device=device)
+        env = AxisObservationWrapper(
+            env, window_size=agent.config.get("window_size", 10), device=device
+        )
     except Exception as e:
         print(f"Error initializing environment: {e}")
         simulation_app.close()
@@ -153,33 +171,39 @@ def main():
     # --- Evaluation Loop ---
     try:
         obs, info = env.reset()
-        
+
         # --- BURN-IN PHASE ---
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("Starting Burn-in Phase to reach in-distribution pose...")
-        print("="*50)
+        print("=" * 50)
         # Target: [0.3226, 0.1198, 0.5174] (from DROID episode 0)
         burn_in_pos = np.array([0.3226, 0.1198, 0.5174], dtype=np.float32)
-        burn_in_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)  # wxyz, downward
+        burn_in_quat = np.array(
+            [0.0, 1.0, 0.0, 0.0], dtype=np.float32
+        )  # wxyz, downward
         burn_in_grip = 1.0  # Close the gripper
-        
+
         burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
-        burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0).repeat(env.num_envs, 1)
-        
+        burn_in_action_t = (
+            torch.tensor(burn_in_action, device=device, dtype=torch.float32)
+            .unsqueeze(0)
+            .repeat(env.num_envs, 1)
+        )
+
         for b in range(60):
             obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
             time.sleep(1.0 / 60.0)
-            
+
         print("Burn-in complete. Initializing Agent...")
-        
+
         agent.reset()  # Reset inference state (cache/ensembler)
-        
+
         # Wipe the sliding windows to erase the burn-in movement
-        last_image = obs["images"][:, -1] # (B, C, H, W)
-        last_proprio = obs["proprio"][:, -1] # (B, 13)
+        last_image = obs["images"][:, -1]  # (B, C, H, W)
+        last_proprio = obs["proprio"][:, -1]  # (B, 13)
         env.image_buffer = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
         env.proprio_buffer = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
-        
+
         obs["images"] = env.image_buffer
         obs["proprio"] = env.proprio_buffer
         # ---------------------
@@ -222,19 +246,26 @@ def main():
                 # Use the perfect, in-distribution DROID start pose.
                 # -----------------------------------------------------
                 canonical_start_pose = np.zeros(13, dtype=np.float32)
-                
+
                 # Rotation: Downward → 180° around X axis (w=0, x=1, y=0, z=0)
                 start_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
-                start_rot = pp.SO3(torch.tensor(start_quat_xyzw, dtype=torch.float32)).matrix().flatten().numpy()
+                start_rot = (
+                    pp.SO3(torch.tensor(start_quat_xyzw, dtype=torch.float32))
+                    .matrix()
+                    .flatten()
+                    .numpy()
+                )
                 canonical_start_pose[:9] = start_rot
-                
+
                 # Position: [0.3226, 0.1198, 0.5174] in millimeters
-                canonical_start_pos = np.array([0.3226, 0.1198, 0.5174], dtype=np.float32) * 1000.0
+                canonical_start_pos = (
+                    np.array([0.3226, 0.1198, 0.5174], dtype=np.float32) * 1000.0
+                )
                 canonical_start_pose[9:12] = canonical_start_pos
-                
+
                 # Gripper: Closed (0.0 in DROID convention)
                 canonical_start_pose[12] = 0.0
-                
+
                 initial_pose_13d = canonical_start_pose
 
                 # Goal Target: Cube Pos (converted to Model Frame)
@@ -245,7 +276,12 @@ def main():
                 target_pose_13d = np.zeros(13, dtype=np.float32)
 
                 target_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
-                target_rot = pp.SO3(torch.tensor(target_quat_xyzw, dtype=torch.float32)).matrix().flatten().numpy()
+                target_rot = (
+                    pp.SO3(torch.tensor(target_quat_xyzw, dtype=torch.float32))
+                    .matrix()
+                    .flatten()
+                    .numpy()
+                )
 
                 target_pose_13d[:9] = target_rot
                 target_pose_13d[9:12] = target_pos_model * 1000.0
@@ -287,25 +323,39 @@ def main():
                 # === DIAGNOSTIC DUMP (first 3 predictions) ===
                 if i < 30 and model_run:
                     prop_last = proprio_13d_np[0, -1]  # Last frame in window
-                    print(f"\n{'='*60}")
+                    print(f"\n{'=' * 60}")
                     print(f"DIAGNOSTIC — Step {i}")
-                    print(f"{'='*60}")
+                    print(f"{'=' * 60}")
                     print(f"  INPUT proprio[-1] rot9:  {prop_last[:9].round(3)}")
                     print(f"  INPUT proprio[-1] pos:   {prop_last[9:12].round(1)} mm")
                     print(f"  INPUT proprio[-1] grip:  {prop_last[12]:.4f}")
                     print(f"  INPUT goal[0:3] (task):  {goal_vector[0, :3]}")
-                    print(f"  INPUT goal[3:16] (start): pos={goal_vector[0, 12:15].round(1)} grip={goal_vector[0, 15]:.2f}")
-                    print(f"  INPUT goal[16:29] (tgt):  pos={goal_vector[0, 25:28].round(1)} grip={goal_vector[0, 28]:.2f}")
-                    print(f"  INPUT image range:       [{images_np.min():.3f}, {images_np.max():.3f}]")
+                    print(
+                        f"  INPUT goal[3:16] (start): pos={goal_vector[0, 12:15].round(1)} grip={goal_vector[0, 15]:.2f}"
+                    )
+                    print(
+                        f"  INPUT goal[16:29] (tgt):  pos={goal_vector[0, 25:28].round(1)} grip={goal_vector[0, 28]:.2f}"
+                    )
+                    print(
+                        f"  INPUT image range:       [{images_np.min():.3f}, {images_np.max():.3f}]"
+                    )
                     # PyPose se3: [v(3), w(3)]!
-                    print(f"  OUTPUT twist v (lin):    {batch_result['action_twist'][:3].round(4)}")
-                    print(f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][3:6].round(4)}")
-                    print(f"  OUTPUT twist grip Δ:     {batch_result['action_twist'][6]:.4f}")
-                    print(f"  OUTPUT abs pos (mm):     {batch_result['position'].round(1)}")
+                    print(
+                        f"  OUTPUT twist v (lin):    {batch_result['action_twist'][:3].round(4)}"
+                    )
+                    print(
+                        f"  OUTPUT twist ω (ang):    {batch_result['action_twist'][3:6].round(4)}"
+                    )
+                    print(
+                        f"  OUTPUT twist grip Δ:     {batch_result['action_twist'][6]:.4f}"
+                    )
+                    print(
+                        f"  OUTPUT abs pos (mm):     {batch_result['position'].round(1)}"
+                    )
                     print(f"  OUTPUT abs grip:         {batch_result['gripper']:.4f}")
-                    twist_mag = np.linalg.norm(batch_result['action_twist'][:6])
+                    twist_mag = np.linalg.norm(batch_result["action_twist"][:6])
                     print(f"  OUTPUT twist magnitude:  {twist_mag:.4f}")
-                    print(f"{'='*60}\n")
+                    print(f"{'=' * 60}\n")
 
             if i == 0:
                 # Debug: Save what the model sees
@@ -360,12 +410,12 @@ def main():
             # DROID convention: > 0.5 = open, < 0.5 = closed
             # BinaryJointPositionAction: -1.0 = open, 1.0 = close
             # Hysteresis: once open, stay open until < 0.3; once closed, stay closed until > 0.7
-            if not hasattr(main, '_gripper_state'):
+            if not hasattr(main, "_gripper_state"):
                 main._gripper_state = -1.0  # Start closed
             if main._gripper_state == -1.0 and act_grip > 0.7:
                 main._gripper_state = 1.0  # Switch to open
             elif main._gripper_state == 1.0 and act_grip < 0.3:
-                main._gripper_state = -1.0   # Switch to closed
+                main._gripper_state = -1.0  # Switch to closed
             act_grip_cmd = main._gripper_state
 
             # Compose
@@ -380,7 +430,13 @@ def main():
             if i % 10 == 0:
                 print(f"Step {i} --------------------------------------------------")
                 print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
-                r_euler = pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32)).euler().numpy() * 180.0 / np.pi
+                r_euler = (
+                    pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32))
+                    .euler()
+                    .numpy()
+                    * 180.0
+                    / np.pi
+                )
                 print(
                     f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}"
                 )

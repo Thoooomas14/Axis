@@ -53,8 +53,8 @@ def plot_loss(args):
 
     # Print raw data for quick view
     print("\n--- Loss History ---")
-    for s, l in zip(steps, losses):
-        print(f"Step {s}: {l:.6f}")
+    for s, loss in zip(steps, losses):
+        print(f"Step {s}: {loss:.6f}")
 
 
 if __name__ == "__main__":

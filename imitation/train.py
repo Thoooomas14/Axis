@@ -30,12 +30,12 @@ from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
 
 
-
 # Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
 tf.config.set_visible_devices([], "GPU")
 
 # Set PyTorch matmul precision to high for better performance on Ampere+ GPUs (can be overridden by user args if needed)
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
+
 
 # --- Logging Setup ---
 def setup_logging(verbose: int = 1):
@@ -253,7 +253,7 @@ def train(args):
         split="train",
         split_start=0.0,
         split_end=1.0,
-        mix_episodes=8
+        mix_episodes=8,
     ) -> tuple[torch.utils.data.DataLoader, LocalDataLoader | RTXStreamLoader]:
         """Factory function to create/recreate dataloader with specified params."""
 
@@ -329,7 +329,7 @@ def train(args):
         split=train_split,
         split_start=0.0,
         split_end=args.train_split_pct,
-        mix_episodes=args.mix_episodes
+        mix_episodes=args.mix_episodes,
     )
     if args.dataset == "droid":
         avg_episode_length = 250
@@ -365,7 +365,7 @@ def train(args):
         split=val_split,
         split_start=args.train_split_pct,
         split_end=1.0,
-        mix_episodes=1
+        mix_episodes=1,
     )
 
     need_dataloader_rebuild = False  # Flag to trigger rebuild from outer loop
@@ -533,7 +533,12 @@ def train(args):
                         steps_per_epoch_actual  # Actual count from previous epoch
                     )
 
-                pbar = tqdm(total=epoch_total, initial=start_step, desc=f"Epoch {epoch + 1}", smoothing=0.0)
+                pbar = tqdm(
+                    total=epoch_total,
+                    initial=start_step,
+                    desc=f"Epoch {epoch + 1}",
+                    smoothing=0.0,
+                )
                 monitor = ThroughputMonitor(window_size=100, total_steps=epoch_total)
 
             for full_batch in dataloader:
@@ -564,31 +569,50 @@ def train(args):
 
                         # Pre-stitch targets for the full batch to save compute
                         full_trajectory = torch.cat(
-                            [full_batch["proprio"].to(device),
-                             full_batch["target_poses"].to(device)],
-                             dim=1
+                            [
+                                full_batch["proprio"].to(device),
+                                full_batch["target_poses"].to(device),
+                            ],
+                            dim=1,
                         )
-                        rolling_targets_full = torch.zeros((B_full, W, H, 13), device=device)
+                        rolling_targets_full = torch.zeros(
+                            (B_full, W, H, 13), device=device
+                        )
                         for i in range(W):
-                            rolling_targets_full[:, i, :, :] = full_trajectory[:, i+1 : i+1+H, :]
+                            rolling_targets_full[:, i, :, :] = full_trajectory[
+                                :, i + 1 : i + 1 + H, :
+                            ]
 
                         # Pre-calculate Context Weights
                         context_discount = 0.8
-                        token_indices = torch.arange(W - 1, -1, -1, device=device, dtype=torch.float32)
-                        raw_context_weights = context_discount ** token_indices
-                        context_weights = raw_context_weights / raw_context_weights.sum()
+                        token_indices = torch.arange(
+                            W - 1, -1, -1, device=device, dtype=torch.float32
+                        )
+                        raw_context_weights = context_discount**token_indices
+                        context_weights = (
+                            raw_context_weights / raw_context_weights.sum()
+                        )
 
-                        should_log_tb = step % args.tb_histogram_interval == 0 and step != 0
+                        should_log_tb = (
+                            step % args.tb_histogram_interval == 0 and step != 0
+                        )
                         # === Dynamic Micro-Batch Loop ===
                         for mbCount in range(0, B_full, microBatchSize):
-
                             # 1. SLICE TENSORS (Not the dictionary)
-                            images = full_batch["images"][mbCount : mbCount+microBatchSize].to(device)
-                            proprio = full_batch["proprio"][mbCount : mbCount+microBatchSize].to(device)
-                            goal_embs = full_batch["goal"][mbCount : mbCount+microBatchSize].to(device)
-                            mb_targets = rolling_targets_full[mbCount : mbCount+microBatchSize]
+                            images = full_batch["images"][
+                                mbCount : mbCount + microBatchSize
+                            ].to(device)
+                            proprio = full_batch["proprio"][
+                                mbCount : mbCount + microBatchSize
+                            ].to(device)
+                            goal_embs = full_batch["goal"][
+                                mbCount : mbCount + microBatchSize
+                            ].to(device)
+                            mb_targets = rolling_targets_full[
+                                mbCount : mbCount + microBatchSize
+                            ]
 
-                            mb_B = images.shape[0] # Actual size of this micro-batch
+                            mb_B = images.shape[0]  # Actual size of this micro-batch
 
                             # 2. Data Augmentation
                             if model.training:
@@ -603,14 +627,21 @@ def train(args):
 
                                 if should_log_tb:
                                     pred_action, requery_pred, attn_weights = model(
-                                        images, proprio, goal_embs, return_attn_weights=True
+                                        images,
+                                        proprio,
+                                        goal_embs,
+                                        return_attn_weights=True,
                                     )
                                 else:
-                                    pred_action, requery_pred = model(images, proprio, goal_embs)
+                                    pred_action, requery_pred = model(
+                                        images, proprio, goal_embs
+                                    )
                                     attn_weights = None
 
                                 # 4. Endpoint Loss
-                                with torch.autocast(device_type=device.type, enabled=False):
+                                with torch.autocast(
+                                    device_type=device.type, enabled=False
+                                ):
                                     raw_action_loss = endpoint_chordal_loss(
                                         pred_twists=pred_action.float(),
                                         start_poses=proprio.float(),
@@ -632,12 +663,16 @@ def train(args):
                                     -per_token_loss / args.confidence_temperature
                                 ).unsqueeze(-1)
 
-                                mb_requery_loss = requery_criterion(requery_pred.float(), confidence_target)
+                                mb_requery_loss = requery_criterion(
+                                    requery_pred.float(), confidence_target
+                                )
                                 # Scale requery loss by the ratio of the micro-batch to the full batch
                                 requery_loss = mb_requery_loss * (mb_B / B_full)
 
                                 # Weighted Loss & Accumulate Gradients
-                                loss = action_loss + (requery_loss * args.requery_weight)
+                                loss = action_loss + (
+                                    requery_loss * args.requery_weight
+                                )
                                 scaler.scale(loss).backward()
 
                         # === Backward with Scaler (Executes once per FULL batch) ===
@@ -676,7 +711,9 @@ def train(args):
                                     "Loss/train": loss.item(),
                                     "Loss/action": action_loss.item(),
                                     "Loss/requery": requery_loss.item(),
-                                    "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
+                                    "Hyperparameters/learning_rate": optimizer.param_groups[
+                                        0
+                                    ]["lr"],
                                 },
                                 step,
                             )
@@ -698,23 +735,27 @@ def train(args):
                                 for layer_idx, layer_attn in enumerate(attn_weights):
                                     # Average the attention heads for the first item in the batch
                                     mean_attn = layer_attn[0].mean(dim=0, keepdim=True)
-                                    attn_map_grid = vutils.make_grid(mean_attn.unsqueeze(0), normalize=True)
+                                    attn_map_grid = vutils.make_grid(
+                                        mean_attn.unsqueeze(0), normalize=True
+                                    )
                                     # Log each layer dynamically (e.g., Images/Attention_Map_Layer_0, Layer_1, etc.)
                                     training_logger.log_images(
                                         f"Images/Attention_Map_Layer_{layer_idx}",
                                         attn_map_grid,
-                                        step
+                                        step,
                                     )
 
                         step += 1
                         steps_in_current_epoch += 1
 
                         # Update Monitor
-                        monitor.update(step if args.epochs == 0 else steps_in_current_epoch)
+                        monitor.update(
+                            step if args.epochs == 0 else steps_in_current_epoch
+                        )
                         rate, eta = monitor.get_stats()
 
                         desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | "
-                        desc +=f"{rate:.2f}it/s | ETA: {eta}"
+                        desc += f"{rate:.2f}it/s | ETA: {eta}"
                         pbar.set_description(desc)
                         pbar.update(1)  # Increment progress bar counter
 
@@ -743,20 +784,30 @@ def train(args):
                                         if val_batches >= args.val_batches:
                                             break
 
-                                        v_imgs = val_full_batch["images"][mbCount : mbCount+microBatchSize].to(device)
-                                        v_props = val_full_batch["proprio"][mbCount : mbCount+microBatchSize].to(device)
-                                        v_goals = val_full_batch["goal"][mbCount : mbCount+microBatchSize].to(device)
+                                        v_imgs = val_full_batch["images"][
+                                            mbCount : mbCount + microBatchSize
+                                        ].to(device)
+                                        v_props = val_full_batch["proprio"][
+                                            mbCount : mbCount + microBatchSize
+                                        ].to(device)
+                                        v_goals = val_full_batch["goal"][
+                                            mbCount : mbCount + microBatchSize
+                                        ].to(device)
                                         v_target_poses = val_full_batch["target_poses"][
-                                            mbCount : mbCount+microBatchSize
+                                            mbCount : mbCount + microBatchSize
                                         ].to(device)
 
                                         mb_B_val = v_imgs.shape[0]
                                         H_val = args.loss_horizon
 
                                         with torch.autocast(device_type=device.type):
-                                            v_pred, v_requery_pred = model(v_imgs, v_props, v_goals)
+                                            v_pred, v_requery_pred = model(
+                                                v_imgs, v_props, v_goals
+                                            )
 
-                                        with torch.autocast(device_type=device.type, enabled=False):
+                                        with torch.autocast(
+                                            device_type=device.type, enabled=False
+                                        ):
                                             raw_v_a_loss = endpoint_chordal_loss(
                                                 pred_twists=v_pred.float(),
                                                 start_poses=v_props[:, -1, :].float(),
@@ -768,21 +819,29 @@ def train(args):
                                             )
 
                                             v_confidence_target = torch.exp(
-                                                -raw_v_a_loss.detach() / args.confidence_temperature
+                                                -raw_v_a_loss.detach()
+                                                / args.confidence_temperature
                                             ).unsqueeze(-1)
 
                                             v_r_loss = requery_criterion(
-                                                v_requery_pred.float(), v_confidence_target
+                                                v_requery_pred.float(),
+                                                v_confidence_target,
                                             )
 
                                             # Use the exact same gradient-accumulation scaling math to track metrics
-                                            v_a_loss_scaled = raw_v_a_loss.sum() / B_val_full
-                                            v_r_loss_scaled = v_r_loss * (mb_B_val / B_val_full)
+                                            v_a_loss_scaled = (
+                                                raw_v_a_loss.sum() / B_val_full
+                                            )
+                                            v_r_loss_scaled = v_r_loss * (
+                                                mb_B_val / B_val_full
+                                            )
 
-                                            v_loss = v_a_loss_scaled + (v_r_loss_scaled * args.requery_weight)
+                                            v_loss = v_a_loss_scaled + (
+                                                v_r_loss_scaled * args.requery_weight
+                                            )
                                             val_loss_total += v_loss.item()
 
-                                    val_batches += 1 # Only increment after finishing the full batch
+                                    val_batches += 1  # Only increment after finishing the full batch
 
                             avg_val_loss = val_loss_total / max(1, val_batches)
                             log.info(f"Validation Loss: {avg_val_loss:.4f}")
@@ -791,7 +850,9 @@ def train(args):
                             training_logger.log_step(
                                 step, epoch, None, None, None, val_loss=avg_val_loss
                             )
-                            training_logger.log_scalars({"Loss/val": avg_val_loss}, step)
+                            training_logger.log_scalars(
+                                {"Loss/val": avg_val_loss}, step
+                            )
                             model.train()
 
                             # Cleanup validation variables
@@ -811,7 +872,9 @@ def train(args):
                                 "optimizer_state_dict": optimizer.state_dict(),
                                 "scheduler_state_dict": scheduler.state_dict(),  # Save Scheduler
                                 "scaler_state_dict": scaler.state_dict(),  # Save Scaler
-                                "loss": loss.item() if 'loss' in locals() else float('inf'),
+                                "loss": loss.item()
+                                if "loss" in locals()
+                                else float("inf"),
                             }
 
                             try:
@@ -837,7 +900,9 @@ def train(args):
                                     torch.save(ckpt_data, fallback_path)
                                     log.info("Fallback save successful!")
                                 except Exception as e2:
-                                    log.error(f"CRITICAL: Fallback save also failed: {e2}")
+                                    log.error(
+                                        f"CRITICAL: Fallback save also failed: {e2}"
+                                    )
 
                             training_logger.plot_progress()
 
@@ -873,8 +938,8 @@ def train(args):
                                 continue  # Retry with smaller batch size
 
                             log.error(
-                                f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."+
-                                " Cannot reduce further."
+                                f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."
+                                + " Cannot reduce further."
                             )
                             log.error(
                                 "[CUDA OOM] Saving checkpoint and exiting gracefully..."
@@ -911,8 +976,8 @@ def train(args):
                                     )
                                     continue  # Retry with smaller batch size
                                 log.error(
-                                    f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."+
-                                    " Cannot reduce further."
+                                    f"[CUDA OOM] Microbatch size already at minimum ({MIN_BATCH_SIZE})."
+                                    + " Cannot reduce further."
                                 )
                                 raise SystemExit(
                                     "CUDA OOM: Cannot reduce microbatch size further"
@@ -1011,7 +1076,7 @@ def train(args):
                         "optimizer_state_dict": optimizer.state_dict(),
                         "scheduler_state_dict": scheduler.state_dict(),
                         "scaler_state_dict": scaler.state_dict(),
-                        "loss": loss.item() if 'loss' in locals() else float('inf'),
+                        "loss": loss.item() if "loss" in locals() else float("inf"),
                     },
                     save_checkpoint_path,
                 )
@@ -1079,7 +1144,7 @@ def train(args):
                     "ema_state_dict": ema.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scaler_state_dict": scaler.state_dict(),
-                    "loss": loss.item() if 'loss' in locals() else float('inf'),
+                    "loss": loss.item() if "loss" in locals() else float("inf"),
                 },
                 run_path,
             )
@@ -1286,7 +1351,7 @@ if __name__ == "__main__":
 
             warnings.warn(
                 f"Using --local_data_path, the following streaming args are IGNORED: {', '.join(ignored_args)}",
-                stacklevel=2
+                stacklevel=2,
             )
 
     # Validate loss_horizon

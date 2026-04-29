@@ -410,12 +410,16 @@ class AxisTransformer(nn.Module):
 
         # === CAUSAL MASK ===
         # Lower-triangular mask: 0 for allowed (past/present), -inf for blocked (future)
-        causal_mask = torch.triu(torch.ones(S, S) * float('-inf'), diagonal=1).to(x.device)
+        causal_mask = torch.triu(torch.ones(S, S) * float("-inf"), diagonal=1).to(
+            x.device
+        )
 
         if self.use_rope:
             if return_attn_weights:
                 # Pass mask down to the encoder layers
-                x, attn_weights = self.transformer(x, mask=causal_mask, return_attn_weights=True)
+                x, attn_weights = self.transformer(
+                    x, mask=causal_mask, return_attn_weights=True
+                )
                 return x, attn_weights
             return self.transformer(x, mask=causal_mask)
 

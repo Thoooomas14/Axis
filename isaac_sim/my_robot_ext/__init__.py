@@ -20,4 +20,4 @@ except Exception:
     __version__ = "0.1.0"
 
 # Import submodules to trigger registration
-from . import tasks, config, wrappers
+from . import tasks as tasks, config as config, wrappers as wrappers  # noqa: E402
