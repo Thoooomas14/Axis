@@ -380,7 +380,7 @@ def main():
             if i % 10 == 0:
                 print(f"Step {i} --------------------------------------------------")
                 print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
-                r_euler = pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
+                r_euler = pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32)).euler().numpy() * 180.0 / np.pi
                 print(
                     f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}"
                 )

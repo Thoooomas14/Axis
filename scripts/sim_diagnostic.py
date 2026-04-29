@@ -312,7 +312,7 @@ def print_diagnostics(props):
     pos0 = p[9:12]
     grip0 = p[12]
     so3_0 = pp.mat2SO3(torch.tensor(R0, dtype=torch.float32))
-    euler0 = so3_0.Euler().numpy() * 180.0 / np.pi
+    euler0 = so3_0.euler().numpy() * 180.0 / np.pi
     quat0 = so3_0.tensor().numpy()
 
     print(f"  Rotation Matrix:\n{R0.round(4)}")
@@ -378,7 +378,7 @@ def print_diagnostics(props):
     print(f"  quat (wxyz):   {quat_wxyz.round(4)}")
     print(f"  quat (xyzw):   {quat_xyzw.round(4)}")
     print(f"  grip cmd:      {grip_cmd}")
-    euler_sim = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
+    euler_sim = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).euler().numpy() * 180.0 / np.pi
     print(f"  euler (deg):   {euler_sim.round(1)}")
 
 
@@ -403,7 +403,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
         sim_pos = ee_pose[0, :3].cpu().numpy()
         sim_quat_wxyz = ee_pose[0, 3:7].cpu().numpy()
         sim_quat_xyzw = torch.tensor([sim_quat_wxyz[1], sim_quat_wxyz[2], sim_quat_wxyz[3], sim_quat_wxyz[0]], dtype=torch.float32)
-        sim_euler = pp.SO3(sim_quat_xyzw).Euler().numpy() * 180.0 / np.pi
+        sim_euler = pp.SO3(sim_quat_xyzw).euler().numpy() * 180.0 / np.pi
         print(f"  Sim initial EE pos (m):   {sim_pos.round(4)}")
         print(f"  Sim initial EE euler:     {sim_euler.round(1)}")
 
@@ -411,7 +411,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     pos_train, quat_wxyz_train, _, quat_xyzw_train = pose_13d_to_sim_action(
         props[start_frame]
     )
-    euler_train = pp.SO3(torch.tensor(quat_xyzw_train, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
+    euler_train = pp.SO3(torch.tensor(quat_xyzw_train, dtype=torch.float32)).euler().numpy() * 180.0 / np.pi
     print(f"  Training frame {start_frame} pos (m): {pos_train.round(4)}")
     print(f"  Training frame {start_frame} euler:   {euler_train.round(1)}")
 
@@ -453,7 +453,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
             frame_idx = i - start_frame
             grip_str = "Open" if pose[12] > 0.5 else "Closed"
             print(f"\nStep {frame_idx:3d} (Frame {i})")
-            cmd_euler = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
+            cmd_euler = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).euler().numpy() * 180.0 / np.pi
             print(
                 f"  CMD  pos (m): {pos_m.round(4)}  euler: {cmd_euler.round(1)}  grip: {grip_str}"
             )
@@ -469,7 +469,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
                         sim_quat_wxyz[0],
                     ], dtype=torch.float32
                 )
-                sim_euler = pp.SO3(sim_quat_xyzw).Euler().numpy() * 180.0 / np.pi
+                sim_euler = pp.SO3(sim_quat_xyzw).euler().numpy() * 180.0 / np.pi
                 err = np.linalg.norm(sim_pos - pos_m) * 1000
                 print(
                     f"  SIM  pos (m): {sim_pos.round(4)}  euler: {sim_euler.round(1)}  err: {err:.1f}mm"
