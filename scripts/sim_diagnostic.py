@@ -293,7 +293,7 @@ def pose_13d_to_sim_action(pose_13d):
     # Convert to wxyz for Isaac Sim
     quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
 
-    # Gripper: DROID convention (1=open, 0=closed) -> Isaac (1=open, -1=close)
+    # Gripper: DROID convention (1=open, 0=closed) -> Isaac convention (1.0=open, -1.0=close)
     grip_cmd = 1.0 if grip > 0.5 else -1.0
 
     return pos_m, quat_wxyz, grip_cmd, quat_xyzw
@@ -552,11 +552,11 @@ def replay_predicted_in_sim(
     # Wipe the sliding windows to erase the burn-in movement
     last_image = obs["images"][:, -1]  # (1, C, H, W)
     last_proprio = obs["proprio"][:, -1]  # (1, 13)
-    env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
-    env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+    env.image_buffer = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+    env.proprio_buffer = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
 
-    obs["images"] = env.image_window
-    obs["proprio"] = env.proprio_window
+    obs["images"] = env.image_buffer
+    obs["proprio"] = env.proprio_buffer
     # ---------------------
 
     # Goal source defaults to proprio_source if not explicitly set
@@ -685,7 +685,7 @@ def replay_predicted_in_sim(
         act_quat_wxyz = np.array(
             [act_quat_xyzw[3], act_quat_xyzw[0], act_quat_xyzw[1], act_quat_xyzw[2]]
         )
-        grip_cmd = -1.0 if act_grip > 0.5 else 1.0
+        grip_cmd = 1.0 if act_grip > 0.5 else -1.0
 
         env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [grip_cmd]])
         env_action_t = torch.tensor(
@@ -789,11 +789,11 @@ def replay_both_in_sim(
     # Wipe the sliding windows to erase the burn-in movement
     last_image = obs["images"][:, -1]  # (1, C, H, W)
     last_proprio = obs["proprio"][:, -1]  # (1, 13)
-    env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
-    env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+    env.image_buffer = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+    env.proprio_buffer = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
 
-    obs["images"] = env.image_window
-    obs["proprio"] = env.proprio_window
+    obs["images"] = env.image_buffer
+    obs["proprio"] = env.proprio_buffer
     # ---------------------
 
     # Goal source defaults to proprio_source if not explicitly set

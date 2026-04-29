@@ -177,11 +177,11 @@ def main():
         # Wipe the sliding windows to erase the burn-in movement
         last_image = obs["images"][:, -1] # (B, C, H, W)
         last_proprio = obs["proprio"][:, -1] # (B, 13)
-        env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
-        env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+        env.image_buffer = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+        env.proprio_buffer = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
         
-        obs["images"] = env.image_window
-        obs["proprio"] = env.proprio_window
+        obs["images"] = env.image_buffer
+        obs["proprio"] = env.proprio_buffer
         # ---------------------
 
         B = env.num_envs
@@ -361,11 +361,11 @@ def main():
             # BinaryJointPositionAction: -1.0 = open, 1.0 = close
             # Hysteresis: once open, stay open until < 0.3; once closed, stay closed until > 0.7
             if not hasattr(main, '_gripper_state'):
-                main._gripper_state = 1.0  # Start closed
-            if main._gripper_state == 1.0 and act_grip > 0.7:
-                main._gripper_state = -1.0  # Switch to open
-            elif main._gripper_state == -1.0 and act_grip < 0.3:
-                main._gripper_state = 1.0   # Switch to closed
+                main._gripper_state = -1.0  # Start closed
+            if main._gripper_state == -1.0 and act_grip > 0.7:
+                main._gripper_state = 1.0  # Switch to open
+            elif main._gripper_state == 1.0 and act_grip < 0.3:
+                main._gripper_state = -1.0   # Switch to closed
             act_grip_cmd = main._gripper_state
 
             # Compose
