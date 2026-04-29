@@ -21,6 +21,7 @@ Usage:
     python scripts/replay_training_in_sim.py \
         --local_data_path path/to/data.h5 --mode diagnostic
 """
+
 import argparse
 import os
 import sys
@@ -56,10 +57,10 @@ if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
     sys.path.append(isaac_sim_path)
 
 try:
-    from omni.isaac.lab.app import AppLauncher # type: ignore
+    from omni.isaac.lab.app import AppLauncher  # type: ignore
 except ImportError:
     try:
-        from isaaclab.app import AppLauncher # type: ignore
+        from isaaclab.app import AppLauncher  # type: ignore
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
@@ -70,36 +71,65 @@ except ImportError:
 parser = argparse.ArgumentParser(description="Replay training data in Isaac Sim")
 
 # Data source — defaults to RTX streaming from DROID
-parser.add_argument("--local_data_path", type=str, default=None,
-                    help="Path to preprocessed HDF5 file (overrides --dataset)")
-parser.add_argument("--dataset", type=str, default="droid",
-                    help="RTX dataset name (default: 'droid')")
+parser.add_argument(
+    "--local_data_path",
+    type=str,
+    default=None,
+    help="Path to preprocessed HDF5 file (overrides --dataset)",
+)
+parser.add_argument(
+    "--dataset", type=str, default="droid", help="RTX dataset name (default: 'droid')"
+)
 
-parser.add_argument("--data_dir", type=str, default=None,
-                    help="Data directory for RTX datasets")
-parser.add_argument("--checkpoint", type=str, default=None,
-                    help="Path to model checkpoint (for --mode predicted/both)")
-parser.add_argument("--episode", type=int, default=0,
-                    help="Episode index to replay")
-parser.add_argument("--mode", type=str, default="gt",
-                    choices=["gt", "predicted", "both", "diagnostic"],
-                    help="gt=replay ground truth, predicted=replay model predictions, "
-                         "both=print comparison, diagnostic=print data without sim")
-parser.add_argument("--image_source", type=str, default="dataset",
-                    choices=["dataset", "sim", "black"],
-                    help="Source of images for predicted/both modes")
-parser.add_argument("--proprio_source", type=str, default="dataset",
-                    choices=["dataset", "sim"],
-                    help="Source of proprioception for predicted/both modes")
-parser.add_argument("--goal_source", type=str, default=None,
-                    choices=["dataset", "sim"],
-                    help="Source for goal vector start pose. Defaults to --proprio_source if not set.")
-parser.add_argument("--steps", type=int, default=200,
-                    help="Max steps to replay")
-parser.add_argument("--speed", type=float, default=1.0,
-                    help="Replay speed multiplier (0.5 = half speed)")
-parser.add_argument("--start_frame", type=int, default=0,
-                    help="Starting frame in the episode")
+parser.add_argument(
+    "--data_dir", type=str, default=None, help="Data directory for RTX datasets"
+)
+parser.add_argument(
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="Path to model checkpoint (for --mode predicted/both)",
+)
+parser.add_argument("--episode", type=int, default=0, help="Episode index to replay")
+parser.add_argument(
+    "--mode",
+    type=str,
+    default="gt",
+    choices=["gt", "predicted", "both", "diagnostic"],
+    help="gt=replay ground truth, predicted=replay model predictions, "
+    "both=print comparison, diagnostic=print data without sim",
+)
+parser.add_argument(
+    "--image_source",
+    type=str,
+    default="dataset",
+    choices=["dataset", "sim", "black"],
+    help="Source of images for predicted/both modes",
+)
+parser.add_argument(
+    "--proprio_source",
+    type=str,
+    default="dataset",
+    choices=["dataset", "sim"],
+    help="Source of proprioception for predicted/both modes",
+)
+parser.add_argument(
+    "--goal_source",
+    type=str,
+    default=None,
+    choices=["dataset", "sim"],
+    help="Source for goal vector start pose. Defaults to --proprio_source if not set.",
+)
+parser.add_argument("--steps", type=int, default=200, help="Max steps to replay")
+parser.add_argument(
+    "--speed",
+    type=float,
+    default=1.0,
+    help="Replay speed multiplier (0.5 = half speed)",
+)
+parser.add_argument(
+    "--start_frame", type=int, default=0, help="Starting frame in the episode"
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -120,8 +150,8 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 if args.mode != "diagnostic":
-    from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg # type: ignore
-    from my_robot_ext.config.robots import FrankaCfg # type: ignore
+    from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg  # type: ignore
+    from my_robot_ext.config.robots import FrankaCfg  # type: ignore
 
 
 def load_episode_local(data_path, episode_idx):
@@ -129,13 +159,13 @@ def load_episode_local(data_path, episode_idx):
     with h5py.File(data_path, "r") as f:
         episode_keys = sorted(f.keys())
         if episode_idx >= len(episode_keys):
-            print(f"Episode {episode_idx} not found. Max: {len(episode_keys)-1}")
+            print(f"Episode {episode_idx} not found. Max: {len(episode_keys) - 1}")
             sys.exit(1)
 
         key = episode_keys[episode_idx]
         ep = f[key]
-        imgs = np.array(ep["images"])       # (T, C, H, W) uint8
-        props = np.array(ep["proprio"])     # (T, 13) float16/32
+        imgs = np.array(ep["images"])  # (T, C, H, W) uint8
+        props = np.array(ep["proprio"])  # (T, 13) float16/32
 
         # Scale positions to mm (same as LocalDataLoader)
         props = props.astype(np.float32)
@@ -181,7 +211,7 @@ def load_episode_rtx(dataset_name, data_dir, episode_idx, max_frames=400):
 
     for batch in loader:
         prop_window = batch["proprio"].numpy()  # (W, 13)
-        img_window = batch["images"].numpy()    # (W, C, H, W)
+        img_window = batch["images"].numpy()  # (W, C, H, W)
 
         # Detect episode boundary (discontinuity)
         if prev_prop is not None:
@@ -223,9 +253,11 @@ def load_episode_rtx(dataset_name, data_dir, episode_idx, max_frames=400):
 
 def _print_episode_summary(props):
     """Print summary statistics of an episode's proprioception."""
-    print(f"  Position range (mm): X[{props[:, 9].min():.1f}, {props[:, 9].max():.1f}] "
-          f"Y[{props[:, 10].min():.1f}, {props[:, 10].max():.1f}] "
-          f"Z[{props[:, 11].min():.1f}, {props[:, 11].max():.1f}]")
+    print(
+        f"  Position range (mm): X[{props[:, 9].min():.1f}, {props[:, 9].max():.1f}] "
+        f"Y[{props[:, 10].min():.1f}, {props[:, 10].max():.1f}] "
+        f"Z[{props[:, 11].min():.1f}, {props[:, 11].max():.1f}]"
+    )
     print(f"  Gripper range: [{props[:, 12].min():.3f}, {props[:, 12].max():.3f}]")
 
     # Verify rotation matrices
@@ -286,14 +318,14 @@ def print_diagnostics(props):
     print(f"  Euler (deg, XYZ): {euler0.round(1)}")
     print(f"  Quaternion (xyzw): {quat0.round(4)}")
     print(f"  Position (mm): {pos0.round(1)}")
-    print(f"  Position (m):  {(pos0/1000).round(4)}")
+    print(f"  Position (m):  {(pos0 / 1000).round(4)}")
     print(f"  Gripper: {grip0:.4f} ({'Open' if grip0 > 0.5 else 'Closed'})")
 
     # Position trajectory summary
     print(f"\n--- Trajectory Summary ({len(props)} frames) ---")
     pos = props[:, 9:12]
-    print(f"  Start pos (m): {(pos[0]/1000).round(4)}")
-    print(f"  End pos (m):   {(pos[-1]/1000).round(4)}")
+    print(f"  Start pos (m): {(pos[0] / 1000).round(4)}")
+    print(f"  End pos (m):   {(pos[-1] / 1000).round(4)}")
     print(f"  Total displacement (mm): {np.linalg.norm(pos[-1] - pos[0]):.1f}")
 
     # Movement per frame
@@ -308,24 +340,35 @@ def print_diagnostics(props):
     print("\n--- Gripper Transitions ---")
     if len(transitions) > 0:
         for t in transitions[:10]:  # Show first 10
-            print(f"  Frame {t}: {grip[t]:.3f} -> {grip[t+1]:.3f} "
-                  f"({'Open->Close' if grip[t] > grip[t+1] else 'Close->Open'})")
+            print(
+                f"  Frame {t}: {grip[t]:.3f} -> {grip[t + 1]:.3f} "
+                f"({'Open->Close' if grip[t] > grip[t + 1] else 'Close->Open'})"
+            )
     else:
         print("  No significant gripper transitions found")
 
     # Compare with Isaac Sim's expected workspace
     print("\n--- Isaac Sim Compatibility ---")
     print("  Franka default EE position (m): ~(0.3-0.6, -0.3-0.3, 0.1-0.6)")
-    print(f"  Training data EE position (m):  ({(pos[:, 0].min()/1000):.3f}-{(pos[:, 0].max()/1000):.3f}, "
-          f"{(pos[:, 1].min()/1000):.3f}-{(pos[:, 1].max()/1000):.3f}, "
-          f"{(pos[:, 2].min()/1000):.3f}-{(pos[:, 2].max()/1000):.3f})")
+    print(
+        f"  Training data EE position (m):  ({(pos[:, 0].min() / 1000):.3f}-{(pos[:, 0].max() / 1000):.3f}, "
+        f"{(pos[:, 1].min() / 1000):.3f}-{(pos[:, 1].max() / 1000):.3f}, "
+        f"{(pos[:, 2].min() / 1000):.3f}-{(pos[:, 2].max() / 1000):.3f})"
+    )
 
     pos_m = pos / 1000.0
-    in_workspace = ((pos_m[:, 0] > 0.1) & (pos_m[:, 0] < 0.8) &
-                    (pos_m[:, 1] > -0.5) & (pos_m[:, 1] < 0.5) &
-                    (pos_m[:, 2] > 0.0) & (pos_m[:, 2] < 0.8))
-    print(f"  Frames within Franka workspace: {in_workspace.sum()}/{len(pos_m)} "
-          f"({100*in_workspace.mean():.0f}%)")
+    in_workspace = (
+        (pos_m[:, 0] > 0.1)
+        & (pos_m[:, 0] < 0.8)
+        & (pos_m[:, 1] > -0.5)
+        & (pos_m[:, 1] < 0.5)
+        & (pos_m[:, 2] > 0.0)
+        & (pos_m[:, 2] < 0.8)
+    )
+    print(
+        f"  Frames within Franka workspace: {in_workspace.sum()}/{len(pos_m)} "
+        f"({100 * in_workspace.mean():.0f}%)"
+    )
 
     # Show what Isaac Sim would receive for frame 0
     pos_sim, quat_wxyz, grip_cmd, quat_xyzw = pose_13d_to_sim_action(props[0])
@@ -348,9 +391,9 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     env = AxisEvalEnv(cfg=env_cfg, render_mode=None)
 
     obs, info = env.reset()
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("REPLAYING GROUND TRUTH TRAJECTORY IN ISAAC SIM")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Read initial sim state for comparison
     policy_obs = obs.get("policy", {})
@@ -358,22 +401,29 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     if ee_pose is not None:
         sim_pos = ee_pose[0, :3].cpu().numpy()
         sim_quat_wxyz = ee_pose[0, 3:7].cpu().numpy()
-        sim_euler = R.from_quat([sim_quat_wxyz[1], sim_quat_wxyz[2],
-                                  sim_quat_wxyz[3], sim_quat_wxyz[0]]).as_euler("xyz", degrees=True)
+        sim_euler = R.from_quat(
+            [sim_quat_wxyz[1], sim_quat_wxyz[2], sim_quat_wxyz[3], sim_quat_wxyz[0]]
+        ).as_euler("xyz", degrees=True)
         print(f"  Sim initial EE pos (m):   {sim_pos.round(4)}")
         print(f"  Sim initial EE euler:     {sim_euler.round(1)}")
 
     # Training data frame 0
-    pos_train, quat_wxyz_train, _, quat_xyzw_train = pose_13d_to_sim_action(props[start_frame])
+    pos_train, quat_wxyz_train, _, quat_xyzw_train = pose_13d_to_sim_action(
+        props[start_frame]
+    )
     euler_train = R.from_quat(quat_xyzw_train).as_euler("xyz", degrees=True)
     print(f"  Training frame {start_frame} pos (m): {pos_train.round(4)}")
     print(f"  Training frame {start_frame} euler:   {euler_train.round(1)}")
 
     if ee_pose is not None:
         pos_diff = np.linalg.norm(sim_pos - pos_train) * 1000
-        print(f"\n  ⚠ POSITION MISMATCH: {pos_diff:.1f} mm between sim and training data")
+        print(
+            f"\n  ⚠ POSITION MISMATCH: {pos_diff:.1f} mm between sim and training data"
+        )
         if pos_diff > 100:
-            print("  🔴 LARGE MISMATCH! This strongly suggests a coordinate frame issue.")
+            print(
+                "  🔴 LARGE MISMATCH! This strongly suggests a coordinate frame issue."
+            )
         elif pos_diff > 20:
             print("  🟡 Moderate mismatch — could be the body_offset (107mm)")
         else:
@@ -389,7 +439,9 @@ def replay_in_sim(props, start_frame, max_steps, speed):
 
         # Compose action: [pos(3), quat_wxyz(4), grip(1)]
         env_action = np.concatenate([pos_m, quat_wxyz, [grip_cmd]])
-        env_action_t = torch.tensor(env_action, device=device, dtype=torch.float32).unsqueeze(0)
+        env_action_t = torch.tensor(
+            env_action, device=device, dtype=torch.float32
+        ).unsqueeze(0)
 
         obs, rew, terminated, truncated, info = env.step(env_action_t)
 
@@ -401,15 +453,25 @@ def replay_in_sim(props, start_frame, max_steps, speed):
             frame_idx = i - start_frame
             grip_str = "Open" if pose[12] > 0.5 else "Closed"
             print(f"\nStep {frame_idx:3d} (Frame {i})")
-            print(f"  CMD  pos (m): {pos_m.round(4)}  euler: {R.from_quat(quat_xyzw).as_euler('xyz', degrees=True).round(1)}  grip: {grip_str}")
+            print(
+                f"  CMD  pos (m): {pos_m.round(4)}  euler: {R.from_quat(quat_xyzw).as_euler('xyz', degrees=True).round(1)}  grip: {grip_str}"
+            )
 
             if ee_pose is not None:
                 sim_pos = ee_pose[0, :3].cpu().numpy()
                 sim_quat_wxyz = ee_pose[0, 3:7].cpu().numpy()
-                sim_euler = R.from_quat([sim_quat_wxyz[1], sim_quat_wxyz[2],
-                                          sim_quat_wxyz[3], sim_quat_wxyz[0]]).as_euler("xyz", degrees=True)
+                sim_euler = R.from_quat(
+                    [
+                        sim_quat_wxyz[1],
+                        sim_quat_wxyz[2],
+                        sim_quat_wxyz[3],
+                        sim_quat_wxyz[0],
+                    ]
+                ).as_euler("xyz", degrees=True)
                 err = np.linalg.norm(sim_pos - pos_m) * 1000
-                print(f"  SIM  pos (m): {sim_pos.round(4)}  euler: {sim_euler.round(1)}  err: {err:.1f}mm")
+                print(
+                    f"  SIM  pos (m): {sim_pos.round(4)}  euler: {sim_euler.round(1)}  err: {err:.1f}mm"
+                )
 
         if terminated.any() or truncated.any():
             print(f"\n!!! SIM RESET at step {i - start_frame}")
@@ -421,7 +483,17 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     env.close()
 
 
-def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset", goal_source=None):
+def replay_predicted_in_sim(
+    imgs,
+    props,
+    checkpoint_dir,
+    start_frame,
+    max_steps,
+    speed,
+    image_source="dataset",
+    proprio_source="dataset",
+    goal_source=None,
+):
     """Replay open-loop model predictions in Isaac Sim using specified inputs."""
     import time
     from src.inference import AxisInference
@@ -437,46 +509,50 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     env = AxisObservationWrapper(env, device=device)
 
     obs, info = env.reset()
-    print(f"\n{'='*70}")
-    print(f"REPLAYING PREDICTIONS (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print(
+        f"REPLAYING PREDICTIONS (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})"
+    )
+    print(f"{'=' * 70}")
 
     # Initialize Agent
     print(f"Loading checkpoint from: {checkpoint_dir} ...")
     agent = AxisInference(
-        checkpoint_path=checkpoint_dir,
-        device=device,
-        config="AxisV2"
+        checkpoint_path=checkpoint_dir, device=device, config="AxisV2"
     )
 
     # Encode Goal
     oracle = GoalOracle(output_dim=38)
-    
+
     # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
-    
+
     # --- BURN-IN PHASE ---
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Starting Burn-in Phase to reach in-distribution pose...")
-    print("="*50)
-    
+    print("=" * 50)
+
     # Use the helper function to get sim commands for the first frame
-    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(props[start_frame])
+    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(
+        props[start_frame]
+    )
     burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
-    burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0)
-    
+    burn_in_action_t = torch.tensor(
+        burn_in_action, device=device, dtype=torch.float32
+    ).unsqueeze(0)
+
     for b in range(60):
         obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
         time.sleep(1.0 / 60.0)
-        
+
     print("Burn-in complete. Wiping history and initializing Agent...")
-    
+
     # Wipe the sliding windows to erase the burn-in movement
-    last_image = obs["images"][:, -1] # (1, C, H, W)
-    last_proprio = obs["proprio"][:, -1] # (1, 13)
+    last_image = obs["images"][:, -1]  # (1, C, H, W)
+    last_proprio = obs["proprio"][:, -1]  # (1, 13)
     env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
     env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
-    
+
     obs["images"] = env.image_window
     obs["proprio"] = env.proprio_window
     # ---------------------
@@ -499,7 +575,9 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     elif start_grip > 0.5 and end_grip < 0.5:
         task_type = 2  # Close -> Pick
 
-    g_emb = oracle.encode_goal(task_type, goal_initial_pose, target_pose_13d, object_props=None)
+    g_emb = oracle.encode_goal(
+        task_type, goal_initial_pose, target_pose_13d, object_props=None
+    )
     goal_vector = g_emb.numpy()
     print(f"  Goal built from: {effective_goal_source.upper()} proprio")
 
@@ -507,38 +585,48 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
     # Always compute both goal vectors so we can see the difference
     dat_initial = props[start_frame]
     sim_initial = obs["proprio"][0, -1].cpu().numpy()
-    
-    g_dat = oracle.encode_goal(task_type, dat_initial, target_pose_13d, object_props=None).numpy()
-    g_sim = oracle.encode_goal(task_type, sim_initial, target_pose_13d, object_props=None).numpy()
-    
-    print(f"\n{'='*70}")
+
+    g_dat = oracle.encode_goal(
+        task_type, dat_initial, target_pose_13d, object_props=None
+    ).numpy()
+    g_sim = oracle.encode_goal(
+        task_type, sim_initial, target_pose_13d, object_props=None
+    ).numpy()
+
+    print(f"\n{'=' * 70}")
     print("GOAL VECTOR COMPARISON (Step 0)")
-    print(f"{'='*70}")
-    print(f"  Using:          {'SIM' if proprio_source == 'sim' else 'DATASET'} proprio for goal")
-    print(f"  Task type:      {task_type} ({'Move' if task_type==0 else 'Pick' if task_type==1 else 'Place'})")
-    print(f"")
-    print(f"  --- Start Pose (goal[3:16]) ---")
+    print(f"{'=' * 70}")
+    print(
+        f"  Using:          {'SIM' if proprio_source == 'sim' else 'DATASET'} proprio for goal"
+    )
+    print(
+        f"  Task type:      {task_type} ({'Move' if task_type == 0 else 'Pick' if task_type == 1 else 'Place'})"
+    )
+    print("")
+    print("  --- Start Pose (goal[3:16]) ---")
     print(f"  DAT start rot:  {g_dat[3:12].round(3)}")
     print(f"  SIM start rot:  {g_sim[3:12].round(3)}")
     print(f"  DAT start pos:  {g_dat[12:15].round(1)} mm")
     print(f"  SIM start pos:  {g_sim[12:15].round(1)} mm")
     print(f"  DAT start grip: {g_dat[15]:.3f}")
     print(f"  SIM start grip: {g_sim[15]:.3f}")
-    print(f"")
-    print(f"  --- Target Pose (goal[16:29]) --- (should be identical)")
+    print("")
+    print("  --- Target Pose (goal[16:29]) --- (should be identical)")
     print(f"  DAT target pos: {g_dat[25:28].round(1)} mm")
     print(f"  SIM target pos: {g_sim[25:28].round(1)} mm")
     print(f"  DAT target grip:{g_dat[28]:.3f}")
     print(f"  SIM target grip:{g_sim[28]:.3f}")
-    print(f"")
-    print(f"  --- Full Diff (|DAT - SIM|) ---")
+    print("")
+    print("  --- Full Diff (|DAT - SIM|) ---")
     diff = np.abs(g_dat - g_sim)
     nonzero = np.where(diff > 0.001)[0]
     for idx in nonzero:
-        print(f"    goal[{idx:2d}]: DAT={g_dat[idx]:+.4f}  SIM={g_sim[idx]:+.4f}  Δ={diff[idx]:.4f}")
+        print(
+            f"    goal[{idx:2d}]: DAT={g_dat[idx]:+.4f}  SIM={g_sim[idx]:+.4f}  Δ={diff[idx]:.4f}"
+        )
     if len(nonzero) == 0:
-        print(f"    (identical)")
-    print(f"{'='*70}\n")
+        print("    (identical)")
+    print(f"{'=' * 70}\n")
 
     end_frame = min(start_frame + max_steps, len(props))
     delay = (1.0 / 30.0) / speed
@@ -559,8 +647,12 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
         # Pad dataset inputs if needed
         if len(current_imgs) < window_size:
             pad_len = window_size - len(current_imgs)
-            current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
-            current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
+            current_imgs = np.concatenate(
+                [np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs]
+            )
+            current_props = np.concatenate(
+                [np.repeat(current_props[:1], pad_len, axis=0), current_props]
+            )
 
         # Select Image Source
         if image_source == "sim":
@@ -594,7 +686,9 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
         grip_cmd = -1.0 if act_grip > 0.5 else 1.0
 
         env_action = np.concatenate([act_pos_sim, act_quat_wxyz, [grip_cmd]])
-        env_action_t = torch.tensor(env_action, device=device, dtype=torch.float32).unsqueeze(0)
+        env_action_t = torch.tensor(
+            env_action, device=device, dtype=torch.float32
+        ).unsqueeze(0)
 
         # Step Simulation
         obs, rew, terminated, truncated, info = env.step(env_action_t)
@@ -616,10 +710,23 @@ def replay_predicted_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps,
 
         time.sleep(delay)
 
-    print(f"\nReplay complete. {end_frame - start_frame} frames predicted and replayed.")
+    print(
+        f"\nReplay complete. {end_frame - start_frame} frames predicted and replayed."
+    )
     env.close()
 
-def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, speed, image_source="dataset", proprio_source="dataset", goal_source=None):
+
+def replay_both_in_sim(
+    imgs,
+    props,
+    checkpoint_dir,
+    start_frame,
+    max_steps,
+    speed,
+    image_source="dataset",
+    proprio_source="dataset",
+    goal_source=None,
+):
     """Replay ground truth in Sim, but run model inference at each step to compute 1-step prediction error (Teacher Forcing)."""
     import time
     from src.inference import AxisInference
@@ -635,45 +742,49 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     env = AxisObservationWrapper(env, device=device)
 
     obs, info = env.reset()
-    print(f"\n{'='*70}")
-    print(f"REPLAYING BOTH (TEACHER FORCING) (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print(
+        f"REPLAYING BOTH (TEACHER FORCING) (Image: {image_source.upper()}, Proprio: {proprio_source.upper()})"
+    )
+    print(f"{'=' * 70}")
 
     # Initialize Agent
     print(f"Loading checkpoint from: {checkpoint_dir} ...")
     agent = AxisInference(
-        checkpoint_path=checkpoint_dir,
-        device=device,
-        config="AxisV2"
+        checkpoint_path=checkpoint_dir, device=device, config="AxisV2"
     )
 
     # Encode Goal
     oracle = GoalOracle(output_dim=38)
-    
+
     # Target pose is ALWAYS from the dataset
     target_pose_13d = props[-1]
-    
+
     # --- BURN-IN PHASE ---
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Starting Burn-in Phase to reach in-distribution pose...")
-    print("="*50)
-    
-    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(props[start_frame])
+    print("=" * 50)
+
+    burn_in_pos, burn_in_quat, burn_in_grip, _ = pose_13d_to_sim_action(
+        props[start_frame]
+    )
     burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
-    burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0)
-    
+    burn_in_action_t = torch.tensor(
+        burn_in_action, device=device, dtype=torch.float32
+    ).unsqueeze(0)
+
     for b in range(60):
         obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
         time.sleep(1.0 / 60.0)
-        
+
     print("Burn-in complete. Wiping history and initializing Agent...")
-    
+
     # Wipe the sliding windows to erase the burn-in movement
-    last_image = obs["images"][:, -1] # (1, C, H, W)
-    last_proprio = obs["proprio"][:, -1] # (1, 13)
+    last_image = obs["images"][:, -1]  # (1, C, H, W)
+    last_proprio = obs["proprio"][:, -1]  # (1, 13)
     env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
     env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
-    
+
     obs["images"] = env.image_window
     obs["proprio"] = env.proprio_window
     # ---------------------
@@ -696,7 +807,9 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
     elif start_grip > 0.5 and end_grip < 0.5:
         task_type = 2  # Close -> Pick
 
-    g_emb = oracle.encode_goal(task_type, goal_initial_pose, target_pose_13d, object_props=None)
+    g_emb = oracle.encode_goal(
+        task_type, goal_initial_pose, target_pose_13d, object_props=None
+    )
     goal_vector = g_emb.numpy()
     print(f"  Goal built from: {effective_goal_source.upper()} proprio")
 
@@ -718,8 +831,12 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
 
         if len(current_imgs) < window_size:
             pad_len = window_size - len(current_imgs)
-            current_imgs = np.concatenate([np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs])
-            current_props = np.concatenate([np.repeat(current_props[:1], pad_len, axis=0), current_props])
+            current_imgs = np.concatenate(
+                [np.repeat(current_imgs[:1], pad_len, axis=0), current_imgs]
+            )
+            current_props = np.concatenate(
+                [np.repeat(current_props[:1], pad_len, axis=0), current_props]
+            )
 
         # Select Image Source
         if image_source == "sim":
@@ -747,9 +864,11 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
 
         # Command the robot using the Ground Truth to keep it on track
         gt_pos_m, gt_quat_wxyz, gt_grip_cmd, _ = pose_13d_to_sim_action(props[i])
-        
+
         env_action = np.concatenate([gt_pos_m, gt_quat_wxyz, [gt_grip_cmd]])
-        env_action_t = torch.tensor(env_action, device=device, dtype=torch.float32).unsqueeze(0)
+        env_action_t = torch.tensor(
+            env_action, device=device, dtype=torch.float32
+        ).unsqueeze(0)
 
         # Step Simulation
         obs, rew, terminated, truncated, info = env.step(env_action_t)
@@ -770,9 +889,9 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
             print(f"  DAT Pos (mm): {dat_prop[9:12].round(1)}")
             print(f"  SIM Grip:     {sim_prop[12]:.3f}")
             print(f"  DAT Grip:     {dat_prop[12]:.3f}")
-            print(f"  SIM Rot Det:  {np.linalg.det(sim_prop[:9].reshape(3,3)):.3f}")
-            print(f"  SIM Rot:\n{sim_prop[:9].reshape(3,3).round(3)}")
-            print(f"  DAT Rot:\n{dat_prop[:9].reshape(3,3).round(3)}")
+            print(f"  SIM Rot Det:  {np.linalg.det(sim_prop[:9].reshape(3, 3)):.3f}")
+            print(f"  SIM Rot:\n{sim_prop[:9].reshape(3, 3).round(3)}")
+            print(f"  DAT Rot:\n{dat_prop[:9].reshape(3, 3).round(3)}")
 
         if terminated.any() or truncated.any():
             print(f"\n!!! SIM RESET at step {i - start_frame}")
@@ -782,6 +901,7 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
 
     print(f"\nReplay complete. {end_frame - start_frame} frames analyzed.")
     env.close()
+
 
 # =========================================================================
 # MAIN
@@ -802,16 +922,38 @@ def main():
     elif args.mode == "both":
         if args.checkpoint is None:
             import sys
+
             print("ERROR: --checkpoint required for --mode both")
             sys.exit(1)
         print_diagnostics(props)
-        replay_both_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source, args.goal_source)
+        replay_both_in_sim(
+            imgs,
+            props,
+            args.checkpoint,
+            args.start_frame,
+            args.steps,
+            args.speed,
+            args.image_source,
+            args.proprio_source,
+            args.goal_source,
+        )
     elif args.mode == "predicted":
         if args.checkpoint is None:
             import sys
+
             print("ERROR: --checkpoint required for --mode predicted")
             sys.exit(1)
-        replay_predicted_in_sim(imgs, props, args.checkpoint, args.start_frame, args.steps, args.speed, args.image_source, args.proprio_source, args.goal_source)
+        replay_predicted_in_sim(
+            imgs,
+            props,
+            args.checkpoint,
+            args.start_frame,
+            args.steps,
+            args.speed,
+            args.image_source,
+            args.proprio_source,
+            args.goal_source,
+        )
 
     if args.mode != "diagnostic":
         simulation_app.close()
