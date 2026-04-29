@@ -5,7 +5,7 @@ import sys
 import time
 
 from gymnasium.wrappers import RecordVideo
-from scipy.spatial.transform import Rotation as R
+import pypose as pp
 import numpy as np
 import torch
 
@@ -225,7 +225,7 @@ def main():
                 
                 # Rotation: Downward → 180° around X axis (w=0, x=1, y=0, z=0)
                 start_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
-                start_rot = R.from_quat(start_quat_xyzw).as_matrix().flatten()
+                start_rot = pp.SO3(torch.tensor(start_quat_xyzw, dtype=torch.float32)).matrix().flatten().numpy()
                 canonical_start_pose[:9] = start_rot
                 
                 # Position: [0.3226, 0.1198, 0.5174] in millimeters
@@ -245,7 +245,7 @@ def main():
                 target_pose_13d = np.zeros(13, dtype=np.float32)
 
                 target_quat_xyzw = np.array([1.0, 0.0, 0.0, 0.0])
-                target_rot = R.from_quat(target_quat_xyzw).as_matrix().flatten()
+                target_rot = pp.SO3(torch.tensor(target_quat_xyzw, dtype=torch.float32)).matrix().flatten().numpy()
 
                 target_pose_13d[:9] = target_rot
                 target_pose_13d[9:12] = target_pos_model * 1000.0
@@ -380,7 +380,7 @@ def main():
             if i % 10 == 0:
                 print(f"Step {i} --------------------------------------------------")
                 print(f"  Current Pos (mm): {current_pose_13d[9:12].round(1)}")
-                r_euler = R.from_quat(act_quat_xyzw).as_euler("xyz", degrees=True)
+                r_euler = pp.SO3(torch.tensor(act_quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
                 print(
                     f"  Action Twist (Lin/Ang): {batch_result['action_twist'][:3].round(3)} / {batch_result['action_twist'][3:6].round(3)}"
                 )

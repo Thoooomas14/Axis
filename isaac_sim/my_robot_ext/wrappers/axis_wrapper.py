@@ -1,7 +1,6 @@
 import torch
 import gymnasium as gym
-import isaaclab.utils.math as math_utils
-
+import pypose as pp
 
 class AxisObservationWrapper(gym.Wrapper):
     """
@@ -114,52 +113,29 @@ class AxisObservationWrapper(gym.Wrapper):
         pos_wrist = ee_pose[:, :3]  # Meters
         quat_wxyz = ee_pose[:, 3:7]
 
-        # --- CALCULATE TIP POSITION ---
-        # Apply offset (0.107m in Z) to Wrist Frame
-        offset = torch.tensor([0.0, 0.0, 0.107], device=self.device).repeat(
-            pos_wrist.shape[0], 1
-        )
-        pos_delta = math_utils.quat_apply(quat_wxyz, offset)
-        pos_tip = pos_wrist + pos_delta  # Meters
-
-        # --- MIRROR PROPRIO Y (Tip Frame) ---
-        # pos_tip[:, 1] = -pos_tip[:, 1]
-        # ------------------------
-
-        # --- SCALING: METERS -> MILLIMETERS ---
-        pos_tip_mm = pos_tip * 1000.0
-
         # Permute to xyzw for internal processing
         # Isaac Sim/Lab uses wxyz (scalar first)
         # Axis/PyPose uses xyzw (scalar last)
         quat_xyzw = torch.cat([quat_wxyz[:, 1:], quat_wxyz[:, 0:1]], dim=1)
 
-        # Convert to Rotation Matrix (9D)
-        # Using math_utils if available or torch ops
-        # math_utils.quat_to_rot_matrix likely exists but we can use our helper or simple logic
-        # Isaac Lab math_utils uses wxyz usually.
-        # Let's use robust manual computation from xyzw to avoid dependency issues within wrapper
-        x, y, z, w = (
-            quat_xyzw[..., 0],
-            quat_xyzw[..., 1],
-            quat_xyzw[..., 2],
-            quat_xyzw[..., 3],
-        )
+        # PyPose SE3 for the wrist
+        wrist_se3 = pp.SE3(torch.cat([pos_wrist, quat_xyzw], dim=1))
 
-        r00 = 1 - 2 * (y * y + z * z)
-        r01 = 2 * (x * y - z * w)
-        r02 = 2 * (x * z + y * w)
+        # PyPose SE3 for the offset
+        offset_pos = torch.tensor([[0.0, 0.0, 0.107]], device=self.device).repeat(pos_wrist.shape[0], 1)
+        offset_quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=self.device).repeat(pos_wrist.shape[0], 1)
+        offset_se3 = pp.SE3(torch.cat([offset_pos, offset_quat], dim=1))
 
-        r10 = 2 * (x * y + z * w)
-        r11 = 1 - 2 * (x * x + z * z)
-        r12 = 2 * (y * z - x * w)
+        # Apply offset to get tip pose
+        tip_se3 = wrist_se3 @ offset_se3
 
-        r20 = 2 * (x * z - y * w)
-        r21 = 2 * (y * z + x * w)
-        r22 = 1 - 2 * (x * x + y * y)
+        pos_tip = tip_se3.translation()
+        
+        # --- SCALING: METERS -> MILLIMETERS ---
+        pos_tip_mm = pos_tip * 1000.0
 
-        # Stack to (B, 9) flat
-        rot9 = torch.stack([r00, r01, r02, r10, r11, r12, r20, r21, r22], dim=-1)
+        # Extract 9D Rotation Matrix and flatten it
+        rot9 = tip_se3.rotation().matrix().flatten(start_dim=1)
 
         # Gripper — DROID convention: 1.0 = fully open, 0.0 = fully closed
         # Franka finger joints: 0.04m = fully open, 0.0m = fully closed

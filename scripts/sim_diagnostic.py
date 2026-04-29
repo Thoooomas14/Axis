@@ -27,7 +27,7 @@ import os
 import sys
 import time
 
-from scipy.spatial.transform import Rotation as R
+import pypose as pp
 import numpy as np
 import torch
 
@@ -143,7 +143,7 @@ if args.mode != "diagnostic":
 # POST-LAUNCH IMPORTS
 # =========================================================================
 import h5py  # noqa: E402
-from scipy.spatial.transform import Rotation as R  # noqa: E402, F811
+import pypose as pp  # noqa: E402, F811
 
 # Suppress TF logs for RTX loading
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -280,7 +280,7 @@ def pose_13d_to_sim_action(pose_13d):
     # Position: mm -> meters
     pos_m = pos_mm / 1000.0
 
-    # Rotation matrix -> quaternion (scipy returns xyzw)
+    # Rotation matrix -> quaternion
     # Orthonormalize first to handle float16 artifacts
     U, S, Vt = np.linalg.svd(rot9)
     det = np.linalg.det(U @ Vt)
@@ -288,7 +288,7 @@ def pose_13d_to_sim_action(pose_13d):
     correction[2, 2] = det
     rot9_clean = U @ correction @ Vt
 
-    quat_xyzw = R.from_matrix(rot9_clean).as_quat()  # [x, y, z, w]
+    quat_xyzw = pp.SO3(torch.tensor(rot9_clean, dtype=torch.float32)).tensor().numpy()  # [x, y, z, w]
 
     # Convert to wxyz for Isaac Sim
     quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
@@ -311,8 +311,9 @@ def print_diagnostics(props):
     R0 = p[:9].reshape(3, 3)
     pos0 = p[9:12]
     grip0 = p[12]
-    euler0 = R.from_matrix(R0).as_euler("xyz", degrees=True)
-    quat0 = R.from_matrix(R0).as_quat()
+    so3_0 = pp.SO3(torch.tensor(R0, dtype=torch.float32))
+    euler0 = so3_0.Euler().numpy() * 180.0 / np.pi
+    quat0 = so3_0.tensor().numpy()
 
     print(f"  Rotation Matrix:\n{R0.round(4)}")
     print(f"  Euler (deg, XYZ): {euler0.round(1)}")
@@ -377,7 +378,7 @@ def print_diagnostics(props):
     print(f"  quat (wxyz):   {quat_wxyz.round(4)}")
     print(f"  quat (xyzw):   {quat_xyzw.round(4)}")
     print(f"  grip cmd:      {grip_cmd}")
-    euler_sim = R.from_quat(quat_xyzw).as_euler("xyz", degrees=True)
+    euler_sim = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
     print(f"  euler (deg):   {euler_sim.round(1)}")
 
 
@@ -401,9 +402,8 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     if ee_pose is not None:
         sim_pos = ee_pose[0, :3].cpu().numpy()
         sim_quat_wxyz = ee_pose[0, 3:7].cpu().numpy()
-        sim_euler = R.from_quat(
-            [sim_quat_wxyz[1], sim_quat_wxyz[2], sim_quat_wxyz[3], sim_quat_wxyz[0]]
-        ).as_euler("xyz", degrees=True)
+        sim_quat_xyzw = torch.tensor([sim_quat_wxyz[1], sim_quat_wxyz[2], sim_quat_wxyz[3], sim_quat_wxyz[0]], dtype=torch.float32)
+        sim_euler = pp.SO3(sim_quat_xyzw).Euler().numpy() * 180.0 / np.pi
         print(f"  Sim initial EE pos (m):   {sim_pos.round(4)}")
         print(f"  Sim initial EE euler:     {sim_euler.round(1)}")
 
@@ -411,7 +411,7 @@ def replay_in_sim(props, start_frame, max_steps, speed):
     pos_train, quat_wxyz_train, _, quat_xyzw_train = pose_13d_to_sim_action(
         props[start_frame]
     )
-    euler_train = R.from_quat(quat_xyzw_train).as_euler("xyz", degrees=True)
+    euler_train = pp.SO3(torch.tensor(quat_xyzw_train, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
     print(f"  Training frame {start_frame} pos (m): {pos_train.round(4)}")
     print(f"  Training frame {start_frame} euler:   {euler_train.round(1)}")
 
@@ -453,21 +453,23 @@ def replay_in_sim(props, start_frame, max_steps, speed):
             frame_idx = i - start_frame
             grip_str = "Open" if pose[12] > 0.5 else "Closed"
             print(f"\nStep {frame_idx:3d} (Frame {i})")
+            cmd_euler = pp.SO3(torch.tensor(quat_xyzw, dtype=torch.float32)).Euler().numpy() * 180.0 / np.pi
             print(
-                f"  CMD  pos (m): {pos_m.round(4)}  euler: {R.from_quat(quat_xyzw).as_euler('xyz', degrees=True).round(1)}  grip: {grip_str}"
+                f"  CMD  pos (m): {pos_m.round(4)}  euler: {cmd_euler.round(1)}  grip: {grip_str}"
             )
 
             if ee_pose is not None:
                 sim_pos = ee_pose[0, :3].cpu().numpy()
                 sim_quat_wxyz = ee_pose[0, 3:7].cpu().numpy()
-                sim_euler = R.from_quat(
+                sim_quat_xyzw = torch.tensor(
                     [
                         sim_quat_wxyz[1],
                         sim_quat_wxyz[2],
                         sim_quat_wxyz[3],
                         sim_quat_wxyz[0],
-                    ]
-                ).as_euler("xyz", degrees=True)
+                    ], dtype=torch.float32
+                )
+                sim_euler = pp.SO3(sim_quat_xyzw).Euler().numpy() * 180.0 / np.pi
                 err = np.linalg.norm(sim_pos - pos_m) * 1000
                 print(
                     f"  SIM  pos (m): {sim_pos.round(4)}  euler: {sim_euler.round(1)}  err: {err:.1f}mm"
