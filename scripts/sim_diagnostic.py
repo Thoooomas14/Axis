@@ -659,6 +659,18 @@ def replay_both_in_sim(imgs, props, checkpoint_dir, start_frame, max_steps, spee
             err_pos = np.linalg.norm(gt_pos_m - act_pos_sim_pred) * 1000
             print(f"  Pos Error:    {err_pos:.1f} mm")
 
+            # --- PROPRIO COMPARISON DIAGNOSTIC ---
+            sim_prop = obs["proprio"][0, -1].cpu().numpy()
+            dat_prop = current_props[-1]
+            print("  --- Proprioception Check ---")
+            print(f"  SIM Pos (mm): {sim_prop[9:12].round(1)}")
+            print(f"  DAT Pos (mm): {dat_prop[9:12].round(1)}")
+            print(f"  SIM Grip:     {sim_prop[12]:.3f}")
+            print(f"  DAT Grip:     {dat_prop[12]:.3f}")
+            print(f"  SIM Rot Det:  {np.linalg.det(sim_prop[:9].reshape(3,3)):.3f}")
+            print(f"  SIM Rot:\n{sim_prop[:9].reshape(3,3).round(3)}")
+            print(f"  DAT Rot:\n{dat_prop[:9].reshape(3,3).round(3)}")
+
         if terminated.any() or truncated.any():
             print(f"\n!!! SIM RESET at step {i - start_frame}")
             break
