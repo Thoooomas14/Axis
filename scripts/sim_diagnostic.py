@@ -86,7 +86,7 @@ parser.add_argument("--mode", type=str, default="gt",
                     help="gt=replay ground truth, predicted=replay model predictions, "
                          "both=print comparison, diagnostic=print data without sim")
 parser.add_argument("--image_source", type=str, default="dataset",
-                    choices=["dataset", "sim"],
+                    choices=["dataset", "sim", "black"],
                     help="Source of images for predicted/both modes")
 parser.add_argument("--proprio_source", type=str, default="dataset",
                     choices=["dataset", "sim"],
