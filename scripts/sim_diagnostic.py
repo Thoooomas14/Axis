@@ -663,7 +663,7 @@ def replay_predicted_in_sim(
             final_imgs = current_imgs
 
         # Select Proprio Source
-        if proprio_source == "sim" and i > 10 + start_frame:
+        if proprio_source == "sim" and i > 20 + start_frame:
             final_props = obs["proprio"][0].cpu().numpy()
         else:
             final_props = current_props
