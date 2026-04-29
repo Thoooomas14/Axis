@@ -20,17 +20,17 @@ graph TD
     end
 
     subgraph Token_Construction
-        CAT[("Per-Frame Concatenation<br/>[Vision | Proprio | Goal]<br/>256 + 128 + 128 = 512D")]
+        CAT[("Per-Frame Concatenation<br/>[Proprio | Vision | Goal]<br/>128 + 768 + 128 = 1024D")]
     end
 
     subgraph Backbone
-        TR[("AxisTransformer<br/>512D, RoPE, 8 layers, 16 heads")]
+        TR[("AxisTransformer<br/>1024D, RoPE, 8 layers, 16 heads")]
     end
 
     subgraph Decoders
         LT[("Last Token Bottleneck<br/>Extract output_tokens[:, -1, :]")]
-        AD[("ActionDecoder<br/>MLP: 512D → ChunkSize*7D")]
-        RD[("RequeryDecoder<br/>MLP: 512D → 1D")]
+        AD[("ActionDecoder<br/>MLP: 1024D → ChunkSize*7D")]
+        RD[("RequeryDecoder<br/>MLP: 1024D → 1D")]
     end
 
     subgraph Outputs
@@ -40,7 +40,7 @@ graph TD
 
     %% Connections
     IMG --> VE --> TL
-    TL -->|"(B, W, 256)"| VTOK[("Vision Tokens")]
+    TL -->|"(B, W, 768)"| VTOK[("Vision Tokens")]
     
     PROP --> PE -->|"(B, W, 128)"| PTOK[("Proprio Tokens")]
     
@@ -50,9 +50,9 @@ graph TD
     PTOK --> CAT
     VTOK --> CAT
     GEXP --> CAT
-    CAT -->|"(B, W, 512)"| TR
+    CAT -->|"(B, W, 1024)"| TR
     
-    TR -->|"(B, W, 512)"| OUT[("Output Tokens")]
+    TR -->|"(B, W, 1024)"| OUT[("Output Tokens")]
     
     OUT --> LT
     LT --> AD
@@ -82,13 +82,13 @@ graph TD
 
 ## Token Concatenation
 
-Each timestep produces a single 512D token:
+Each timestep produces a single 1024D token:
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Vision (256D)  │  Proprio (128D)  │  Goal (128D)  │
+│  Proprio (128D)  │  Vision (768D)  │  Goal (128D)  │
 └──────────────────────────────────────────────┘
-                    512D total
+                    1024D total
 ```
 
 The transformer sees a sequence of W=8 such tokens.
@@ -101,8 +101,8 @@ graph LR
     VE -->|"(B*W, 384, 16, 16)"| FM[("Patch Tokens")]
     FM --> FB[("Fusion Block (Conv)")]
     FB -->|"(B*W, 1024)"| LAT[("Latent Head (+Goal)")]
-    LAT -->|"(B*W, 256)"| T[("Vision Tokens")]
-    T -->|Reshape| OUT[("(B, W, 256)")]
+    LAT -->|"(B*W, 768)"| T[("Vision Tokens")]
+    T -->|Reshape| OUT[("(B, W, 768)")]
 ```
 
 ## Action Chunking
@@ -125,8 +125,8 @@ action = ensembler.update(pred_action)  # Smoothed action
 
 Predicts the entire trajectory from the **last transformer token**:
 ```python
-# Based on output_tokens[:, -1, :] (512D)
-trajectory = MLP(last_token)  # 512D → 10 * 7D
+# Based on output_tokens[:, -1, :] (1024D)
+trajectory = MLP(last_token)  # 1024D → 10 * 7D
 pred_action = trajectory.reshape(B, 10, 7)
 ```
 
@@ -138,8 +138,8 @@ Output is clamped by `SafeActionDecoder`:
 
 Simplified to a standard MLP acting on the last token:
 ```python
-# Based on output_tokens[:, -1, :] (512D)
-confidence = sigmoid(MLP(last_token))  # 512D → 1D
+# Based on output_tokens[:, -1, :] (1024D)
+confidence = sigmoid(MLP(last_token))  # 1024D → 1D
 ```
 
 During training, target = `exp(-action_loss / temperature)`.
@@ -151,9 +151,9 @@ During training, target = `exp(-action_loss / temperature)`.
 | Input Images | `(B, W, 3, 224, 224)` | RGB images |
 | Input Proprio | `(B, W, 13)` | 13D SE(3) poses |
 | Input Goal | `(B, 38)` | Semantic goal |
-| Vision Tokens | `(B, W, 256)` | 1 token per frame |
+| Vision Tokens | `(B, W, 768)` | 1 token per frame |
 | Proprio Tokens | `(B, W, 128)` | Encoded proprio |
 | Goal Tokens | `(B, W, 128)` | Repeated goal |
-| Transformer Input | `(B, W, 512)` | Concatenated tokens |
+| Transformer Input | `(B, W, 1024)` | Concatenated tokens |
 | Action Output | `(B, ChunkSize, 7)` | 7D twists |
 | Confidence Output | `(B, 1)` | Single scalar |

@@ -18,7 +18,7 @@ Key parameters in the config dictionary:
 | Parameter | Description | Default |
 |:---|:---|:---|
 | `goal_dim` | Dimension of input goal embeddings | 38 |
-| `embed_dim` | Token embedding dimension (vision+proprio+goal) | 512 |
+| `embed_dim` | Token embedding dimension (vision+proprio+goal) | 1024 |
 | `num_heads` | Number of attention heads | 16 |
 | `num_layers` | Number of transformer layers | 8 |
 | `proprio_dim` | Dimension of SE(3) full matrix pose | **13** |

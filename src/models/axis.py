@@ -50,10 +50,10 @@ class AxisModel(nn.Module):
             )
 
         # Dimensions
-        self.vision_dim = 256
+        self.vision_dim = 768
         self.proprio_dim = 128
         self.goal_dim = 128
-        self.embed_dim = self.vision_dim + self.proprio_dim + self.goal_dim  # 512
+        self.embed_dim = self.vision_dim + self.proprio_dim + self.goal_dim  # 1024
 
         # --- Encoders ---
 

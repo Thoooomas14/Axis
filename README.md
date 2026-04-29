@@ -22,11 +22,11 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 
 ```
 Inputs:
-  - Images: (B, W, 3, 224, 224)     → DINOv2 (ViT-S/14) → 256D
+  - Images: (B, W, 3, 224, 224)     → DINOv2 (ViT-S/14) → 768D
   - Proprio: (B, W, 13)             → MLP → 128D  
   - Goal: (B, 38)                   → MLP → 128D
 
-Token: [Vision | Proprio | Goal] = 512D per timestep
+Token: [Proprio | Vision | Goal] = 1024D per timestep
 
 Backbone: Transformer (8 layers, 16 heads, RoPE positional encoding)
 

@@ -52,7 +52,7 @@ graph TD
     TL --> Concat
     PE --> Concat
     GE --> Concat
-    Concat[Concat: 128+256+128=512D] --> T
+    Concat[Concat: 128+768+128=1024D] --> T
     
     T --> LT
     LT --> AD
@@ -66,10 +66,10 @@ graph TD
 | Proprioception | 13D | `[R_flat(9), p_x, p_y, p_z, gripper]` - Flattened rotation matrix + translation + gripper |
 | Action (Twist) | 7D | `[ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]` - Angular velocity + linear velocity + gripper |
 | Goal | 38D | Structured semantic goal vector (includes 13D start/end poses) |
-| Vision tokens | 256D | Per-frame visual features (1 token/frame) |
+| Vision tokens | 768D | Per-frame visual features (1 token/frame) |
 | Proprio tokens | 128D | Encoded proprioceptive state |
 | Goal tokens | 128D | Encoded goal embedding |
-| Transformer | 512D | Concatenated token embedding |
+| Transformer | 1024D | Concatenated token embedding |
 
 ## Component Details
 
@@ -83,7 +83,7 @@ graph TD
 #### Vision Encoder
 - **Backbone**: Frozen DINOv2 (ViT-S/14) features
 - **Fusion**: Convolutional downsampling followed by concatenation of the goal embedding in a linear head.
-- **Output**: 256D latent vector per frame.
+- **Output**: 768D latent vector per frame.
 
 #### Goal Encoder
 - **Input**: 38D structured goal vector
@@ -92,22 +92,22 @@ graph TD
 ### 2. Axis Transformer
 
 - **Type**: Transformer Encoder with RoPE (Rotary Position Embeddings)
-- **Embedding**: 512D (256 vision + 128 proprio + 128 goal concatenated per timestep)
-- **Token Order**: `[Vision(256) | Proprio(128) | Goal(128)]` per timestep
+- **Embedding**: 1024D (768 vision + 128 proprio + 128 goal concatenated per timestep)
+- **Token Order**: `[Proprio(128) | Vision(768) | Goal(128)]` per timestep
 - **Layers**: 8 layers, 16 heads
 
-The transformer processes a sliding window of W=8 timesteps, with each timestep's tokens concatenated into a single 512D vector.
+The transformer processes a sliding window of W=8 timesteps, with each timestep's tokens concatenated into a single 1024D vector.
 
 ### 3. Decoders
 
 #### Action Decoder
-- **Input**: LAST transformer output token `(B, 512)`
+- **Input**: LAST transformer output token `(B, 1024)`
 - **Output**: Multi-step trajectory `(B, ChunkSize, 7)`
 - **Architecture**: Standard MLP with LayerNorm, projecting to `ChunkSize * 7` and reshaping.
 - **SafeActionDecoder**: Wraps output with safety clamps (rotation and translation limits)
 
 #### Requery Decoder (Confidence)
-- **Input**: LAST transformer output token `(B, 512)`
+- **Input**: LAST transformer output token `(B, 1024)`
 - **Function**: Predicts model confidence as a self-supervised signal
 - **Architecture**: Simple MLP (Linear -> ReLU -> Linear -> Sigmoid)
 - **Training**: Target = `exp(-action_loss / temperature)` - high when predictions are accurate
