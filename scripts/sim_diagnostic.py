@@ -288,7 +288,7 @@ def pose_13d_to_sim_action(pose_13d):
     correction[2, 2] = det
     rot9_clean = U @ correction @ Vt
 
-    quat_xyzw = pp.SO3(torch.tensor(rot9_clean, dtype=torch.float32)).tensor().numpy()  # [x, y, z, w]
+    quat_xyzw = pp.mat2SO3(torch.tensor(rot9_clean, dtype=torch.float32)).tensor().numpy()  # [x, y, z, w]
 
     # Convert to wxyz for Isaac Sim
     quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
@@ -311,7 +311,7 @@ def print_diagnostics(props):
     R0 = p[:9].reshape(3, 3)
     pos0 = p[9:12]
     grip0 = p[12]
-    so3_0 = pp.SO3(torch.tensor(R0, dtype=torch.float32))
+    so3_0 = pp.mat2SO3(torch.tensor(R0, dtype=torch.float32))
     euler0 = so3_0.Euler().numpy() * 180.0 / np.pi
     quat0 = so3_0.tensor().numpy()
 
