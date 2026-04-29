@@ -668,6 +668,8 @@ def replay_predicted_in_sim(
         else:
             final_props = current_props
 
+        print(f"Shape obs proprio {obs['proprio'].shape}, dataset {current_props.shape}")
+
         # Predict next action
         batch_result = agent.predict(
             final_imgs,
