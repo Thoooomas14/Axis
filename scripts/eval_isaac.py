@@ -153,7 +153,36 @@ def main():
     # --- Evaluation Loop ---
     try:
         obs, info = env.reset()
+        
+        # --- BURN-IN PHASE ---
+        print("\n" + "="*50)
+        print("Starting Burn-in Phase to reach in-distribution pose...")
+        print("="*50)
+        # Target: [0.3226, 0.1198, 0.5174] (from DROID episode 0)
+        burn_in_pos = np.array([0.3226, 0.1198, 0.5174], dtype=np.float32)
+        burn_in_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)  # wxyz, downward
+        burn_in_grip = 1.0  # Close the gripper
+        
+        burn_in_action = np.concatenate([burn_in_pos, burn_in_quat, [burn_in_grip]])
+        burn_in_action_t = torch.tensor(burn_in_action, device=device, dtype=torch.float32).unsqueeze(0).repeat(env.num_envs, 1)
+        
+        for b in range(60):
+            obs, rew, terminated, truncated, info = env.step(burn_in_action_t)
+            time.sleep(1.0 / 60.0)
+            
+        print("Burn-in complete. Initializing Agent...")
+        
         agent.reset()  # Reset inference state (cache/ensembler)
+        
+        # Wipe the sliding windows to erase the burn-in movement
+        last_image = obs["images"][:, -1] # (B, C, H, W)
+        last_proprio = obs["proprio"][:, -1] # (B, 13)
+        env.image_window = last_image.unsqueeze(1).repeat(1, agent.window_size, 1, 1, 1)
+        env.proprio_window = last_proprio.unsqueeze(1).repeat(1, agent.window_size, 1)
+        
+        obs["images"] = env.image_window
+        obs["proprio"] = env.proprio_window
+        # ---------------------
 
         B = env.num_envs
 
