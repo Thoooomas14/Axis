@@ -15,8 +15,8 @@ The core data loader wrapping `tensorflow_datasets` (TFDS) for streaming.
 - **Streaming**: Uses `tfds.load(..., streaming=True)` to avoid downloading entire datasets
 - **Continuous Episodes**: Processes full episodes without subtask splitting
 - **Dynamic Goals**: Goal vector updates automatically when gripper state changes
-- **13D SE(3) Conversion**: Converts raw 8D poses (pos + quaternion + gripper) to 13D full matrix format
-- **Twist Computation**: Calculates ground truth 7D twist actions using PyPose Log map
+- **13D SE(3) Conversion**: Converts raw 8D poses (pos + quaternion + gripper) to 13D full matrix format using **PyPose** for mathematical consistency
+- **Twist Computation**: Calculates ground truth 7D twist actions using the PyPose SE(3) Log map
 - **Platform-Aware**: Windows-compatible memory management
 
 #### Episode Processing
@@ -37,17 +37,20 @@ gripper_changes = np.where(is_closed[1:] != is_closed[:-1])[0] + 1
 #### Twist Computation
 
 Ground truth twists computed via PyPose SE(3) log map:
+
 ```python
 import pypose as pp
+import torch
 
 # T_curr, T_next are 4x4 SE(3) matrices
 T_curr_pp = pp.mat2SE3(T_curr)
 T_next_pp = pp.mat2SE3(T_next)
-twist = pp.Log(T_curr_pp.Inv() @ T_next_pp).tensor()
-# twist = [ω_x, ω_y, ω_z, v_x, v_y, v_z]  (6D)
 
-# With gripper delta (7D)
-twist_7d = [twist, gripper_next - gripper_curr]
+# Compute relative transform and map to Algebra (6D)
+twist_6d = pp.Log(T_curr_pp.Inv() @ T_next_pp).tensor()
+
+# Add gripper delta for 7D action
+twist_7d = torch.cat([twist_6d, (grip_next - grip_curr).unsqueeze(-1)], dim=-1)
 ```
 
 #### Subtask Types

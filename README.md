@@ -14,6 +14,7 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 | **Action Chunking** | Predicts W future actions in parallel (no autoregressive rollout) |
 | **Temporal Ensembling** | Smooth action output via overlapping chunk averaging |
 | **Endpoint Chordal Loss** | Task-oriented SE(3) chordal loss (trig-free Frobenius norm) |
+| **Sim Diagnostics** | Automated trajectory comparison tool for Sim-to-Real alignment |
 | **Self-Supervised Confidence** | Learns to predict own accuracy (requery signal) |
 | **Local + Streaming Data** | Train from GCS or preprocessed HDF5 files |
 
@@ -21,13 +22,13 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 
 ```
 Inputs:
-  - Images: (B, W, 3, 224, 224)     → ResNet-18 + TokenLearner → 256D
+  - Images: (B, W, 3, 224, 224)     → DINOv2 (ViT-S/14) → 256D
   - Proprio: (B, W, 13)             → MLP → 128D  
   - Goal: (B, 38)                   → MLP → 128D
 
-Token: [Proprio | Vision | Goal] = 512D per timestep
+Token: [Vision | Proprio | Goal] = 512D per timestep
 
-Backbone: Transformer (4 layers, 8 heads, RoPE positional encoding)
+Backbone: Transformer (8 layers, 16 heads, RoPE positional encoding)
 
 Output: (B, W, 7) twist actions + (B, 1) confidence
 ```
@@ -68,6 +69,17 @@ python imitation/train.py --local_data_path E:/data/droid.h5 --batch_size 32
 
 ### Evaluation
 
+**Closed-loop Isaac Sim Evaluation:**
+```bash
+python scripts/eval_isaac.py --checkpoint checkpoints/latest.pt --robot franka
+```
+
+**Trajectory Comparison (Diagnostic):**
+```bash
+python scripts/sim_diagnostic.py --mode both --proprio_source sim --checkpoint checkpoints/latest.pt
+```
+
+**Dataset sequence evaluation:**
 ```bash
 python scripts/evaluate_sequence.py --checkpoint_dir checkpoints
 ```
@@ -106,6 +118,9 @@ imitation/
   data/           # Data loaders, preprocessor, goal oracle
 
 scripts/          # Evaluation, verification utilities
+  eval_isaac.py   # Closed-loop Isaac Sim evaluation
+  sim_diagnostic.py # Trajectory comparison and frame alignment tool
+  make_gif.py     # Visualization script
 docs/             # Documentation
 ```
 

@@ -8,6 +8,7 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 - **7D Twist Actions**: Predicts Lie algebra twists (ω, v, gripper) via PyPose
 - **Chordal Loss**: Trig-free SE(3) loss using Frobenius norm
 - **Action Chunking**: Predicts (B, ChunkSize, 7) - a sequence of ChunkSize future actions from the LAST token only
+- **DINOv2 Backbone**: Uses frozen DINOv2 (ViT-S/14) with a trainable fusion head
 - **Confidence Requery**: Simple MLP prediction from the LAST token based on action loss
 - **RoPE**: Rotary Position Embeddings for better sequence modeling
 
@@ -17,14 +18,14 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 graph TD
     subgraph Inputs
         Img[Image Window<br/>B, W, 3, 224, 224]
-        Prop[Proprio Window<br/>B, W, 7]
-        Goal[Goal Embedding<br/>B, 64]
+        Prop[Proprio Window<br/>B, W, 13]
+        Goal[Goal Embedding<br/>B, 38]
     end
 
     subgraph Encoders
-        VE[Vision Encoder<br/>ResNet-18]
+        VE[Vision Encoder<br/>DINOv2 ViT-S/14]
         PE[Proprio Encoder<br/>13D → 128D]
-        GE[Goal Encoder<br/>64D → 128D]
+        GE[Goal Encoder<br/>38D → 128D]
     end
 
     subgraph Bottleneck
@@ -51,7 +52,7 @@ graph TD
     TL --> Concat
     PE --> Concat
     GE --> Concat
-    Concat[Concat: 128+768+128=1024D] --> T
+    Concat[Concat: 128+256+128=512D] --> T
     
     T --> LT
     LT --> AD
@@ -64,7 +65,7 @@ graph TD
 |-----------|-----------|-------------|
 | Proprioception | 13D | `[R_flat(9), p_x, p_y, p_z, gripper]` - Flattened rotation matrix + translation + gripper |
 | Action (Twist) | 7D | `[ω_x, ω_y, ω_z, v_x, v_y, v_z, gripper_delta]` - Angular velocity + linear velocity + gripper |
-| Goal | 64D | Structured semantic goal vector (includes 13D start/end poses) |
+| Goal | 38D | Structured semantic goal vector (includes 13D start/end poses) |
 | Vision tokens | 256D | Per-frame visual features (1 token/frame) |
 | Proprio tokens | 128D | Encoded proprioceptive state |
 | Goal tokens | 128D | Encoded goal embedding |
@@ -79,20 +80,21 @@ graph TD
 - **Running Normalization**: Uses EMA to normalize inputs during training
 - **Output**: 128D latent vector
 
-#### Vision Encoder & Token Learner
-- **Vision Encoder**: ResNet-18 backbone with FiLM conditioning on goal
-- **Token Learner**: Compresses spatial features to 1 token per frame (256D)
+#### Vision Encoder
+- **Backbone**: Frozen DINOv2 (ViT-S/14) features
+- **Fusion**: Convolutional downsampling followed by concatenation of the goal embedding in a linear head.
+- **Output**: 256D latent vector per frame.
 
 #### Goal Encoder
-- **Input**: 64D structured goal vector
+- **Input**: 38D structured goal vector
 - **Output**: 128D goal embedding
 
 ### 2. Axis Transformer
 
 - **Type**: Transformer Encoder with RoPE (Rotary Position Embeddings)
-- **Embedding**: 1024D (768 vision + 128 proprio + 128 goal concatenated per timestep)
-- **Token Order**: `[Proprio(128) | Vision(768) | Goal(128)]` per timestep
-- **Layers**: 4 layers, 8 heads
+- **Embedding**: 512D (256 vision + 128 proprio + 128 goal concatenated per timestep)
+- **Token Order**: `[Vision(256) | Proprio(128) | Goal(128)]` per timestep
+- **Layers**: 8 layers, 16 heads
 
 The transformer processes a sliding window of W=8 timesteps, with each timestep's tokens concatenated into a single 512D vector.
 

@@ -76,11 +76,8 @@ Using the full rotation matrix avoids trigonometric conversions during training.
 
 ```python
 import numpy as np
-from scipy.spatial.transform import Rotation
-
-def quaternion_to_rotvec(quat):
-    """Convert quaternion [x,y,z,w] to rotation vector."""
-    return Rotation.from_quat(quat).as_rotvec()
+import pypose as pp
+import torch
 
 def construct_goal_vector(
     task_type: int,
@@ -130,8 +127,9 @@ import numpy as np
 oracle = GoalOracle(output_dim=38)
 
 # 13D full SE(3) poses: [R_flat(9), pos(3), gripper(1)]
-start_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 0.0, 0.3, 0.0])  # Identity rotation
-end_pose = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.0, 0.1, 1.0])
+# Identity rotation
+start_pose = np.concatenate([np.eye(3).flatten(), [0.4, 0.0, 0.3, 0.0]])
+end_pose = np.concatenate([np.eye(3).flatten(), [0.5, 0.0, 0.1, 1.0]])
 
 # Extract properties from instruction
 object_props = extract_object_properties("pick up the red block")
@@ -139,7 +137,7 @@ object_props = extract_object_properties("pick up the red block")
 goal = oracle.encode_goal(
     task_type=1,  # Pick
     start_pose=start_pose,
-    end_pose=end_pose,
+    target_pose=end_pose,
     object_props=object_props
 )
 

@@ -17,37 +17,48 @@ Key parameters in the config dictionary:
 
 | Parameter | Description | Default |
 |:---|:---|:---|
-| `goal_dim` | Dimension of input goal embeddings | 64 |
+| `goal_dim` | Dimension of input goal embeddings | 38 |
 | `embed_dim` | Token embedding dimension (vision+proprio+goal) | 512 |
-| `num_heads` | Number of attention heads | 8 |
-| `num_layers` | Number of transformer layers | 4 |
+| `num_heads` | Number of attention heads | 16 |
+| `num_layers` | Number of transformer layers | 8 |
 | `proprio_dim` | Dimension of SE(3) full matrix pose | **13** |
 | `action_dim` | Dimension of twist output | **7** |
 | `window_size` | Sliding window of historical observations | 8 |
 | `chunk_size` | Model parameter: number of future actions to predict | **10** |
-| `action_dim` | Dimension of twist output | **7** |
 
 ## Loss Functions
 
 ### Chordal Loss (Actions) - Trig-Free!
 
-Axis V2 uses a **chordal loss** for SE(3) that directly compares rotation matrices using Frobenius norm:
+Axis V2 uses a **chordal loss** for SE(3) that directly compares rotation matrices using the Frobenius norm. During rollout, we integrate predicted twists to compute future end-effector poses:
 
 ```python
 import pypose as pp
+import torch
 
-def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon):
-    # Rollout predicted twists from 13D start pose
-    T_pred = build_se3_from_13d(start_poses)  # (B, 4, 4)
-    for t in range(horizon):
-        T_delta = pp.Exp(pp.se3(pred_twists[:, t, :6]))
-        T_pred = pp.mat2SE3(T_pred) @ T_delta
-        T_pred = T_pred.matrix()
+def endpoint_chordal_loss(pred_twists, start_poses, target_poses, horizon, omega_rot=1.0, omega_trans=1.0):
+    # start_poses: (B, 13) -> [R(9), p(3), g(1)]
+    # pred_twists: (B, Chunk, 7) -> [ω(3), v(3), Δg(1)]
     
-    # Chordal loss: ||R_pred - R_target||^2_F + ||p_pred - p_target||^2
-    rot_loss = frobenius_norm(R_pred - R_target)
-    trans_loss = l2_norm(p_pred - p_target)
-    return omega_rot * rot_loss + omega_trans * trans_loss + grip_loss
+    # 1. Convert 13D to SE3
+    T_curr = pp.mat2SE3(build_matrix_from_13d(start_poses))
+    
+    total_loss = 0
+    for t in range(horizon):
+        # 2. Integrate twist
+        T_delta = pp.Exp(pp.se3(pred_twists[:, t, :6]))
+        T_curr = T_curr @ T_delta
+        
+        # 3. Compare to ground truth target pose
+        T_target = pp.mat2SE3(build_matrix_from_13d(target_poses[:, t]))
+        
+        # Chordal: ||R_curr - R_target||_F + ||p_curr - p_target||_2
+        rot_loss = torch.norm(T_curr.rotation().matrix() - T_target.rotation().matrix(), p='fro', dim=(-2, -1))
+        trans_loss = torch.norm(T_curr.translation() - T_target.translation(), p=2, dim=-1)
+        
+        total_loss += (omega_rot * rot_loss + omega_trans * trans_loss).mean()
+        
+    return total_loss / horizon
 ```
 
 **Why Chordal Loss?**

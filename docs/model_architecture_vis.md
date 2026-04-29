@@ -9,22 +9,22 @@ graph TD
     subgraph Inputs
         IMG[("Images<br/>(B, W, 3, 224, 224)")]
         PROP[("Proprioception<br/>(B, W, 13)<br/>[R_flat(9), Pos, Gripper]")]
-        GOAL[("Goal Embed<br/>(B, 64)")]
+        GOAL[("Goal Embed<br/>(B, 38)")]
     end
 
     subgraph Encoders
-        VE[("VisionEncoder<br/>ResNet-18")]
+        VE[("VisionEncoder<br/>DINOv2 ViT-S/14")]
         PE[("ProprioEncoder<br/>13D → 128D")]
-        GE[("GoalEncoder<br/>64D → 128D")]
+        GE[("GoalEncoder<br/>38D → 128D")]
         TL[("TokenLearner<br/>1 token/frame")]
     end
 
     subgraph Token_Construction
-        CAT[("Per-Frame Concatenation<br/>[Proprio | Vision | Goal]<br/>128 + 768 + 128 = 1024D")]
+        CAT[("Per-Frame Concatenation<br/>[Vision | Proprio | Goal]<br/>256 + 128 + 128 = 512D")]
     end
 
     subgraph Backbone
-        TR[("AxisTransformer<br/>512D, RoPE, 4 layers")]
+        TR[("AxisTransformer<br/>512D, RoPE, 8 layers, 16 heads")]
     end
 
     subgraph Decoders
@@ -73,6 +73,7 @@ graph TD
 
 | Component | V1 | V2 (Pure Chunking) |
 |-----------|----|----|
+| Vision Backbone | ResNet-18 | **DINOv2 (ViT-S/14)** |
 | Proprioception | 7D (rotvec + pos + grip) | **13D** (R_flat + pos + grip) |
 | Action Output | 10D delta pose | **7D twist** (ω, v, grip) |
 | Token Structure | Interleaved P, V tokens | **Concatenated** per frame |
@@ -85,7 +86,7 @@ Each timestep produces a single 512D token:
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Proprio (128D)  │  Vision (768D)  │  Goal (128D)  │
+│  Vision (256D)  │  Proprio (128D)  │  Goal (128D)  │
 └──────────────────────────────────────────────┘
                     512D total
 ```
@@ -96,10 +97,11 @@ The transformer sees a sequence of W=8 such tokens.
 
 ```mermaid
 graph LR
-    I[("Images (B, W, 3, 224, 224)")] -->|Flatten B*W| VE[("ResNet-18")]
-    VE -->|"(B*W, 256, H', W')"| FM[("Feature Map")]
-    FM --> TL[("Token Learner")]
-    TL -->|"(B*W, 1, 256)"| T[("Vision Tokens")]
+    I[("Images (B, W, 3, 224, 224)")] -->|Frozen DINOv2| VE[("ViT-S/14")]
+    VE -->|"(B*W, 384, 16, 16)"| FM[("Patch Tokens")]
+    FM --> FB[("Fusion Block (Conv)")]
+    FB -->|"(B*W, 1024)"| LAT[("Latent Head (+Goal)")]
+    LAT -->|"(B*W, 256)"| T[("Vision Tokens")]
     T -->|Reshape| OUT[("(B, W, 256)")]
 ```
 
@@ -148,7 +150,7 @@ During training, target = `exp(-action_loss / temperature)`.
 |--------|-------|-------------|
 | Input Images | `(B, W, 3, 224, 224)` | RGB images |
 | Input Proprio | `(B, W, 13)` | 13D SE(3) poses |
-| Input Goal | `(B, 64)` | Semantic goal |
+| Input Goal | `(B, 38)` | Semantic goal |
 | Vision Tokens | `(B, W, 256)` | 1 token per frame |
 | Proprio Tokens | `(B, W, 128)` | Encoded proprio |
 | Goal Tokens | `(B, W, 128)` | Repeated goal |

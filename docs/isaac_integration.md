@@ -9,7 +9,7 @@ The repository is organized to separate the core model from the training backend
 - **`src/models/`**: Contains the shared `AxisModel` and transformer architecture. This is used by both Imitation Learning and Isaac Lab.
 - **`imitation/`**: Contains the legacy Imitation Learning training code (formerly `training/`).
 - **`isaac_sim/`**: Contains the **Isaac Lab Extension** (`my_robot_ext`). This is a standalone Python package.
-- **`scripts/`**: Contains utility scripts, including `eval_isaac.py`.
+- **`scripts/`**: Contains utility scripts, including `eval_isaac.py` and `sim_diagnostic.py`.
 
 ## 2. The Isaac Lab Extension (`my_robot_ext`)
 
@@ -18,7 +18,7 @@ The code in `isaac_sim/` is structured as a pip-installable package named `my_ro
 ### Components
 - **`config/robots.py`**: Defines robot configurations (e.g., `FrankaCfg`, `GoogleRobotCfg`).
 - **`tasks/eval_env.py`**: The `AxisEvalEnv` class, which manages the simulation scene, robot spawning, and basic physics stepping.
-- **`wrappers/axis_wrapper.py`**: The `AxisObservationWrapper` adapts the environment's single-step observations into the sliding-window format `(B, Window, ...)` required by the Transformer model.
+- **`wrappers/axis_wrapper.py`**: Adapts raw observations into the sliding-window format `(B, Window, ...)` required by the model. Standardizes gripper states and ensures SE(3) consistency using **PyPose**.
 
 ## 3. Installation & Linking
 
@@ -78,10 +78,28 @@ Once linked, you can run the evaluation script. This script loads your trained m
 
 ### Configuration
 - **Selecting a Robot**: Use `--robot franka` or `--robot google`.
-    - *Note*: For the Google Robot, ensure you have updated the USD path in `isaac_sim/my_robot_ext/config/robots.py`.
-- **Model Checkpoint**: Ensure the checkpoint path is absolute or relative to where you run the command.
+- **Control Frequency**: Default is 30Hz to match training. Use `--model_refresh` to adjust.
+- **Visual Feedback**: Use `--video` to record MP4s of the evaluation episodes.
 
-## 5. Troubleshooting
+## 5. Sim-to-Real Alignment (`sim_diagnostic.py`)
+
+If the robot "freezes" or drifts during evaluation, use the diagnostic tool to compare the simulation's coordinate frame with the training dataset:
+
+```bash
+python scripts/sim_diagnostic.py --mode both --proprio_source sim --checkpoint checkpoints/latest.pt
+```
+
+### Modes
+- `gt`: Replay ground truth trajectory in Sim. Verify that the robot physically follows the dataset path.
+- `predicted`: Run the model in a "Teacher Forcing" mode where it sees dataset images but its own previous actions.
+- `both`: Direct side-by-side comparison of GT vs. Prediction at every step.
+
+### Key Considerations
+- **Burn-in Phase**: The model requires 10-20 steps of "burn-in" to populate its sliding window. The evaluation scripts handle this by replaying the first few frames of the task before enabling the model.
+- **Agent Reset**: Always call `agent.reset()` when switching between observation sources (e.g., after burn-in) to clear the temporal ensembler and KV-cache.
+- **PD Gains**: High stiffness (`stiffness=4000`, `damping=400`) is required in `robots.py` to ensure the robot tracks the SE(3) actions precisely enough for the transformer's expectations.
+
+## 6. Troubleshooting
 
 **"ModuleNotFoundError: No module named 'src'"**
 If running from `c:\isaac-lab`, the script might not find the `src` module if `c:\Users\thoma\AI Projects\Axis` is not in the PYTHONPATH.
