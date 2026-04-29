@@ -21,10 +21,10 @@ def test_model_dimensions():
         "proprio_dim": 13,  # SE(3) uses 13D: R_flat(9) + Trans(3) + Gripper(1)
         "action_dim": 7,  # Twist: 3 AngVel + 3 LinVel + 1 Gripper
         "goal_dim": 38,
-        "embed_dim": 256,
-        "vision_feature_dim": 256,
+        "embed_dim": 1024,
+        "vision_feature_dim": 768,
         "num_vision_tokens": 10,
-        "num_heads": 4,
+        "num_heads": 16,
         "num_layers": 2,  # Small for speed
     }
 

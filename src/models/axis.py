@@ -144,7 +144,7 @@ class AxisModel(nn.Module):
             vision_tokens_new = self.vision_encoder(
                 images_new, goal=goal_raw_new
             )  # pass RAW goal!
-            vision_tokens_new = vision_tokens_new.unsqueeze(1)  # (B, 1, 256)
+            vision_tokens_new = vision_tokens_new.unsqueeze(1)  # (B, 1, 768)
 
             # Encode NEWEST proprio frame
             proprio_new = proprio[:, -1:, ...].reshape(B, -1)  # (B, 10)
@@ -183,8 +183,8 @@ class AxisModel(nn.Module):
 
             vision_tokens = self.vision_encoder(
                 images_flat, goal=goal_raw_flat
-            )  # (B*W, 256)
-            vision_tokens = vision_tokens.reshape(B, W, 256)  # (B, W, 256)
+            )  # (B*W, 768)
+            vision_tokens = vision_tokens.reshape(B, W, self.vision_dim)  # (B, W, 768)
 
             # 3. Encode proprio
             proprio_flat = proprio.reshape(B * W, -1)
@@ -194,7 +194,7 @@ class AxisModel(nn.Module):
             # 4. Concatenate: [Proprio, Vision, Goal]
             input_tokens = torch.cat(
                 [proprio_tokens, vision_tokens, goal_tokens], dim=-1
-            )  # (B, W, 512)
+            )  # (B, W, 1024)
 
         # 5. Transformer backbone
         if return_attn_weights:
@@ -202,7 +202,7 @@ class AxisModel(nn.Module):
                 input_tokens, return_attn_weights=True
             )
         else:
-            output_tokens = self.transformer(input_tokens)  # (B, W, 512)
+            output_tokens = self.transformer(input_tokens)  # (B, W, 1024)
 
         if self.training:
             # DENSE SUPERVISION: Decode from every token in the window
@@ -210,7 +210,7 @@ class AxisModel(nn.Module):
             requery_logits = []
 
             for i in range(output_tokens.size(1)):
-                token = output_tokens[:, i, :]  # (B, 512)
+                token = output_tokens[:, i, :]  # (B, 1024)
                 pred_actions.append(self.action_decoder(token))
                 requery_logits.append(self.requery_decoder(token))
 
@@ -220,7 +220,7 @@ class AxisModel(nn.Module):
 
         else:
             # INFERENCE: Decode ONLY from the final token
-            last_token = output_tokens[:, -1, :]  # (B, 512)
+            last_token = output_tokens[:, -1, :]  # (B, 1024)
             pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
             requery_logit = self.requery_decoder(last_token)  # (B, 1)
 
