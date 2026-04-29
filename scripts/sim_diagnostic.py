@@ -35,7 +35,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 0. Bootstrap Isaac Sim
 try:
-    import isaacsim
+    import isaacsim  # type: ignore # noqa: F401
 except ImportError:
     pass
 
@@ -56,10 +56,10 @@ if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
     sys.path.append(isaac_sim_path)
 
 try:
-    from omni.isaac.lab.app import AppLauncher
+    from omni.isaac.lab.app import AppLauncher # type: ignore
 except ImportError:
     try:
-        from isaaclab.app import AppLauncher
+        from isaaclab.app import AppLauncher # type: ignore
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
@@ -109,16 +109,16 @@ if args.mode != "diagnostic":
 # =========================================================================
 # POST-LAUNCH IMPORTS
 # =========================================================================
-import h5py
-from scipy.spatial.transform import Rotation as R
+import h5py  # noqa: E402
+from scipy.spatial.transform import Rotation as R  # noqa: E402, F811
 
 # Suppress TF logs for RTX loading
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 if args.mode != "diagnostic":
-    from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
-    from my_robot_ext.config.robots import FrankaCfg
+    from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg # type: ignore
+    from my_robot_ext.config.robots import FrankaCfg # type: ignore
 
 
 def load_episode_local(data_path, episode_idx):
@@ -271,7 +271,7 @@ def print_diagnostics(props):
     print("=" * 70)
 
     # Frame 0 details
-    print(f"\n--- Frame 0 ---")
+    print("\n--- Frame 0 ---")
     p = props[0]
     R0 = p[:9].reshape(3, 3)
     pos0 = p[9:12]
@@ -302,7 +302,7 @@ def print_diagnostics(props):
     # Gripper transitions
     grip = props[:, 12]
     transitions = np.where(np.abs(np.diff(grip)) > 0.3)[0]
-    print(f"\n--- Gripper Transitions ---")
+    print("\n--- Gripper Transitions ---")
     if len(transitions) > 0:
         for t in transitions[:10]:  # Show first 10
             print(f"  Frame {t}: {grip[t]:.3f} -> {grip[t+1]:.3f} "
@@ -311,8 +311,8 @@ def print_diagnostics(props):
         print("  No significant gripper transitions found")
 
     # Compare with Isaac Sim's expected workspace
-    print(f"\n--- Isaac Sim Compatibility ---")
-    print(f"  Franka default EE position (m): ~(0.3-0.6, -0.3-0.3, 0.1-0.6)")
+    print("\n--- Isaac Sim Compatibility ---")
+    print("  Franka default EE position (m): ~(0.3-0.6, -0.3-0.3, 0.1-0.6)")
     print(f"  Training data EE position (m):  ({(pos[:, 0].min()/1000):.3f}-{(pos[:, 0].max()/1000):.3f}, "
           f"{(pos[:, 1].min()/1000):.3f}-{(pos[:, 1].max()/1000):.3f}, "
           f"{(pos[:, 2].min()/1000):.3f}-{(pos[:, 2].max()/1000):.3f})")
@@ -326,7 +326,7 @@ def print_diagnostics(props):
 
     # Show what Isaac Sim would receive for frame 0
     pos_sim, quat_wxyz, grip_cmd, quat_xyzw = pose_13d_to_sim_action(props[0])
-    print(f"\n--- Frame 0 → Isaac Sim Action ---")
+    print("\n--- Frame 0 → Isaac Sim Action ---")
     print(f"  pos (m):       {pos_sim.round(4)}")
     print(f"  quat (wxyz):   {quat_wxyz.round(4)}")
     print(f"  quat (xyzw):   {quat_xyzw.round(4)}")
@@ -370,11 +370,11 @@ def replay_in_sim(props, start_frame, max_steps, speed):
         pos_diff = np.linalg.norm(sim_pos - pos_train) * 1000
         print(f"\n  ⚠ POSITION MISMATCH: {pos_diff:.1f} mm between sim and training data")
         if pos_diff > 100:
-            print(f"  🔴 LARGE MISMATCH! This strongly suggests a coordinate frame issue.")
+            print("  🔴 LARGE MISMATCH! This strongly suggests a coordinate frame issue.")
         elif pos_diff > 20:
-            print(f"  🟡 Moderate mismatch — could be the body_offset (107mm)")
+            print("  🟡 Moderate mismatch — could be the body_offset (107mm)")
         else:
-            print(f"  ✅ Positions are close")
+            print("  ✅ Positions are close")
 
     # Replay loop
     end_frame = min(start_frame + max_steps, len(props))

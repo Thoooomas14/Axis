@@ -14,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 0. Bootstrap Isaac Sim (Required for 4.0+)
 try:
-    import isaacsim
+    import isaacsim # type: ignore  # noqa: F401
 except ImportError:
     pass
 
@@ -38,10 +38,10 @@ if os.path.exists(isaac_sim_path) and isaac_sim_path not in sys.path:
     sys.path.append(isaac_sim_path)
 
 try:
-    from omni.isaac.lab.app import AppLauncher
+    from omni.isaac.lab.app import AppLauncher # type: ignore
 except ImportError:
     try:
-        from isaaclab.app import AppLauncher
+        from isaaclab.app import AppLauncher # type: ignore
     except ImportError as e:
         print(f"CRITICAL ERROR: Failed to import AppLauncher. {e}")
         sys.exit(1)
@@ -71,14 +71,14 @@ simulation_app = app_launcher.app
 # =========================================================================
 # NOW IMPORT PYTORCH AND CUSTOM MODULES (CUDA context is now safe)
 # =========================================================================
-import torch
-from src.inference import AxisInference
-from src.utils.rotation_utils import quaternion_to_rotation_6d
-from imitation.data.goal_oracle import GoalOracle
+import torch  # noqa: E402, F811
+from src.inference import AxisInference  # noqa: E402
+from src.utils.rotation_utils import quaternion_to_rotation_6d  # noqa: E402
+from imitation.data.goal_oracle import GoalOracle  # noqa: E402
 
-from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg
-from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper
-from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg
+from my_robot_ext.tasks.eval_env import AxisEvalEnv, AxisEvalEnvCfg  # noqa: E402
+from my_robot_ext.wrappers.axis_wrapper import AxisObservationWrapper  # noqa: E402
+from my_robot_ext.config.robots import FrankaCfg, GoogleRobotCfg  # noqa: E402
 
 
 # =========================================================================
@@ -188,7 +188,6 @@ def main():
 
         # State
         initial_pose_13d = None
-        target_pos_sim = None
         goal_vector = np.zeros((B, 38), dtype=np.float32)  # 38D
         requery_flag = True
         requery_prob = 0.0
