@@ -143,10 +143,8 @@ class AxisObservationWrapper(gym.Wrapper):
         g_meters = gripper_pos.mean(dim=1, keepdim=True)
         g_norm = g_meters / 0.04  # 0.04m (open) → 1.0, 0.0m (closed) → 0.0
         g_norm = torch.clamp(g_norm, 0.0, 1.0)
-        if g_norm > 0.5:
-            g_norm = 1.0  # Ensure gripper open
-        else:
-            g_norm = 0.0  # Ensure gripper closed
+        # If > 0.5, set to 1.0 (open), else set to 0.0 (closed)
+        g_norm = torch.where(g_norm > 0.5, 1.0, 0.0)
 
         # Output: [Rot9(9), Pos_mm(3), Gripper(1)] -> 13D
         proprio = torch.cat([rot9, pos_tip_mm, g_norm], dim=1)
