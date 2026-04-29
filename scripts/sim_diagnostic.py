@@ -703,7 +703,7 @@ def replay_predicted_in_sim(
             print(f"\nStep {frame_idx:3d} (Frame {i})")
             print(f"  GT   pos (m): {gt_pos_m.round(4)}")
             print(f"  PRED pos (m): {act_pos_sim.round(4)}")
-            print(f"  SIM  pos (m): {obs['proprio'][0, -1][:3].cpu().numpy().round(4)}")
+            print(f"  SIM  pos (m): {(obs['proprio'][0, -1][9:12].cpu().numpy() / 1000.0).round(4)}")
             err_pos = np.linalg.norm(gt_pos_m - act_pos_sim) * 1000
             print(f"  Pos Error:    {err_pos:.1f} mm")
 

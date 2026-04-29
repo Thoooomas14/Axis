@@ -23,7 +23,7 @@ class FrankaCfg(ArticulationCfg):
             spawn=sim_utils.UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/FrankaRobotics/FrankaPanda/franka.usd",
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False,
+                    disable_gravity=True,
                     retain_accelerations=False,
                     linear_damping=0.0,
                     angular_damping=0.0,
