@@ -120,6 +120,7 @@ class AxisInference:
         config = self.model.config  # Get config from model (handles defaults)
         self.config = config
         self.model.eval()
+        self.window_size = self.config.get("window_size", 10)
 
         if self.random_weights:
             logging.warning("WARNING: Using Random Weights for AxisInference.")
