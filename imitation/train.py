@@ -699,8 +699,6 @@ def train(args):
                                     "Hyperparameters/learning_rate": optimizer.param_groups[
                                         0
                                     ]["lr"],
-                                    "Loss/confidence": confidence_loss.item(),
-                                    "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
                                 },
                                 step,
                             )
