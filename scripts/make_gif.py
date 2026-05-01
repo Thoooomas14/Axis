@@ -14,7 +14,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.models.axis import AxisModel
 from imitation.utils.visualizer import Visualizer
-from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 
 
@@ -99,8 +98,8 @@ def make_gif(args):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # --- V2 Configuration ---
-    config = "AxisV2"
+    # --- V3 Configuration ---
+    config = 'AxisV3'
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
@@ -140,36 +139,21 @@ def make_gif(args):
         model.load_state_dict(state_dict, strict=False)
         print(f"Loaded model at step {checkpoint.get('step', 'unknown')}")
 
-    # --- Load Data ---
-    if args.local_data_path:
-        print(f"Loading from LOCAL HDF5: {args.local_data_path}")
-        # If random, we load ALL episodes (max_episodes=0) and shuffle.
-        # Otherwise, we take the first N (usually 1).
-        local_max_episodes = (
-            0 if args.random else (args.max_episodes if args.max_episodes > 0 else 1)
-        )
-        loader = LocalDataLoader(
-            data_path=args.local_data_path,
-            window_size=10,
-            loss_horizon=10,
-            shuffle=args.random,
-            repeat=False,
-            max_episodes=local_max_episodes,
-        )
-    else:
-        print(f"Initializing RTXStreamLoader for {args.dataset}...")
-        loader = RTXStreamLoader(
-            dataset_name=args.dataset,
-            split="train",
-            window_size=10,
-            image_size=(224, 224),
-            data_dir=args.data_dir,
-            repeat=False,
-            use_subprocess=False,
-            shuffle_buffer_size=0,
-            shuffle_files=args.random,
-            max_episodes=args.max_episodes if args.max_episodes > 0 else 1,
-        )
+    print(f"Loading from LOCAL HDF5: {args.local_data_path}")
+    # If random, we load ALL episodes (max_episodes=0) and shuffle.
+    # Otherwise, we take the first N (usually 1).
+    local_max_episodes = (
+        0 if args.random else (args.max_episodes if args.max_episodes > 0 else 1)
+    )
+    loader = LocalDataLoader(
+        data_path=args.local_data_path,
+        window_size=10,
+        loss_horizon=10,
+        shuffle=args.random,
+        repeat=False,
+        max_episodes=local_max_episodes,
+    )
+
 
     iterator = iter(loader)
 
@@ -181,7 +165,7 @@ def make_gif(args):
 
     # --- Inference Loop ---
     pred_actions = []
-    requery_preds = []
+    confidence_preds = []
     images_collected = []
     gt_twists = []
 
@@ -295,9 +279,9 @@ def make_gif(args):
             end_time = time.time()
             inference_times.append(end_time - start_time)
 
-            # Debug Requery (First 5 steps)
+            # Debug Confidence (First 5 steps)
             if i % 10 == 0:
-                print(f"DEBUG: Step {i} Raw Requery Logit from Model: {req_logit}")
+                print(f"DEBUG: Step {i} Raw Confidence Logit from Model: {req_logit}")
 
             # Action: Ensembling
             current_chunk = pred_chunk[0].cpu()  # (Chunk, 7)
@@ -310,7 +294,7 @@ def make_gif(args):
             current_req = req_logit.cpu()  # (1, 1)
 
             pred_actions.append(current_pred_action)
-            requery_preds.append(current_req)
+            confidence_preds.append(current_req)
 
             # Integrate Prediction
             integration_start_state = curr_pred_pose_13d
@@ -350,7 +334,7 @@ def make_gif(args):
 
     # Stack results
     pred_actions_stack = torch.cat(pred_actions, dim=0)
-    requery_preds_stack = torch.cat(requery_preds, dim=0)
+    confidence_preds_stack = torch.cat(confidence_preds, dim=0)
     images_stack = torch.stack(images_collected, dim=0)
     gt_stack = torch.stack(gt_twists, dim=0)
 
@@ -363,15 +347,15 @@ def make_gif(args):
 
     print(f"Collected {len(images_collected)} frames. Poses: {gt_poses_stack.shape}")
 
-    # Debug Requery Stats
-    if len(requery_preds) > 0:
-        req_tensor = torch.stack(requery_preds)
+    # Debug Confidence Stats
+    if len(confidence_preds) > 0:
+        req_tensor = torch.stack(confidence_preds)
         print(
-            f"DEBUG: Requery Stats - Min: {req_tensor.min().item():.4f}, Max: {req_tensor.max().item():.4f}, Mean: {req_tensor.mean().item():.4f}"
+            f"DEBUG: Confidence Stats - Min: {req_tensor.min().item():.4f}, Max: {req_tensor.max().item():.4f}, Mean: {req_tensor.mean().item():.4f}"
         )
         if (req_tensor.max() - req_tensor.min()) < 1e-6:
             print(
-                "DEBUG: Requery signal is static (model is likely outputting constant 0 logit)."
+                "DEBUG: Confidence signal is static (model is likely outputting constant 0 logit)."
             )
 
     # --- Generate GIF ---
@@ -383,7 +367,7 @@ def make_gif(args):
         pred_actions_stack,
         gt_poses=gt_poses_stack,
         pred_poses=pred_poses_stack,
-        requery_preds=requery_preds_stack,
+        confidence_preds=confidence_preds_stack,
         inference_times=inference_times,
         subtask_goal_poses=subtask_goal_poses_tensor,
         save_prefix="episode_stream_viz",
@@ -394,13 +378,11 @@ def make_gif(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="droid")
-    parser.add_argument("--data_dir", type=str, default=None)
     parser.add_argument(
         "--local_data_path",
         type=str,
         default=None,
-        help="Path to local HDF5 file (overrides streaming)",
+        help="Path to local HDF5 file",
     )
     parser.add_argument(
         "--max_episodes",

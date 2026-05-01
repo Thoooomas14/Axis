@@ -41,7 +41,7 @@ class TrainingLogger:
                             "epoch",
                             "loss",
                             "action_loss",
-                            "requery_loss",
+                            "confidence_loss",
                             "val_loss",
                         ]
                     )
@@ -61,7 +61,7 @@ class TrainingLogger:
             with open(self.log_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(
-                    ["step", "epoch", "loss", "action_loss", "requery_loss", "val_loss"]
+                    ["step", "epoch", "loss", "action_loss", "confidence_loss", "val_loss"]
                 )
 
         # TensorBoard integration
@@ -111,10 +111,10 @@ class TrainingLogger:
     def close(self):
         self.tb_writer.close()
 
-    def log_step(self, step, epoch, loss, action_loss, requery_loss, val_loss=None):
+    def log_step(self, step, epoch, loss, action_loss, confidence_loss, val_loss=None):
         with open(self.log_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([step, epoch, loss, action_loss, requery_loss, val_loss])
+            writer.writerow([step, epoch, loss, action_loss, confidence_loss, val_loss])
 
     def plot_progress(self):
         try:
@@ -160,8 +160,8 @@ class TrainingLogger:
             )
             plt.plot(
                 df["step"],
-                df["requery_loss"],
-                label="Requery Loss",
+                df["confidence_loss"],
+                label="Confidence Loss",
                 color="red",
                 alpha=0.7,
             )

@@ -61,19 +61,11 @@ except ImportError:
 # =========================================================================
 parser = argparse.ArgumentParser(description="Unified Isaac Sim Diagnostic tool")
 
-# Data source — defaults to RTX streaming from DROID
 parser.add_argument(
     "--local_data_path",
     type=str,
     default=None,
     help="Path to preprocessed HDF5 file (overrides --dataset)",
-)
-parser.add_argument(
-    "--dataset", type=str, default="droid", help="RTX dataset name (default: 'droid')"
-)
-
-parser.add_argument(
-    "--data_dir", type=str, default=None, help="Data directory for RTX datasets"
 )
 parser.add_argument(
     "--checkpoint",

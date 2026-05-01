@@ -19,8 +19,8 @@ def count_parameters(model):
 def main():
     device = torch.device("cpu")  # Use CPU for counting
 
-    # Config matching V2 defaults
-    config = "AxisV2"
+    # Config matching V3 defaults
+    config = "AxisV3"
 
     print(f"Initializing AxisModel with config: {config}")
 

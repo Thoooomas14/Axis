@@ -1,5 +1,5 @@
 """
-Production inference wrapper for Axis V2.
+Production inference wrapper for Axis V3.
 
 Provides a clean API for running inference with safety features,
 rotation conversion, action smoothing (via Temporal Ensembling),
@@ -173,8 +173,8 @@ class AxisInference:
         goal_t = torch.tensor(goal, dtype=torch.float32).unsqueeze(0).to(self.device)
 
         # Forward pass with Caching
-        # Returns: pred_action (B, Chunk, 7), requery (B, 1), tokens (B, W, D)
-        action_chunk, requery_logit, new_tokens = self.model(
+        # Returns: pred_action (B, Chunk, 7), confidence (B, 1), tokens (B, W, D)
+        action_chunk, confidence_logit, new_tokens = self.model(
             images_t,
             proprio_t,
             goal_t,
@@ -240,8 +240,8 @@ class AxisInference:
             "position": action_absolute[9:12],  # mm
             "quaternion": quat,  # [x,y,z,w]
             "gripper": float(action_absolute[12]),
-            "requery": torch.sigmoid(requery_logit).item() > 0.5,
-            "requery_prob": torch.sigmoid(requery_logit).item(),
+            "confidence": torch.sigmoid(confidence_logit).item() > 0.5,
+            "confidence_prob": torch.sigmoid(confidence_logit).item(),
         }
 
     def _integrate_action_13d(

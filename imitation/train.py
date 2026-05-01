@@ -22,7 +22,6 @@ import torchvision.transforms as T
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.models.axis import AxisModel
-from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
@@ -119,7 +118,7 @@ def train(args):
     # Always save to standard name, regardless of input resume file
     save_checkpoint_path = os.path.join(args.checkpoint_dir, "checkpoint_latest.pt")
 
-    config = "AxisV2"
+    config = "AxisV3"
 
     # --- Endpoint Chordal Loss (task-oriented, trig-free) ---
     def orthonormalize_rotation(R):
@@ -243,70 +242,44 @@ def train(args):
 
     # === Dynamic Memory Parameters (can be reduced on OOM) ===
     effective_batch_size = args.batch_size
-    effective_shuffle_buffer = args.shuffle_buffer_size
     effective_num_workers = args.num_workers
 
     def create_dataloader(
         batch_size,
-        shuffle_buffer,
         num_workers,
         split="train",
         split_start=0.0,
         split_end=1.0,
-        mix_episodes=8,
-    ) -> tuple[torch.utils.data.DataLoader, LocalDataLoader | RTXStreamLoader]:
+        mix_episodes=8
+    ) -> tuple[torch.utils.data.DataLoader, LocalDataLoader]:
         """Factory function to create/recreate dataloader with specified params."""
 
         # Use local loader if local_data_path is provided
-        if args.local_data_path:
-            log.info(
-                f"Creating LOCAL dataloader: batch_size={batch_size}, "
-                f"split=[{split_start:.0%}-{split_end:.0%}], "
-                f"max_episodes={args.max_episodes}"
-            )
-            stream = LocalDataLoader(
-                data_path=args.local_data_path,
-                window_size=config.get("window_size", 10),
-                loss_horizon=args.loss_horizon,
-                # FORCE shuffle=False if filtering by max_episodes to ensure train/eval consistency
-                shuffle=(
-                    ("train" in str(split_start) or split_start == 0.0)
-                    and args.max_episodes == 0
-                ),
-                repeat=(args.epochs == 0),
-                split_start=split_start,
-                split_end=split_end,
-                max_episodes=args.max_episodes,
-                mix_episodes=mix_episodes,
-                ram_usage_limit=args.ram_limit,
-            )
-            # Local loader supports multi-worker
-            effective_workers = num_workers
-        else:
-            log.info(
-                f"Creating dataloader ({split}): batch_size={batch_size}, "
-                f"use_subprocess={args.use_subprocess}, max_episodes={args.max_episodes}"
-            )
-
-            # RTXStreamLoader handles subprocess isolation internally when use_subprocess=True
-            stream = RTXStreamLoader(
-                data_dir=args.data_dir,
-                dataset_name=args.dataset,
-                split=split,
-                image_key=args.image_key,
-                image_size=(224, 224),
-                window_size=config.get("window_size", 10),
-                loss_horizon=args.loss_horizon,
-                shuffle_buffer_size=shuffle_buffer,
-                use_subprocess=args.use_subprocess,
-                queue_size=64,
-                mix_episodes=mix_episodes,
-                ram_usage_limit=args.ram_limit,
-                max_episodes=args.max_episodes,
-            )
-            # When use_subprocess=True, the loader handles parallelism internally
-            effective_workers = 0 if args.use_subprocess else num_workers
-
+        
+        log.info(
+            f"Creating LOCAL dataloader: batch_size={batch_size}, "
+            f"split=[{split_start:.0%}-{split_end:.0%}], "
+            f"max_episodes={args.max_episodes}"
+        )
+        stream = LocalDataLoader(
+            data_path=args.local_data_path,
+            window_size=config.get("window_size", 10),
+            loss_horizon=args.loss_horizon,
+            # FORCE shuffle=False if filtering by max_episodes to ensure train/eval consistency
+            shuffle=(
+                ("train" in str(split_start) or split_start == 0.0)
+                and args.max_episodes == 0
+            ),
+            repeat=(args.epochs == 0),
+            split_start=split_start,
+            split_end=split_end,
+            max_episodes=args.max_episodes,
+            mix_episodes=mix_episodes,
+            ram_usage_limit=args.ram_limit,
+        )
+        # Local loader supports multi-worker
+        effective_workers = num_workers
+        
         loader = torch.utils.data.DataLoader(
             stream,
             batch_size=batch_size,
@@ -324,7 +297,6 @@ def train(args):
 
     dataloader, train_stream = create_dataloader(
         effective_batch_size,
-        effective_shuffle_buffer,
         effective_num_workers,
         split=train_split,
         split_start=0.0,
@@ -396,10 +368,10 @@ def train(args):
         T.RandomApply([T.GaussianBlur(kernel_size=3)], p=0.1),
     ).to(device)
 
-    # Requery Loss Function (Option C: MSELoss with soft labels)
+    # Confidence Loss Function (Option C: MSELoss with soft labels)
     # Using MSE allows the model to output confidence values [0, 1] directly
     # while avoiding the double-sigmoid issue of BCEWithLogitsLoss + Sigmoid layer
-    requery_criterion = nn.MSELoss()
+    confidence_criterion = nn.MSELoss()
 
     # --- Training Loop ---
     model.train()
@@ -494,6 +466,11 @@ def train(args):
     MIN_SHUFFLE_BUFFER = 1
     MIN_NUM_WORKERS = 0
     microBatchSize = args.batch_size
+
+    # Loss average for confidence target calculation
+    loss_avg_pool = []
+    LOSS_AVG_WINDOW = 1000
+    loss_avg = 100.0
 
     try:
         log.debug("Entering training loop...")
@@ -657,17 +634,25 @@ def train(args):
                                 # Divide sum by B_full to perfectly replicate .mean() over the whole batch
                                 action_loss = weighted_action_loss.sum() / B_full
 
-                                # Requery Loss
+
+                                loss_avg_pool.append(action_loss.item())
+                                if len(loss_avg_pool) > LOSS_AVG_WINDOW:
+                                    loss_avg_pool.pop(0)
+                                loss_avg = sum(loss_avg_pool) / len(loss_avg_pool)
+                                # Confidence Loss
                                 per_token_loss = raw_action_loss.detach()
                                 confidence_target = torch.exp(
-                                    -per_token_loss / args.confidence_temperature
+                                    -per_token_loss / loss_avg
                                 ).unsqueeze(-1)
 
-                                mb_requery_loss = requery_criterion(
+                                mb_requery_loss = confidence_criterion(
                                     requery_pred.float(), confidence_target
                                 )
                                 # Scale requery loss by the ratio of the micro-batch to the full batch
                                 requery_loss = mb_requery_loss * (mb_B / B_full)
+                                mb_confidence_loss = confidence_criterion(confidence_pred.float(), confidence_target)
+                                # Scale confidence loss by the ratio of the micro-batch to the full batch
+                                confidence_loss = mb_confidence_loss * (mb_B / B_full)
 
                                 # Weighted Loss & Accumulate Gradients
                                 loss = action_loss + (
@@ -692,7 +677,7 @@ def train(args):
                             epoch,
                             loss.item(),
                             action_loss.item(),
-                            requery_loss.item(),
+                            confidence_loss.item(),
                         )
 
                         # TensorBoard Logging
@@ -714,6 +699,8 @@ def train(args):
                                     "Hyperparameters/learning_rate": optimizer.param_groups[
                                         0
                                     ]["lr"],
+                                    "Loss/confidence": confidence_loss.item(),
+                                    "Hyperparameters/learning_rate": optimizer.param_groups[0]["lr"],
                                 },
                                 step,
                             )
@@ -820,7 +807,7 @@ def train(args):
 
                                             v_confidence_target = torch.exp(
                                                 -raw_v_a_loss.detach()
-                                                / args.confidence_temperature
+                                                / loss_avg
                                             ).unsqueeze(-1)
 
                                             v_r_loss = requery_criterion(
@@ -1002,18 +989,7 @@ def train(args):
                         model.train()
 
                         if consecutive_ram_oom >= max_consecutive_ooms:
-                            # First try reducing shuffle buffer
-                            if effective_shuffle_buffer > MIN_SHUFFLE_BUFFER:
-                                effective_shuffle_buffer = max(
-                                    MIN_SHUFFLE_BUFFER, effective_shuffle_buffer // 2
-                                )
-                                consecutive_ram_oom = 0
-                                need_dataloader_rebuild = True
-                                log.warning(
-                                    f"[RAM OOM] Reducing shuffle buffer to {effective_shuffle_buffer}"
-                                )
-                                break
-                            # Then try reducing workers
+                            # First try reducing workers
                             if effective_num_workers > MIN_NUM_WORKERS:
                                 effective_num_workers = max(
                                     MIN_NUM_WORKERS, effective_num_workers - 1
@@ -1051,7 +1027,6 @@ def train(args):
                 log.info("[Memory] Rebuilding dataloader with new parameters...")
                 dataloader, _ = create_dataloader(
                     effective_batch_size,
-                    effective_shuffle_buffer,
                     effective_num_workers,
                     split=train_split,
                     split_start=0.0,
@@ -1168,51 +1143,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # === Data Source Args ===
-    # Option 1: Stream from GCS (default)
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="droid",
-        help="Dataset name for streaming: droid, fractal20220817_data, etc.",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="gs://gresearch/robotics",
-        help="TFDS data directory for streaming (default: GCS)",
-    )
-    parser.add_argument(
-        "--image_key",
-        type=str,
-        default=None,
-        help="Image key for streaming (e.g., exterior_image_1_left)",
-    )
-
-    # Option 2: Load from preprocessed local file (overrides streaming)
+    # Load from preprocessed local file
     parser.add_argument(
         "--local_data_path",
         type=str,
         default=None,
-        help="Path to preprocessed HDF5 file. If set, uses LocalDROIDLoader instead of streaming.",
+        help="Path to preprocessed HDF5 file",
     )
     parser.add_argument(
         "--max_episodes",
         type=int,
         default=0,
         help="Max episodes to use (0 = all). Set to 1 for overfit testing.",
-    )
-
-    # Streaming-specific (ignored when using --local_data_path)
-    parser.add_argument(
-        "--no_subprocess",
-        action="store_true",
-        help="[Streaming] Disable subprocess isolation (default: subprocess enabled)",
-    )
-    parser.add_argument(
-        "--shuffle_buffer_size",
-        type=int,
-        default=10,
-        help="[Streaming] Shuffle buffer size (episodes) for TFDS",
     )
 
     # === Training Args ===
@@ -1285,13 +1227,7 @@ if __name__ == "__main__":
         "--omega_trans", type=float, default=1.0, help="Translation loss weight"
     )
     parser.add_argument(
-        "--requery_weight", type=float, default=1.0, help="Requery loss weight"
-    )
-    parser.add_argument(
-        "--confidence_temperature",
-        type=float,
-        default=1.0,
-        help="Temperature for confidence target: exp(-loss/temp)",
+        "--confidence_weight", type=float, default=1.0, help="Confidence loss weight"
     )
 
     # === Validation ===

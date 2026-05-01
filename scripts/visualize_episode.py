@@ -6,7 +6,6 @@ import argparse
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 from imitation.utils.visualizer import Visualizer
 
@@ -15,33 +14,15 @@ def visualize_episode(args):
     print("Visualizing Training Episode...")
 
     # --- Load Dataset ---
-    if args.local_path:
-        print(f"Loading Local Dataset from {args.local_path}")
-        dataset = LocalDataLoader(
-            data_path=args.local_path,
-            window_size=args.window_size,
-            loss_horizon=1,
-            repeat=False,  # One epoch
-        )
-    else:
-        print(f"Loading Streaming Dataset {args.dataset}")
-        dataset = RTXStreamLoader(
-            dataset_name=args.dataset,
-            split="train",
-            window_size=args.window_size,
-            image_size=(224, 224),
-            data_dir=args.data_dir,
-            repeat=False,  # One epoch
-            use_subprocess=True,
-        )
+  
+    print(f"Loading Local Dataset from {args.local_path}")
+    dataset = LocalDataLoader(
+        data_path=args.local_path,
+        window_size=args.window_size,
+        loss_horizon=1,
+        repeat=False,  # One epoch
+    )
 
-    # Get one episode (stream mimics windows, so we just take a batch of windows or a full episode if iter returns full - WAIT)
-    # Both Loaders return WINDOWS now, not full episodes directly in one batch unless we modify them.
-    # RTXStreamLoader yields DICTS with keys 'images' (B, W, ...).
-    # To visualize a full episode, we need to collect windows or use a special mode.
-    # Actually, for visualization, seeing a sequence of windows is fine, or we can try to stitch.
-
-    # Let's take just ONE window batch for detailed inspection using the new Visualizer
     iterator = iter(dataset)
     try:
         batch = next(iterator)

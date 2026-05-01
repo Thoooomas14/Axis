@@ -2,10 +2,8 @@
 Local Data Loader
 
 Load preprocessed episodes from HDF5 and yield training windows.
-Supports any RTX dataset (DROID, Fractal, etc.) that was preprocessed with preprocessor.py.
-All derived computations (windowing, subtask segmentation, goals, twists) happen here.
-
-Output format matches RTXStreamLoader exactly.
+Supports DROID dataset that was preprocessed with preprocessor.py.
+All derived computations (windowing, subtask segmentation, twists) happen here.
 """
 
 import os
@@ -29,11 +27,9 @@ class LocalDataLoader(IterableDataset):
     """
     Load preprocessed episodes from HDF5.
 
-    Supports any dataset preprocessed with preprocessor.py (DROID, Fractal, etc.).
-    Performs windowing, subtask segmentation, goal computation, and twist
+    Supports DROID dataset that was preprocessed with preprocessor.py.
+    Performs windowing, subtask segmentation, and twist
     computation at load time for maximum flexibility.
-
-    Output format matches RTXStreamLoader exactly.
     """
 
     def __init__(
@@ -355,17 +351,7 @@ class LocalDataLoader(IterableDataset):
             random.shuffle(valid_indices)
 
         # 3. Dynamic Batch Slicing
-        # The DataLoader expects to receive single items from __iter__ and then batches them.
-        # However, RTXStreamLoader and LocalDataLoader historically yielded "batches" of size `window_size`
-        # directly from __iter__. To maintain compatibility, we will yield a dictionary
-        # where each tensor has a leading dimension of `window_size`.
-        # This means we are effectively yielding one "window" at a time, but that window
-        # itself contains `window_size` frames.
-
-        # If random_frames was true, the old code yielded a batch of `window_size` random frames.
-        # The new unified design means each yielded item is a "window" of `window_size` frames,
-        # and if `self.shuffle` is true, these windows are drawn from random points across
-        # mixed episodes.
+    
 
         for ep_id, start_idx in valid_indices:
             ep = episode_buffer[ep_id]

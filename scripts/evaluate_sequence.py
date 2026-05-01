@@ -10,7 +10,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.append(os.getcwd())  # Safe fallback for running from root
 
 from src.models.axis import AxisModel
-from imitation.data.rtx_stream_loader import RTXStreamLoader
 from imitation.data.local_loader import LocalDataLoader
 from imitation.utils.visualizer import Visualizer
 
@@ -80,24 +79,11 @@ def evaluate_sequence(args):
 
     # --- Load Data ---
     print("Loading data...")
-    if args.local_path:
-        print(f"Loading local data from {args.local_path}")
-        dataset = LocalDataLoader(
-            data_path=args.local_path, batch_size=1, window_size=8, repeat=False
-        )
-    else:
-        print(f"Loading streaming data {args.dataset}")
-        dataset = RTXStreamLoader(
-            dataset_name=args.dataset,
-            split="train",
-            window_size=10,
-            image_size=(224, 224),
-            data_dir=args.data_dir,
-            repeat=False,  # Don't repeat for eval
-            use_subprocess=False,  # In-process is sufficient for 1 episode
-            shuffle_buffer_size=0,  # No buffer = direct streaming
-            shuffle_files=False,  # Sequential read
-        )
+
+    print(f"Loading local data from {args.local_path}")
+    dataset = LocalDataLoader(
+        data_path=args.local_path, batch_size=1, window_size=8, repeat=False
+    )
 
     # Get one batch
     iterator = iter(dataset)
@@ -139,7 +125,7 @@ def evaluate_sequence(args):
     print(f"Loaded batch: Img {images.shape}, Prop {proprio.shape}, Goal {goal.shape}")
 
     # --- Prediction ---
-    # Model V2 (AxisModel) typically doesn't need explicit memory reset if passing full window
+    # Model V3 (AxisModel) typically doesn't need explicit memory reset if passing full window
     # or it handles caching internally if we pass cache. Here we just pass the window.
 
     with torch.no_grad():
@@ -154,12 +140,12 @@ def evaluate_sequence(args):
             goal,  # (B, 38)
         )
 
-        # Output is (pred_action, requery_logit)
+        # Output is (pred_action, confidence_logit)
         if isinstance(output, tuple):
             if len(output) == 2:
-                pred_action_chunk, requery = output
+                pred_action_chunk, confidence = output
             elif len(output) == 3:
-                pred_action_chunk, requery, _ = output
+                pred_action_chunk, confidence, _ = output
             else:
                 print(f"Unexpected tuple length from model: {len(output)}")
                 pred_action_chunk = output[0]  # Try first

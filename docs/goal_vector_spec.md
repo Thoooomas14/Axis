@@ -160,7 +160,7 @@ goal = oracle.encode_goal(task_type=1, start_pose=current, end_pose=target)
 result = inference.predict(images, proprio, goal.numpy())
 
 # Check confidence
-if result['requery'] < 0.5:
+if result['confidence'] < 0.5:
     print("Model uncertain - request new goal")
 else:
     print(f"Confident action: {result['action_twist']}")
@@ -168,9 +168,9 @@ else:
 
 ---
 
-## Requery (Confidence Signal)
+## Confidence (Confidence Signal)
 
-In V2, the requery output represents **model confidence**:
+In V2, the confidence output represents **model confidence**:
 
 | Confidence | Meaning | Action |
 |------------|---------|--------|
@@ -186,6 +186,6 @@ In V2, the requery output represents **model confidence**:
 |---------|------|---------|
 | **2.3** | 2026-01 | 38D refactor: removed noise/zeros, added text parsing for obj props |
 | 2.2 | 2026-01 | 13D full SE(3) poses (flattened rotation matrix), chordal loss |
-| 2.1 | 2026-01 | 7D SE(3) poses, configurable noise, confidence requery |
+| 2.1 | 2026-01 | 7D SE(3) poses, configurable noise, confidence confidence |
 | 2.0 | 2026-01 | Standardized 64D format |
 | 1.0 | 2025-06 | Random projection (deprecated) |

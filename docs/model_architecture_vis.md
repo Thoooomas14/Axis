@@ -78,7 +78,7 @@ graph TD
 | Action Output | 10D delta pose | **7D twist** (ω, v, grip) |
 | Token Structure | Interleaved P, V tokens | **Concatenated** per frame |
 | Output Shape | (B, W, 7) sequential | **(B, ChunkSize, 7)** from last token |
-| Requery | Binary logit | **Confidence** [0, 1] |
+| Confidence | Binary logit | **Confidence** [0, 1] |
 
 ## Token Concatenation
 
@@ -134,7 +134,7 @@ Output is clamped by `SafeActionDecoder`:
 - Rotation: ±0.2 rad/step
 - Translation: ±0.05 m/step
 
-### Requery Decoder (Confidence)
+### Confidence Decoder (Confidence)
 
 Simplified to a standard MLP acting on the last token:
 ```python

@@ -1,15 +1,12 @@
 """
 Data Inspection Script
 
-Inspect preprocessed HDF5 data OR streaming RTX data to understand position value ranges.
+Inspect preprocessed HDF5 data to understand position value ranges.
 This helps diagnose if units are in meters, centimeters, or something else.
 
 Usage:
     # Inspect local HDF5:
     python scripts/inspect_data.py --data_path E:/data/droid.h5
-
-    # Inspect streaming DROID data (run this on VM with GCS access):
-    python scripts/inspect_data.py --streaming --dataset droid --num_windows 100
 """
 
 import os
@@ -181,99 +178,9 @@ def inspect_hdf5(data_path: str, num_episodes: int = 10):
 
         analyze_positions(all_positions, all_grippers, all_position_deltas)
 
-
-def inspect_streaming(dataset: str, num_windows: int = 100, data_dir: str = None):
-    """Inspect streaming RTX data to understand position scales."""
-    from imitation.data.rtx_stream_loader import RTXStreamLoader
-
-    print(f"\n{'=' * 60}")
-    print(f"Inspecting STREAMING: {dataset}")
-    print(f"{'=' * 60}\n")
-
-    loader = RTXStreamLoader(
-        dataset_name=dataset,
-        split="train",
-        window_size=10,
-        loss_horizon=1,
-        image_size=(224, 224),
-        data_dir=data_dir,
-        repeat=False,
-        use_subprocess=False,
-        shuffle_buffer_size=0,
-        shuffle_files=False,
-    )
-
-    # Collect statistics
-    all_positions = []
-    all_grippers = []
-    all_position_deltas = []
-    all_twists = []
-
-    print(f"Collecting data from {num_windows} windows...\n")
-
-    for i, batch in enumerate(loader):
-        if i >= num_windows:
-            break
-
-        if i % 20 == 0:
-            print(f"  Window {i}/{num_windows}...")
-
-        # proprio: (W, 13), actions: (H, 7)
-        proprio = batch["proprio"].numpy()  # (W, 13)
-        actions = batch["actions"].numpy()  # (H, 7)
-
-        # Extract positions: [R_flat(9), pos(3), gripper(1)]
-        positions = proprio[:, 9:12]  # (W, 3)
-        grippers = proprio[:, 12]  # (W,)
-        position_deltas = np.diff(positions, axis=0)  # (W-1, 3)
-
-        all_positions.append(positions)
-        all_grippers.append(grippers)
-        all_position_deltas.append(position_deltas)
-        all_twists.append(actions)
-
-        # Print first few windows in detail
-        if i < 3:
-            print(f"\n  Window {i}:")
-            print(f"    Proprio shape: {proprio.shape}")
-            print(
-                f"    First position:  [{positions[0, 0]:.6f}, {positions[0, 1]:.6f}, {positions[0, 2]:.6f}]"
-            )
-            print(
-                f"    Last position:   [{positions[-1, 0]:.6f}, {positions[-1, 1]:.6f}, {positions[-1, 2]:.6f}]"
-            )
-            print(
-                f"    Position delta:  {np.linalg.norm(positions[-1] - positions[0]):.6f}"
-            )
-            print(
-                f"    Twist (action):  [{actions[0, 0]:.6f}, {actions[0, 1]:.6f}, {actions[0, 2]:.6f}, {actions[0, 3]:.6f}, {actions[0, 4]:.6f}, {actions[0, 5]:.6f}]"
-            )
-
-    if not all_positions:
-        print("No data collected!")
-        return
-
-    # Aggregate
-    all_positions = np.concatenate(all_positions, axis=0)
-    all_grippers = np.concatenate(all_grippers, axis=0)
-    all_position_deltas = np.concatenate(all_position_deltas, axis=0)
-    all_twists = np.concatenate(all_twists, axis=0)
-
-    print(f"\nCollected {len(all_positions)} position samples")
-
-    analyze_positions(all_positions, all_grippers, all_position_deltas, all_twists)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Inspect data to understand position scales"
-    )
-
-    # Mode selection
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        help="Use RTX streaming loader instead of local HDF5",
     )
 
     # HDF5 options
@@ -284,37 +191,18 @@ def main():
         "--num_episodes",
         type=int,
         default=10,
-        help="Number of episodes to inspect (HDF5 mode)",
-    )
-
-    # Streaming options
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="droid",
-        help="Dataset name for streaming (default: droid)",
-    )
-    parser.add_argument(
-        "--data_dir", type=str, default=None, help="TFDS data directory"
-    )
-    parser.add_argument(
-        "--num_windows",
-        type=int,
-        default=100,
-        help="Number of windows to inspect (streaming mode)",
+        help="Number of episodes to inspect",
     )
 
     args = parser.parse_args()
 
-    if args.streaming:
-        inspect_streaming(args.dataset, args.num_windows, args.data_dir)
-    elif args.data_path:
+    if args.data_path:
         if not os.path.exists(args.data_path):
             print(f"Error: File not found: {args.data_path}")
             return
         inspect_hdf5(args.data_path, args.num_episodes)
     else:
-        print("Error: Specify either --streaming or --data_path")
+        print("Error: Specify --data_path")
         parser.print_help()
 
 

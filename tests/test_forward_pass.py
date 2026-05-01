@@ -6,7 +6,7 @@ from src.models.axis import AxisModel
 
 @pytest.fixture
 def model_and_data():
-    config = "AxisV2"
+    config = "AxisV3"
     model = AxisModel(config)
     model.eval()  # MUST be in eval mode to prevent BatchNorm tracking batch-size dependent stats
 
@@ -22,31 +22,31 @@ def model_and_data():
 
 def test_standard_path_2d_goal(model_and_data):
     model, B, images, proprio, goal, _ = model_and_data
-    pred_action, requery = model(images, proprio, raw_goal=goal)
+    pred_action, confidence = model(images, proprio, raw_goal=goal)
 
     assert pred_action.shape == (B, 10, 7)
-    assert requery.shape == (B, 1)
+    assert confidence.shape == (B, 1)
 
 
 def test_standard_path_3d_goal(model_and_data):
     model, B, images, proprio, _, goal_seq = model_and_data
-    pred_action, requery = model(images, proprio, raw_goal=goal_seq)
+    pred_action, confidence = model(images, proprio, raw_goal=goal_seq)
 
     assert pred_action.shape == (B, 10, 7)
-    assert requery.shape == (B, 1)
+    assert confidence.shape == (B, 1)
 
 
 def test_optimized_path(model_and_data):
     model, B, images, proprio, goal, _ = model_and_data
 
     # 1. Full un-cached pass
-    pred_action, requery, tokens = model(
+    pred_action, confidence, tokens = model(
         images, proprio, raw_goal=goal, return_tokens=True
     )
     cached_tokens = tokens[:, :-1, :]
 
     # 2. Optimized pass (using cached tokens up to W-1)
-    pred_action_opt, requery_opt, tokens_opt = model(
+    pred_action_opt, confidence_opt, tokens_opt = model(
         images, proprio, raw_goal=goal, cached_tokens=cached_tokens, return_tokens=True
     )
 

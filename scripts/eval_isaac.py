@@ -116,7 +116,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # --- Load Axis V2 Inference ---
+    # --- Load Axis V3 Inference ---
     print(f"Loading AxisInference from {args.checkpoint}...")
     # TODO: Save/load config from checkpoint for robustness with custom configs
     config = "AxisV2"
@@ -213,8 +213,8 @@ def main():
         # State
         initial_pose_13d = None
         goal_vector = np.zeros((B, 38), dtype=np.float32)  # 38D
-        requery_flag = True
-        requery_prob = 0.0
+        confidence_flag = True
+        confidence_prob = 0.0
         last_pred_time = 0
         delta_pred_time = (1 / args.model_refresh) * 1000
         model_run = False
@@ -239,7 +239,7 @@ def main():
             else:
                 cube_pos = np.zeros(3)
 
-            if initial_pose_13d is None or requery_flag:
+            if initial_pose_13d is None or confidence_flag:
                 # -----------------------------------------------------
                 # FIX 1: Canonical Start Pose
                 # DO NOT use the Sim's current (potentially sagging) position.
@@ -299,7 +299,7 @@ def main():
                 goal_vector[0] = g_emb.numpy()
 
                 print(f"Goal Updated! Target: {target_pos_model.round(3)}")
-                requery_flag = False
+                confidence_flag = False
                 last_goal_time = i
 
             # 4. Predict
@@ -317,8 +317,8 @@ def main():
                     proprio_13d_np[0],  # (W, 13)
                     goal_vector[0],  # (38,)
                 )
-                requery_flag_model = batch_result.get("requery", False)
-                requery_prob = batch_result.get("requery_prob", 0.0)
+                confidence_flag_model = batch_result.get("confidence", False)
+                confidence_prob = batch_result.get("confidence_prob", 0.0)
 
                 # === DIAGNOSTIC DUMP (first 3 predictions) ===
                 if i < 30 and model_run:
@@ -373,20 +373,20 @@ def main():
                 )
 
             if i % 10 == 0:
-                print(f"Requery Flag: {requery_flag_model} (Prob: {requery_prob:.3f})")
+                print(f"Confidence Flag: {confidence_flag_model} (Prob: {confidence_prob:.3f})")
 
-            if args.ignore_requery:
-                requery_flag = False
+            if args.ignore_confidence:
+                confidence_flag = False
             else:
                 # Debounce Goal Updates to prevent loops
                 # Only update if probability is high (>0.8) OR if we haven't updated in 50 steps
                 # And ensure we don't spam updates every frame
                 time_since_last_goal = i - last_goal_time
 
-                if requery_flag_model and time_since_last_goal > 150:
-                    requery_flag = True
+                if confidence_flag_model and time_since_last_goal > 150:
+                    confidence_flag = True
                 else:
-                    requery_flag = False
+                    confidence_flag = False
 
             # 5. Execute
             # Model Output: 'action_absolute' is what Inference class returns.
@@ -445,7 +445,7 @@ def main():
                 print(
                     f"  Target  Grip    : {act_grip:.3f} ({'Open' if act_grip > 0.5 else 'Close'})"
                 )
-                print(f"  Requery Flag    : {requery_flag_model}")
+                print(f"  Confidence Flag    : {confidence_flag_model}")
                 if terminated.any() or truncated.any():
                     print(f"!!! RESET TRIGGERED (Step {i}) !!!", flush=True)
                     print(f"  Terminated: {terminated}", flush=True)
@@ -455,7 +455,7 @@ def main():
                     obs, info = env.reset()
                     agent.reset()  # Reset inference state
                     initial_pose_13d = None
-                    requery_flag = True
+                    confidence_flag = True
 
         print("Evaluation Complete.")
 

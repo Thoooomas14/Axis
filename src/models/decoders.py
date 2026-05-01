@@ -82,7 +82,7 @@ class SafeActionDecoder(nn.Module):
         raise ValueError(f"Unexpected action tensor shape: {actions.shape}")
 
 
-class RequeryDecoder(nn.Module):
+class ConfidenceDecoder(nn.Module):
     """
     Predicts confidence for the current prediction.
     Input: (B, EmbedDim) - last token (current state).

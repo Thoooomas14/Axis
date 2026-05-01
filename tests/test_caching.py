@@ -14,7 +14,7 @@ def test_token_caching():
     logging.info("Testing Token Caching Optimization...")
 
     # 1. Setup Model
-    config = "AxisV2"
+    config = "AxisV3"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logging.info(f"Using device: {device}")
@@ -77,7 +77,7 @@ def test_token_caching():
     diff_req = torch.abs(out_req_std - out_req_cached).max().item()
 
     logging.info(f"\nMax Action Difference: {diff_act}")
-    logging.info(f"Max Requery Difference: {diff_req}")
+    logging.info(f"Max Confidence Difference: {diff_req}")
 
     TOLERANCE = 1e-4
     if diff_act < TOLERANCE and diff_req < TOLERANCE:

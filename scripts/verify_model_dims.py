@@ -12,9 +12,7 @@ def verify_model():
     print("Verifying Axis Model Dimensions (SE(3) Update)...")
 
     # Config matching new requirements
-    config = (
-        "AxisV2"  # This will trigger the default config with 7D proprio and 64D goal
-    )
+    config = "AxisV3" # Ensure this matches the new config in the model definition
 
     model = AxisModel(config)
     model.eval()
@@ -35,12 +33,12 @@ def verify_model():
 
     # Forward Pass
     try:
-        # Returns: pred_action, requery_logit
-        action, requery = model(images, proprio, goal)
+        # Returns: pred_action, confidence_logit
+        action, confidence = model(images, proprio, goal)
 
         print("\nOutput Shapes:")
         print(f"  Action: {action.shape}")
-        print(f"  Requery: {requery.shape}")
+        print(f"  Confidence: {confidence.shape}")
 
         # Assertions
         # Action should be (B, W, 7) as per chunking logic in model.forward
@@ -49,8 +47,8 @@ def verify_model():
             f"Expected Action {expected_action_shape}, got {action.shape}"
         )
 
-        assert requery.shape == (B, W, 1) or requery.shape == (B, 1), (
-            f"Unexpected Requery shape {requery.shape}"
+        assert confidence.shape == (B, W, 1) or confidence.shape == (B, 1), (
+            f"Unexpected Confidence shape {confidence.shape}"
         )
 
         # Test Safety Clamps

@@ -2,7 +2,6 @@
 import os
 import pytest
 from imitation.data.local_loader import LocalDataLoader
-from imitation.data.rtx_stream_loader import RTXStreamLoader
 
 # Helper to check if we have the local dummy data available
 HAS_LOCAL_DATA = os.path.exists("data/debug_processed.h5")
@@ -49,28 +48,6 @@ def test_local_dataloader(capfd):
     assert batch["actions"].shape[0] == 1  # loss_horizon
     assert batch["goal"].shape[0] == 10
     assert batch["subtask_end_pose"].shape[0] == 10
-
-
-def test_rtx_stream_loader(capfd):
-    """
-    Test RTXStreamLoader instantiation and basic logic.
-    We don't actually fetch a batch unless we have TFDS data available.
-    """
-    loader = RTXStreamLoader(
-        dataset_name="fractal20220817_data",
-        split="train",
-        window_size=10,
-        loss_horizon=1,
-        mix_episodes=2,
-        ram_usage_limit=32.0,
-        use_subprocess=False,  # Keep it simple for unit test instantiation
-    )
-
-    # Just assert the interface works and it registers variables properly
-    assert loader.dataset_name == "fractal20220817_data"
-    assert loader.window_size == 10
-    assert loader.loss_horizon == 1
-    assert loader.mix_episodes == 2
 
 
 @pytest.mark.skipif(not HAS_LOCAL_DATA, reason="Requires data/debug_processed.h5")

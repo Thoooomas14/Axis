@@ -42,7 +42,7 @@ graph TD
 
     subgraph Outputs
         AD[Action Decoder<br/>MLP: 512D → ChunkSize*7D]
-        RD[Requery Decoder<br/>MLP: 512D → 1D]
+        RD[Confidence Decoder<br/>MLP: 512D → 1D]
     end
 
     Img --> VE --> TL
@@ -147,4 +147,4 @@ T_new = (pp.mat2SE3(T_current) @ pp.Exp(pp.se3(twist))).matrix()
 5. **Extraction**: Extraction of the **LAST token** (current state representation)
 6. **Decoding**:
    - Action: 7D twist for each future timestep in chunk `(B, ChunkSize, 7)`
-   - Requery: Single confidence value `(B, 1)` for the entire trajectory
+   - Confidence: Single confidence value `(B, 1)` for the entire trajectory

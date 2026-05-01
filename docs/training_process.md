@@ -8,7 +8,7 @@ The core training logic handles:
 1. Model initialization with 13D SE(3) poses and 7D twist actions
 2. Dataset loading: streaming from GCS **or** local preprocessed HDF5
 3. Action chunking - model predicts W future actions simultaneously
-4. Self-supervised confidence training (requery signal)
+4. Self-supervised confidence training (confidence signal)
 5. Dynamic OOM recovery
 
 ## Configuration
@@ -83,9 +83,9 @@ This is controlled by `--loss_horizon`:
 - `--loss_horizon 1`: Immediate next-step loss (fine-grained)
 - `--loss_horizon 8`: Full chunk endpoint (task completion)
 
-### Confidence Loss (Requery)
+### Confidence Loss (Confidence)
 
-The requery signal is trained as a **self-supervised confidence measure** using MSELoss:
+The confidence signal is trained as a **self-supervised confidence measure** using MSELoss:
 
 ```python
 # Per-sample loss → Confidence target
@@ -94,7 +94,7 @@ confidence_target = exp(-per_sample_loss / temperature)    # (B, 1)
 
 # High accuracy predictions → High confidence target
 # Low accuracy predictions → Low confidence target
-requery_loss = MSELoss(requery_pred, confidence_target)
+confidence_loss = MSELoss(confidence_pred, confidence_target)
 ```
 
 This teaches the model to predict its own accuracy - when to ask for help vs. proceed confidently.
@@ -238,7 +238,7 @@ graph TD
     C --> D[Compute Action Loss<br/>geodesic_loss]
     D --> E[Compute Per-Sample Loss]
     E --> F[Confidence Target<br/>exp-loss/temp]
-    F --> G[Compute Requery Loss<br/>MSE]
+    F --> G[Compute Confidence Loss<br/>MSE]
     D --> H[Total Loss]
     G --> H
     H --> I[Backward + Optimizer Step]
@@ -276,9 +276,9 @@ Unlike autoregressive training, Axis V2 uses **action chunking** from the curren
 
 ```python
 # Model extracts LAST token and predicts chunk
-pred_action, requery_pred = model(images, proprio, goals)
+pred_action, confidence_pred = model(images, proprio, goals)
 # pred_action: (B, ChunkSize, 7) - Future trajectory
-# requery_pred: (B, 1) - Confidence score for this chunk
+# confidence_pred: (B, 1) - Confidence score for this chunk
 
 # Loss computed over the trajectory up to loss_horizon
 action_loss = chordal_loss(pred_action, target_actions, horizon=loss_horizon)

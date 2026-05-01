@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from .encoders import VisionEncoder, ProprioEncoder, GoalEncoder
 from .transformer import AxisTransformer
-from .decoders import ActionDecoder, RequeryDecoder, SafeActionDecoder
+from .decoders import ActionDecoder, ConfidenceDecoder, SafeActionDecoder
 
 
 class AxisModel(nn.Module):
@@ -19,7 +19,7 @@ class AxisModel(nn.Module):
 
     Outputs:
         - action: (B, ChunkSize, 7) - predicted future trajectory
-        - requery: (B, 1) - prediction confidence
+        - confidence: (B, 1) - prediction confidence
     """
 
     def __init__(self, config):
@@ -36,18 +36,30 @@ class AxisModel(nn.Module):
                     "action_dim": 7,
                     "chunk_size": 10,
                 }
-                self.config = config
+            elif config == "AxisV3":
+                config = {
+                    "goal_dim": 14,
+                    "proprio_dim": 10,
+                    "hidden_dim": 128,
+                    "num_heads": 16,
+                    "num_layers": 8,
+                    "use_rope": True,
+                    "action_dim": 7,
+                    "chunk_size": 10,
+                }
             else:
                 raise ValueError(
                     f"Unknown config string: {config}. "
                     "Please provide a valid config name or a custom dictionary of parameters."
                 )
         elif isinstance(config, dict):
-            self.config = config
+            # Use the provided config dictionary directly
+            pass
         else:
             raise ValueError(
                 "Config must be either a str matching a default config or a custom dictionary of parameters."
             )
+        self.config = config
 
         # Dimensions
         self.vision_dim = 768
@@ -64,11 +76,11 @@ class AxisModel(nn.Module):
         self.vision_encoder = VisionEncoder(
             img_size=config.get("img_size", (224, 224)),
             feature_dim=self.vision_dim,
-            goal_dim=config.get("goal_dim", 38),
+            goal_dim=config.get("goal_dim", 14),
         )
 
         self.proprio_encoder = ProprioEncoder(
-            input_dim=config.get("proprio_dim", 13),
+            input_dim=config.get("proprio_dim", 10),
             output_dim=self.proprio_dim,
             hidden_dim=config.get("hidden_dim", 128),
         )
@@ -93,7 +105,7 @@ class AxisModel(nn.Module):
         )
 
         self.action_decoder = SafeActionDecoder(base_decoder)
-        self.requery_decoder = RequeryDecoder(embed_dim=self.embed_dim)
+        self.confidence_decoder = ConfidenceDecoder(embed_dim=self.embed_dim)
 
     def get_config(self):
         return self.config
@@ -108,7 +120,7 @@ class AxisModel(nn.Module):
         return_attn_weights=False,
     ):
         """
-        Forward pass for Axis V2.
+        Forward pass for Axis V3.
 
         Args:
             images: (B, W, C, H, W) - window of RGB images
@@ -119,7 +131,7 @@ class AxisModel(nn.Module):
 
         Returns:
             pred_action: (B, 10) or (B, chunk_size, 10) - predicted action(s)
-            requery_logit: (B, 1) - subtask completion logit
+            confidence_logit: (B, 1) - subtask completion logit
             tokens: (B, W, 512) - (Optional) full token sequence if return_tokens=True
             attn_weights: (Optional) list of attention matrices if return_attn_weights=True
         """
@@ -207,27 +219,27 @@ class AxisModel(nn.Module):
         if self.training:
             # DENSE SUPERVISION: Decode from every token in the window
             pred_actions = []
-            requery_logits = []
+            confidence_logits = []
 
             for i in range(output_tokens.size(1)):
                 token = output_tokens[:, i, :]  # (B, 1024)
                 pred_actions.append(self.action_decoder(token))
-                requery_logits.append(self.requery_decoder(token))
+                confidence_logits.append(self.confidence_decoder(token))
 
             # Stack along the window dimension (dim=1)
             pred_action = torch.stack(pred_actions, dim=1)  # (B, W, ChunkSize, 7)
-            requery_logit = torch.stack(requery_logits, dim=1)  # (B, W, 1)
+            confidence_logit = torch.stack(confidence_logits, dim=1)  # (B, W, 1)
 
         else:
             # INFERENCE: Decode ONLY from the final token
             last_token = output_tokens[:, -1, :]  # (B, 1024)
             pred_action = self.action_decoder(last_token)  # (B, ChunkSize, 7)
-            requery_logit = self.requery_decoder(last_token)  # (B, 1)
+            confidence_logit = self.confidence_decoder(last_token)  # (B, 1)
 
         if return_tokens and return_attn_weights:
-            return pred_action, requery_logit, input_tokens, attn_weights
+            return pred_action, confidence_logit, input_tokens, attn_weights
         if return_tokens:
-            return pred_action, requery_logit, input_tokens
+            return pred_action, confidence_logit, input_tokens
         if return_attn_weights:
-            return pred_action, requery_logit, attn_weights
-        return pred_action, requery_logit
+            return pred_action, confidence_logit, attn_weights
+        return pred_action, confidence_logit

@@ -303,7 +303,7 @@ class Visualizer:
         pred_actions,
         gt_poses=None,
         pred_poses=None,
-        requery_preds=None,
+        confidence_preds=None,
         inference_times=None,
         subtask_goal_poses=None,
         save_prefix="episode",
@@ -393,9 +393,9 @@ class Visualizer:
 
                 # Info Text
                 info_txt = ""
-                if requery_preds is not None:
-                    val = requery_preds[t].item()
-                    info_txt += f"Requery: {val:.4f}\n"  # Higher precision
+                if confidence_preds is not None:
+                    val = confidence_preds[t].item()
+                    info_txt += f"Confidence: {val:.4f}\n"  # Higher precision
                 if inference_times is not None:
                     info_txt += f"Inf Time: {inference_times[t] * 1000:.1f}ms"
                 ax_img.text(

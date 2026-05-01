@@ -1,7 +1,7 @@
 """
-RTX Dataset Preprocessor
+DROID Dataset Preprocessor
 
-Streams RTX datasets (DROID, Fractal, etc.) from GCS and saves minimal episode data locally.
+Streams DROID dataset from GCS and saves minimal episode data locally.
 Stores only: images (one camera, resized) and 13D poses per timestep.
 All derived computations (windowing, goals, twists) are done at load time by LocalDataLoader.
 
@@ -454,7 +454,7 @@ def preprocess_dataset(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Preprocess RTX datasets (DROID, Fractal) for local training"
+        description="Preprocess  datasets for local training"
     )
 
     # Required
