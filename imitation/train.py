@@ -603,14 +603,14 @@ def train(args):
                                 # Only log TB for the first micro-batch chunk to avoid spam
 
                                 if should_log_tb:
-                                    pred_action, requery_pred, attn_weights = model(
+                                    pred_action, confidence_pred, attn_weights = model(
                                         images,
                                         proprio,
                                         goal_embs,
                                         return_attn_weights=True,
                                     )
                                 else:
-                                    pred_action, requery_pred = model(
+                                    pred_action, confidence_pred = model(
                                         images, proprio, goal_embs
                                     )
                                     attn_weights = None
@@ -645,18 +645,18 @@ def train(args):
                                     -per_token_loss / loss_avg
                                 ).unsqueeze(-1)
 
-                                mb_requery_loss = confidence_criterion(
-                                    requery_pred.float(), confidence_target
+                                mb_confidence_loss = confidence_criterion(
+                                    confidence_pred.float(), confidence_target
                                 )
-                                # Scale requery loss by the ratio of the micro-batch to the full batch
-                                requery_loss = mb_requery_loss * (mb_B / B_full)
+                                # Scale confidence loss by the ratio of the micro-batch to the full batch
+                                confidence_loss = mb_confidence_loss * (mb_B / B_full)
                                 mb_confidence_loss = confidence_criterion(confidence_pred.float(), confidence_target)
                                 # Scale confidence loss by the ratio of the micro-batch to the full batch
                                 confidence_loss = mb_confidence_loss * (mb_B / B_full)
 
                                 # Weighted Loss & Accumulate Gradients
                                 loss = action_loss + (
-                                    requery_loss * args.requery_weight
+                                    confidence_loss * args.confidence_weight
                                 )
                                 scaler.scale(loss).backward()
 
@@ -695,7 +695,7 @@ def train(args):
                                 {
                                     "Loss/train": loss.item(),
                                     "Loss/action": action_loss.item(),
-                                    "Loss/requery": requery_loss.item(),
+                                    "Loss/confidence": confidence_loss.item(),
                                     "Hyperparameters/learning_rate": optimizer.param_groups[
                                         0
                                     ]["lr"],
@@ -741,7 +741,7 @@ def train(args):
                         )
                         rate, eta = monitor.get_stats()
 
-                        desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{requery_loss.item():.4f} | "
+                        desc = f"L:{loss.item():.4f} A:{action_loss.item():.4f} R:{confidence_loss.item():.4f} | "
                         desc += f"{rate:.2f}it/s | ETA: {eta}"
                         pbar.set_description(desc)
                         pbar.update(1)  # Increment progress bar counter
@@ -788,7 +788,7 @@ def train(args):
                                         H_val = args.loss_horizon
 
                                         with torch.autocast(device_type=device.type):
-                                            v_pred, v_requery_pred = model(
+                                            v_pred, v_confidence_pred = model(
                                                 v_imgs, v_props, v_goals
                                             )
 
@@ -810,8 +810,8 @@ def train(args):
                                                 / loss_avg
                                             ).unsqueeze(-1)
 
-                                            v_r_loss = requery_criterion(
-                                                v_requery_pred.float(),
+                                            v_r_loss = confidence_criterion(
+                                                v_confidence_pred.float(),
                                                 v_confidence_target,
                                             )
 
@@ -824,7 +824,7 @@ def train(args):
                                             )
 
                                             v_loss = v_a_loss_scaled + (
-                                                v_r_loss_scaled * args.requery_weight
+                                                v_r_loss_scaled * args.confidence_weight
                                             )
                                             val_loss_total += v_loss.item()
 

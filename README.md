@@ -15,7 +15,7 @@ Axis is a PyTorch transformer-based robot learning framework for end-effector co
 | **Temporal Ensembling** | Smooth action output via overlapping chunk averaging |
 | **Endpoint Chordal Loss** | Task-oriented SE(3) chordal loss (trig-free Frobenius norm) |
 | **Sim Diagnostics** | Automated trajectory comparison tool for Sim-to-Real alignment |
-| **Self-Supervised Confidence** | Learns to predict own accuracy (requery signal) |
+| **Self-Supervised Confidence** | Learns to predict own accuracy (confidence signal) |
 | **Local + Streaming Data** | Train from GCS or preprocessed HDF5 files |
 
 ## Architecture

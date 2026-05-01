@@ -70,7 +70,7 @@ parser.add_argument(
 )
 parser.add_argument("--random_weights", action="store_true", help="Use random weights")
 parser.add_argument(
-    "--ignore_requery", action="store_true", help="Ignore model requery requests"
+    "--ignore_confidence", action="store_true", help="Ignore model confidence requests"
 )
 parser.add_argument(
     "--ensemble_k", type=float, default=0.01, help="Exponential weighting decay"

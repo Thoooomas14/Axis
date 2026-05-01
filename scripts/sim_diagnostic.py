@@ -169,36 +169,6 @@ def load_episode_local(data_path, episode_idx):
         props[:, 9:12] *= 1000.0  # Scale to mm
         return imgs, props
 
-
-def load_episode_rtx(dataset_name, data_dir, episode_idx):
-    from imitation.data.rtx_stream_loader import RTXStreamLoader
-
-    loader = RTXStreamLoader(
-        dataset_name=dataset_name, window_size=2, data_dir=data_dir, repeat=False
-    )
-    all_props, all_imgs = [], []
-    curr_ep, prev_prop = 0, None
-
-    for batch in loader:
-        p_win, i_win = batch["proprio"].numpy(), batch["images"].numpy()
-        if prev_prop is not None and np.linalg.norm(prev_prop - p_win[0]) > 1.0:
-            if curr_ep == episode_idx:
-                break
-            curr_ep += 1
-            all_props, all_imgs = [], []
-
-        if curr_ep == episode_idx:
-            if not all_props:
-                for j in range(p_win.shape[0]):
-                    all_props.append(p_win[j])
-                    all_imgs.append(i_win[j])
-            else:
-                all_props.append(p_win[-1])
-                all_imgs.append(i_win[-1])
-        prev_prop = p_win[-1]
-    return np.array(all_imgs), np.array(all_props)
-
-
 # =========================================================================
 # CORE SIMULATION LOOP
 # =========================================================================
@@ -333,11 +303,8 @@ def run_unified_replay(imgs, props, args):
 
 
 def main():
-    if args.local_data_path:
-        imgs, props = load_episode_local(args.local_data_path, args.episode)
-    else:
-        imgs, props = load_episode_rtx(args.dataset, args.data_dir, args.episode)
-
+    imgs, props = load_episode_local(args.local_data_path, args.episode)
+    
     if args.mode == "diagnostic":
         print(f"Proprio Shape: {props.shape}")
         print(f"First Frame Pos: {props[0, 9:12]}")

@@ -30,7 +30,7 @@ graph TD
     subgraph Decoders
         LT[("Last Token Bottleneck<br/>Extract output_tokens[:, -1, :]")]
         AD[("ActionDecoder<br/>MLP: 1024D → ChunkSize*7D")]
-        RD[("RequeryDecoder<br/>MLP: 1024D → 1D")]
+        RD[("ConfidenceDecoder<br/>MLP: 1024D → 1D")]
     end
 
     subgraph Outputs

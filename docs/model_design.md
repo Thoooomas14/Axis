@@ -9,7 +9,7 @@ The Axis model is a general-purpose, multi-robot control policy that learns from
 - **Chordal Loss**: Trig-free SE(3) loss using Frobenius norm
 - **Action Chunking**: Predicts (B, ChunkSize, 7) - a sequence of ChunkSize future actions from the LAST token only
 - **DINOv2 Backbone**: Uses frozen DINOv2 (ViT-S/14) with a trainable fusion head
-- **Confidence Requery**: Simple MLP prediction from the LAST token based on action loss
+- **Confidence Confidence**: Simple MLP prediction from the LAST token based on action loss
 - **RoPE**: Rotary Position Embeddings for better sequence modeling
 
 ## Architecture Overview
@@ -106,7 +106,7 @@ The transformer processes a sliding window of W=8 timesteps, with each timestep'
 - **Architecture**: Standard MLP with LayerNorm, projecting to `ChunkSize * 7` and reshaping.
 - **SafeActionDecoder**: Wraps output with safety clamps (rotation and translation limits)
 
-#### Requery Decoder (Confidence)
+#### Confidence Decoder (Confidence)
 - **Input**: LAST transformer output token `(B, 1024)`
 - **Function**: Predicts model confidence as a self-supervised signal
 - **Architecture**: Simple MLP (Linear -> ReLU -> Linear -> Sigmoid)
