@@ -6,6 +6,8 @@
 - **RoPE (Rotary Position Embeddings)**: Position encoding method used in Axis V2 for better sequence modeling. [Paper](https://arxiv.org/abs/2104.09864)
 - **DINOv2**: Self-supervised vision transformer used as the image backbone for geometrically consistent features. [Paper](https://arxiv.org/abs/2304.07193)
 - **Action Chunking**: Predicting multiple future actions in a single forward pass for smoother control. [Inspiration: ACT](https://arxiv.org/abs/2304.13705)
+- **SAM2**: Segment Anything in Images and Videos, a foundation model towards solving promptable visual segmentation in images and videos from FAIR. [Paper](https://arxiv.org/abs/2408.00714)
+- **SAM3**: Unified foundation model for promptable segmentation in images and videos [Paper](https://arxiv.org/abs/2511.16719)
 
 ## V2 Representations
 

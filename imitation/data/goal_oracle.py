@@ -1,147 +1,33 @@
 import logging
-
+from transformers import Sam2Processor, Sam2Model, Sam3Processor, Sam3Model
+from accelerate import Accelerator
 import torch
 import numpy as np
 import re
 
-
-# --- Text Parsing for Object Properties ---
-
-# Color mapping: keyword -> normalized RGB [0, 1]
-COLOR_MAP = {
-    # Basic colors
-    "red": [1.0, 0.0, 0.0],
-    "green": [0.0, 1.0, 0.0],
-    "blue": [0.0, 0.0, 1.0],
-    "yellow": [1.0, 1.0, 0.0],
-    "orange": [1.0, 0.5, 0.0],
-    "purple": [0.5, 0.0, 0.5],
-    "pink": [1.0, 0.75, 0.8],
-    "white": [1.0, 1.0, 1.0],
-    "black": [0.0, 0.0, 0.0],
-    "gray": [0.5, 0.5, 0.5],
-    "grey": [0.5, 0.5, 0.5],
-    "brown": [0.6, 0.3, 0.0],
-    # Metallic / household colors
-    "silver": [0.75, 0.75, 0.75],
-    "gold": [1.0, 0.84, 0.0],
-    "bronze": [0.8, 0.5, 0.2],
-    "copper": [0.72, 0.45, 0.2],
-    "metallic": [0.7, 0.7, 0.7],
-    "stainless": [0.8, 0.8, 0.8],
-    "chrome": [0.85, 0.85, 0.85],
-    "wooden": [0.55, 0.35, 0.15],
-    "wood": [0.55, 0.35, 0.15],
-    "beige": [0.96, 0.96, 0.86],
-    "cream": [1.0, 0.99, 0.82],
-    "tan": [0.82, 0.71, 0.55],
-    "clear": [0.9, 0.9, 0.95],
-    "transparent": [0.9, 0.9, 0.95],
+TASK_TYPE = {
+    "open":     [1,0,0],
+    "close":    [0,1,0],
+    "relocate": [0,0,1],
+    "move":     [0,0,1],
+    "put":      [0,0,1],
+    "pick":     [0,0,1],
+    "place":    [0,0,1],
+    "remove":   [0,0,1],
+    "grasp":    [0,0,1],
+    "take":     [0,0,1],
+    "lift":     [0,0,1],
+    "turn":     [0,0,1],
+    "rotate":   [0,0,1],
+    "push":     [0,0,1],
+    "pull":     [0,0,1],
 }
 
-# Shape mapping: keyword -> one-hot [cube, cylinder, sphere]
-SHAPE_MAP = {
-    # Cube-like (index 0)
-    "cube": [1.0, 0.0, 0.0],
-    "block": [1.0, 0.0, 0.0],
-    "box": [1.0, 0.0, 0.0],
-    "drawer": [1.0, 0.0, 0.0],
-    "container": [1.0, 0.0, 0.0],
-    "tray": [1.0, 0.0, 0.0],
-    "plate": [1.0, 0.0, 0.0],
-    "dish": [1.0, 0.0, 0.0],
-    "book": [1.0, 0.0, 0.0],
-    "phone": [1.0, 0.0, 0.0],
-    "remote": [1.0, 0.0, 0.0],
-    "sponge": [1.0, 0.0, 0.0],
-    "cloth": [1.0, 0.0, 0.0],
-    "towel": [1.0, 0.0, 0.0],
-    # Cylinder-like (index 1)
-    "cylinder": [0.0, 1.0, 0.0],
-    "can": [0.0, 1.0, 0.0],
-    "bottle": [0.0, 1.0, 0.0],
-    "cup": [0.0, 1.0, 0.0],
-    "mug": [0.0, 1.0, 0.0],
-    "glass": [0.0, 1.0, 0.0],
-    "jar": [0.0, 1.0, 0.0],
-    "pot": [0.0, 1.0, 0.0],
-    "pan": [0.0, 1.0, 0.0],
-    "bowl": [0.0, 1.0, 0.0],
-    "bucket": [0.0, 1.0, 0.0],
-    "vase": [0.0, 1.0, 0.0],
-    "tube": [0.0, 1.0, 0.0],
-    "roll": [0.0, 1.0, 0.0],
-    "handle": [0.0, 1.0, 0.0],
-    # Sphere-like (index 2)
-    "sphere": [0.0, 0.0, 1.0],
-    "ball": [0.0, 0.0, 1.0],
-    "apple": [0.0, 0.0, 1.0],
-    "orange": [0.0, 0.0, 1.0],  # fruit
-    "egg": [0.0, 0.0, 1.0],
-    "tomato": [0.0, 0.0, 1.0],
-    "lemon": [0.0, 0.0, 1.0],
-}
-
-# Size mapping: keyword -> normalized [width, height, depth] (heuristic)
-SIZE_MAP = {
-    "tiny": [0.1, 0.1, 0.1],
-    "small": [0.25, 0.25, 0.25],
-    "medium": [0.5, 0.5, 0.5],
-    "large": [0.75, 0.75, 0.75],
-    "big": [0.75, 0.75, 0.75],
-    "huge": [1.0, 1.0, 1.0],
-}
-
-# Default values when no keywords match
-DEFAULT_COLOR = np.array([0.0, 0.0, 0.0], dtype=np.float32)  # black
-DEFAULT_SHAPE = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # cube
-DEFAULT_SIZE = np.array([0.5, 0.5, 0.5], dtype=np.float32)  # medium
-
-
-def extract_object_properties(instruction: str) -> dict:
-    """
-    Extract object properties from a language instruction string.
-
-    Args:
-        instruction: Natural language instruction (e.g., "pick up the red block")
-
-    Returns:
-        dict with 'size', 'color', 'shape' arrays (each 3D).
-        Defaults to black/cube/medium if instruction is blank or no keywords found.
-    """
-    # Start with defaults
-    result = {
-        "size": DEFAULT_SIZE.copy(),
-        "color": DEFAULT_COLOR.copy(),
-        "shape": DEFAULT_SHAPE.copy(),
-    }
-
-    if not instruction or not instruction.strip():
-        return result
-
-    # Lowercase for matching
-    text = instruction.lower()
-
-    # Extract color
-    for keyword, rgb in COLOR_MAP.items():
-        if re.search(r"\b" + keyword + r"\b", text):
-            result["color"] = np.array(rgb, dtype=np.float32)
-            break
-
-    # Extract shape
-    for keyword, one_hot in SHAPE_MAP.items():
-        if re.search(r"\b" + keyword + r"\b", text):
-            result["shape"] = np.array(one_hot, dtype=np.float32)
-            break
-
-    # Extract size
-    for keyword, size_vec in SIZE_MAP.items():
-        if re.search(r"\b" + keyword + r"\b", text):
-            result["size"] = np.array(size_vec, dtype=np.float32)
-            break
-
-    return result
-
+RED_FLAG = [
+    "and",
+    "or",
+    "then",
+]
 
 class GoalOracle:
     """
@@ -150,82 +36,236 @@ class GoalOracle:
     Goal Vector Layout (38D):
     | Indices | Component                              |
     |---------|----------------------------------------|
-    | 0-2     | Task type one-hot [Move, Pick, Place]  |
-    | 3-15    | Start pose (13D): [R_flat, pos, grip]  |
-    | 16-28   | Target pose (13D): [R_flat, pos, grip] |
-    | 29-31   | Object size [width, height, depth]     |
-    | 32-34   | Object color [R, G, B] normalized      |
-    | 35-37   | Object shape one-hot [cube, cyl, sph]  |
+    | 0-2     | Task type 1-hot [Open, Close, Relocate]|
+    | 3-6     | Initial Pos (2D BB): [x, y, W, H]      |
+    | 7-10    | Target Pos (2D BB): [x, y, W, H]       |
+    | 11-13   | Object color [R, G, B] Norm [0, 1]     |
     """
 
-    def __init__(self, output_dim: int = 38):
-        if output_dim != 38:
-            raise ValueError(f"Output dimension must be 38, but got {output_dim}")
-        self.output_dim = output_dim
+    def __init__(self, device: str | torch.device = "cpu"):
+        device = Accelerator().device
+        self.device = device
+        self.SAM2 = Sam2Model.from_pretrained("facebook/sam2.1-hiera-large").to(device)
+        self.SAM2_processor = Sam2Processor.from_pretrained("facebook/sam2.1-hiera-large")
+        self.SAM3 = Sam3Model.from_pretrained("facebook/sam3").to(device)
+        self.SAM3_processor = Sam3Processor.from_pretrained("facebook/sam3")
+        
+        logging.info("GoalOracle initialization complete.")
+        logging.info(f"Initialized GoalOracle on device: {device}")
+
 
     def encode_goal(
         self,
-        task_type: int,
-        start_pose: np.ndarray,
-        end_pose: np.ndarray,
-        object_props: dict | None = None,
-    ) -> torch.Tensor:
+        init_obj_coordinate: np.ndarray | None,
+        final_obj_coordinate: np.ndarray | None,
+        img: np.ndarray | None = None,
+        instruction: str | None = None,
+    ) -> torch.Tensor | None:
         """
-        Construct standardized 38D goal vector.
+        Construct standardized 14D goal vector.
 
         Args:
-            task_type: 0=Move, 1=Pick, 2=Place
-            start_pose: 13D current pose [R_flat(9), pos(3), gripper(1)]
-            end_pose: 13D target pose [R_flat(9), pos(3), gripper(1)]
-            object_props: Optional dict with 'size', 'color', 'shape'
-                - size: (3,) array [width, height, depth]
-                - color: (3,) array [r, g, b] normalized to [0, 1]
-                - shape: (3,) one-hot array [cube, cylinder, sphere]
+            init_obj_coordinate: 2D initial object coordinate [x, y]
+            final_obj_coordinate: 2D final object coordinate [x, y]
+            img: Optional RGB image (H, W, 3) for visual context (not used in this version)
+            instruction: Optional natural language instruction for property extraction
 
         Returns:
-            (38,) float32 tensor
+            (14,) float32 tensor
         """
-        goal = np.zeros(38, dtype=np.float32)
+        if instruction is not None and any(flag in instruction.lower() for flag in RED_FLAG):
+            return torch.zeros(14, dtype=torch.float32).to(self.device)  # Return zero vector if red flags are present
+        # Task type encoding (3D)
+        task_type_vec = self._encode_task_type(instruction)
 
-        # Task type one-hot (indices 0-2)
-        if 0 <= task_type < 3:
-            goal[task_type] = 1.0
+        if task_type_vec is None:
+            logging.warning(f"No task type keywords found in instruction: '{instruction}'")
+            return None
+        # Object position encoding (8D)
+        init_pos_vec = self._encode_position(task_type_vec, init_obj_coordinate, img, instruction)
+        if np.array_equal(task_type_vec, np.array([0, 0, 1], dtype=np.float32)):
+            final_pos_vec = self._encode_position(task_type_vec, final_obj_coordinate, img, instruction)
+        else:
+            final_pos_vec = init_pos_vec  # For relocate tasks, initial and final positions are the same            
 
-        # Start pose (indices 3-15) - 13D SE(3) + gripper
-        goal[3:16] = start_pose[:13]
+        # Object property encoding (3D)
+        prop_vec = self._encode_properties(img, init_pos_vec)
 
-        # Target pose (indices 16-28) - 13D SE(3) + gripper
-        goal[16:29] = end_pose[:13]
+        # Concatenate all components into a single goal vector
+        if init_pos_vec is None or final_pos_vec is None or prop_vec is None:
+            logging.warning(f"Failed to encode one of the components for instruction: '{instruction}'")
+            return None
+        goal_vector = np.concatenate([task_type_vec, init_pos_vec, final_pos_vec, prop_vec])
+        return torch.tensor(goal_vector, dtype=torch.float32).to(self.device)
+    
+    def _encode_task_type(self, instruction: str | None) -> np.ndarray | None:
+        if instruction is None:
+            return None
+        
+        instruction = instruction.lower()
+        for keyword, vec in TASK_TYPE.items():
+            if re.search(r'\b' + re.escape(keyword) + r'\b', instruction):
+                return np.array(vec, dtype=np.float32)
+        return None
+    
+    def _encode_position(self, task_type: np.ndarray, coordinate: np.ndarray | None, image: np.ndarray | None, instruction: str | None) -> np.ndarray | None:
+        if np.array_equal(task_type, np.array([0, 0, 1], dtype=np.float32)):
+            coordinate = [[[coordinate]]]
+            input_labels = [[[1]]]
+            inputs = self.SAM2_processor(images=image, input_points=coordinate, input_labels=input_labels, return_tensors="pt").to(self.SAM2.device)
 
-        # Object properties (indices 29-37)
-        if object_props:
-            if "size" in object_props and object_props["size"] is not None:
-                goal[29:32] = object_props["size"]
-            if "color" in object_props and object_props["color"] is not None:
-                goal[32:35] = object_props["color"]
-            if "shape" in object_props and object_props["shape"] is not None:
-                goal[35:38] = object_props["shape"]
+            with torch.no_grad():
+                outputs = self.SAM2(**inputs)
+            
+            results = self.SAM2_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
+            try:
+                masks = results[0][0].cpu().numpy()
+            except IndexError:
+                logging.warning(f"SAM2 failed to find a mask for coordinate: {coordinate}")
+                return None
+            
+        else:
+            # for non-relocate tasks use florence to extract position from instruction and image
+            if instruction is None or image is None:
+                return None
 
-        return torch.from_numpy(goal)
+            # Clean the instruction to focus only on the object
+            target_desc = instruction.lower()
+            for action in TASK_TYPE.keys():
+                target_desc = target_desc.replace(action, "")
 
+            inputs = self.SAM3_processor(images=image, text=target_desc, return_tensors="pt").to(self.SAM3.device)
+
+            with torch.no_grad():
+                outputs = self.SAM3(**inputs)
+            results = self.SAM3_processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                mask_threshold=0.5,
+                target_sizes=inputs.get("original_sizes").tolist()
+            )[0]
+            try:
+                masks = results["masks"][0].cpu().numpy()
+            except IndexError:
+                logging.warning(f"SAM3 failed to find a mask for instruction: '{instruction}'")
+                return None
+
+        
+        # Now np.where will correctly return 2 values: ys and xs
+        ys, xs = np.where(masks > 0)
+        ys, xs = np.where(masks > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = ys.min(), ys.max()
+        x_center = (x_min + x_max) / 2.0
+        y_center = (y_min + y_max) / 2.0
+        width = x_max - x_min
+        height = y_max - y_min
+        return np.array([x_center, y_center, width, height], dtype=np.float32)
+
+    def _encode_properties(self, image: np.ndarray | None, bounding_box: np.ndarray | None) -> np.ndarray | None:
+        if image is None or bounding_box is None:
+            return None
+
+        if bounding_box is None:
+            return None
+
+        x, y, W, H = bounding_box
+        y1, y2 = int(y), int(y + H)
+        x1, x2 = int(x), int(x + W)
+        
+        crop = image[y1:y2, x1:x2]
+        
+        # Prevent crash if box is out of bounds
+        if crop.size == 0:
+            return None
+            
+        avg_color = crop.mean(axis=(0, 1))
+        
+        # Normalize to [0, 1] if your previous code expected it
+        return (avg_color / 255.0).astype(np.float32)
 
 if __name__ == "__main__":
-    # Quick test
-    oracle = GoalOracle(output_dim=38)
+    logging.basicConfig(level=logging.INFO)
+    oracle = GoalOracle("cuda" if torch.cuda.is_available() else "cpu")
+    init_coord1 = np.array([104, 166])
+    final_coord1 = np.array([98, 150])
+    instruction1 = "Move the Green block inside the basket"
+    from PIL import Image
+    
+    # Open the image
+    img1 = Image.open('images/GoalOracleTest1.jpg')
 
-    # Test with properties
-    props = extract_object_properties("pick up the red block")
-    logging.info(f"Extracted from 'pick up the red block': {props}")
+    # Convert to numpy array
+    img_array1 = np.array(img1)
+    goal_vector1 = oracle.encode_goal(init_coord1, final_coord1, img=img_array1, instruction=instruction1)
+    logging.info(f"Encoded Goal Vector: {goal_vector1.cpu().numpy()}")
+    logging.info(f"Task Type (One-hot): {goal_vector1[:3].cpu().numpy()}")
+    logging.info(f"Initial Position (x, y, W, H): {goal_vector1[3:7].cpu().numpy()}")
+    logging.info(f"Target Position (x, y, W, H): {goal_vector1[7:11].cpu().numpy()}")
+    logging.info(f"Object Color (R, G, B): {goal_vector1[11:14].cpu().numpy()}")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    # Visualization
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(img_array1)
+    
+    
+    cx, cy, w, h = goal_vector1[3:7].cpu().numpy()  # Initial position
+    # Convert center-format to top-left for matplotlib
+    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="blue", facecolor='none', label="Initial")
+    ax.add_patch(rect)
+    ax.scatter(cx, cy, color="blue", s=40)
+    cx, cy, w, h = goal_vector1[7:11].cpu().numpy()  # Final position
+    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="red", facecolor='none', label="Final")
+    ax.scatter(cx, cy, color="red", s=40)
+    ax.add_patch(rect)
 
-    start = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 0.0, 0.3, 0.0], dtype=np.float32)
-    end = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.0, 0.1, 1.0], dtype=np.float32)
+    #display color
+    r, g, b = goal_vector1[11:14].cpu().numpy()
+    ax.add_patch(patches.Rectangle((0, 0), 50, 50, linewidth=2, edgecolor="black", facecolor=(r, g, b), label="Object Color"))
 
-    goal = oracle.encode_goal(1, start, end, props)
-    logging.info(f"Goal shape: {goal.shape}")
-    logging.info(f"Goal vector: {goal}")
+    plt.legend()
+    plt.title(f"Goal Oracle Detection\nInstruction: {instruction1}")
+    plt.show()
 
-    # Test with blank instruction
-    props_blank = extract_object_properties("")
-    logging.info(f"\nExtracted from '': {props_blank}")
-    goal_blank = oracle.encode_goal(0, start, end, props_blank)
-    logging.info(f"Goal (blank props): {goal_blank}")
+    #--- Test with Open flag in instruction
+    instruction2 = "Open the bottom white drawer on the left side of the cabinet"
+    
+    # Open the image
+    img2 = Image.open('images/GoalOracleTest2.jpg')
+    init_coord2 = None
+    final_coord2 = None
+
+    # Convert to numpy array
+    img_array2 = np.array(img2)
+    goal_vector2 = oracle.encode_goal(init_coord2, final_coord2, img=img_array2, instruction=instruction2)
+    logging.info(f"Encoded Goal Vector: {goal_vector2.cpu().numpy()}")
+    logging.info(f"Task Type (One-hot): {goal_vector2[:3].cpu().numpy()}")
+    logging.info(f"Initial Position (x, y, W, H): {goal_vector2[3:7].cpu().numpy()}")
+    logging.info(f"Target Position (x, y, W, H): {goal_vector2[7:11].cpu().numpy()}")
+    logging.info(f"Object Color (R, G, B): {goal_vector2[11:14].cpu().numpy()}")
+
+    # Visualization
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(img_array2)
+    
+    
+    cx, cy, w, h = goal_vector2[3:7].cpu().numpy()  # Initial position
+    # Convert center-format to top-left for matplotlib
+    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="blue", facecolor='none', label="Initial")
+    ax.add_patch(rect)
+    ax.scatter(cx, cy, color="blue", s=40)
+    cx, cy, w, h = goal_vector2[7:11].cpu().numpy()  # Final position
+    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="red", facecolor='none', label="Final")
+    ax.scatter(cx, cy, color="red", s=40)
+    ax.add_patch(rect)
+
+    #display color
+    r, g, b = goal_vector2[11:14].cpu().numpy()
+    ax.add_patch(patches.Rectangle((0, 0), 50, 50, linewidth=2, edgecolor="black", facecolor=(r, g, b), label="Object Color"))
+
+    plt.legend()
+    plt.title(f"Goal Oracle Detection\nInstruction: {instruction2}")
+    plt.show()

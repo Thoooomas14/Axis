@@ -3,10 +3,6 @@ import sys
 import gc
 import logging
 
-# Suppress TF INFO/WARNING logs to reduce noise (e.g. OUT_OF_RANGE)
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +10,6 @@ import argparse
 from tqdm import tqdm
 from datetime import datetime
 import pypose as pp
-import tensorflow as tf
 from collections import deque
 import time
 import torchvision.transforms as T
@@ -27,10 +22,6 @@ from imitation.utils.scheduler import CosineAnnealingWarmupRestarts
 from imitation.utils.logger import TrainingLogger
 from imitation.utils.visualizer import Visualizer
 from imitation.utils.ema import EMA
-
-
-# Force TensorFlow to use CPU only (prevents VRAM fighting with PyTorch and CUDA errors in workers)
-tf.config.set_visible_devices([], "GPU")
 
 # Set PyTorch matmul precision to high for better performance on Ampere+ GPUs (can be overridden by user args if needed)
 torch.set_float32_matmul_precision("high")
