@@ -361,6 +361,22 @@ def extract_episode_worker(
 
         init_obj_coord, final_obj_coord = None, None
 
+        def apply_jaw_offset(pose_row, offset_m=0.105):
+            """
+            Offsets the EE flange position to the gripper jaws using
+            the 3D rotation matrix to ensure accurate 2D projection.
+            """
+            # Extract flattened 3x3 rotation matrix and 3D position
+            R = pose_row[0:9].reshape(3, 3)
+            pos_flange = pose_row[9:12]
+
+            # Standard convention: Gripper points along its local Z-axis.
+            # (If the projection shoots sideways, change to X: [offset_m, 0, 0])
+            local_offset = np.array([0.0, 0.0, offset_m])
+
+            # Rotate the local offset into the global frame and add to the flange position
+            return pos_flange + (R @ local_offset) # Tool Center Point location
+
         if orig_shape is not None and (t_grasp is not None or t_drop is not None):
             try:
                 if intrinsics_matrix is not None:
@@ -381,7 +397,7 @@ def extract_episode_worker(
                         )
 
                     if t_grasp is not None:
-                        pos_grasp = poses[t_grasp, 9:12]
+                        pos_grasp = apply_jaw_offset(poses[t_grasp], offset_m=0.105)
                         proj_grasp = project_trajectory_to_image(
                             pos_grasp, intrinsics_matrix, T_base2cam
                         )
@@ -394,7 +410,7 @@ def extract_episode_worker(
                                 return None
 
                     if t_drop is not None:
-                        pos_drop = poses[t_drop, 9:12]
+                        pos_drop = apply_jaw_offset(poses[t_drop], offset_m=0.105)
                         proj_drop = project_trajectory_to_image(
                             pos_drop, intrinsics_matrix, T_base2cam
                         )
@@ -520,7 +536,6 @@ def process_droid_raw_episodes(
                     is_submitting = False
                     break  # Reached the end of the GCS blobs
 
-                
                 filename = blob.name.split("/")[-1]
                 episode_id = filename.replace("metadata_", "").replace(".json", "")
 
