@@ -159,7 +159,7 @@ class GoalOracle:
         if np.array_equal(task_type, np.array([0, 0, 1], dtype=np.float32)):
             if coordinate is None:
                 return None
-            input_points = [[[list(coordinate)]]]
+            input_points = [[[coordinate.tolist()]]]
             input_labels = [[[1]]]
             inputs = self.SAM2_processor(
                 images=image,

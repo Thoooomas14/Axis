@@ -520,6 +520,7 @@ def process_droid_raw_episodes(
                     is_submitting = False
                     break  # Reached the end of the GCS blobs
 
+                
                 filename = blob.name.split("/")[-1]
                 episode_id = filename.replace("metadata_", "").replace(".json", "")
 
@@ -590,6 +591,7 @@ def process_droid_raw_episodes(
                 )
 
                 for future in done:
+                    pbar.update(1)
                     # Pop the finished future from the tracking dictionary
                     episode_id = active_futures.pop(future)
 
@@ -626,7 +628,6 @@ def process_droid_raw_episodes(
                             f"Skipping episode {episode_id}: Goal vector generation failed."
                         )
                         shutil.rmtree(result["ep_dir"], ignore_errors=True)
-                        pbar.update(1)
                         continue
 
                     # Main thread saves the goal vector
@@ -646,7 +647,6 @@ def process_droid_raw_episodes(
                     )
 
                     successful_episodes += 1
-                    pbar.update(1)
                     pbar.set_postfix({"success": successful_episodes})
 
                     if test_mode:
@@ -886,7 +886,7 @@ if __name__ == "__main__":
     except Exception as e:
         print()  # noqa: T201
         print("\n\n" + "=" * 60)  # noqa: T201
-        logger.error(f"ERROR found: {e}")
+        logger.exception(f"Unexpected error occurred: {e}")
         print("=" * 60 + "\n")  # noqa: T201
     finally:
         if worker_stop_event is not None:
