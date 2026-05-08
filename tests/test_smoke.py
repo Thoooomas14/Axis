@@ -48,7 +48,9 @@ def test_model_dimensions():
     assert action.shape == (B, chunk_size, 7), (
         f"Expected Action (B, {chunk_size}, 7), got {action.shape}"
     )
-    assert confidence.shape == (B, 1), f"Expected Confidence (B, 1), got {confidence.shape}"
+    assert confidence.shape == (B, 1), (
+        f"Expected Confidence (B, 1), got {confidence.shape}"
+    )
 
 
 def test_model_instantiation():

@@ -2,45 +2,52 @@
 DROID Dataset Preprocessor
 
 Streams DROID dataset from GCS and saves minimal episode data locally.
-Stores only: images (one camera, resized) and 13D poses per timestep.
-All derived computations (windowing, goals, twists) are done at load time by LocalDataLoader.
-
-13D Pose Format: [R_flat(9), pos(3), gripper(1)]
+Stores only: images (one camera, resized), 13D poses, twists per timestep, and goal vectors.
+Utilizes a Producer-Consumer multi-threading architecture to balance I/O bounds with GPU/Disk bounds.
 
 Usage:
-    python -m imitation.data.preprocessor --output E:/data/droid.h5 --dataset droid
-    python -m imitation.data.preprocessor --output E:/data/fractal.h5 --dataset fractal20220817_data
-    python -m imitation.data.preprocessor --output ./test.h5 --dataset droid --max_episodes 10
+    python -m imitation.data.preprocessor --output E:/data/droid_processed/ --workers 8
 """
 
 import os
+import json
+import tempfile
 import sys
 import argparse
-import gc
 import shutil
+import concurrent.futures
+import multiprocessing
 from pathlib import Path
-
-# Suppress TF logs
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-import tensorflow as tf
-import tensorflow_datasets as tfds
-
+import torch
 import numpy as np
-import h5py
 import cv2
 from tqdm import tqdm
+import pypose as pp
+from requests import adapters
 from scipy.spatial.transform import Rotation as R
-from concurrent.futures import ThreadPoolExecutor
-
+from google.cloud import storage
+from google.cloud.exceptions import NotFound
+import imageio
 import logging
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from imitation.data.goal_oracle import extract_object_properties
+from imitation.utils.logger import TqdmLoggingHandler
+# Create a logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+tqdm_handler = TqdmLoggingHandler()
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+tqdm_handler.setFormatter(formatter)
+logger.addHandler(tqdm_handler)
+
+from imitation.data.goal_oracle import GoalOracle
+from imitation.data.utils.droid_utils import TrajectoryReader, MP4Reader
 
 def get_free_space_gb(path: Path) -> float:
     """Get free disk space in GB for the drive containing path."""
@@ -48,475 +55,690 @@ def get_free_space_gb(path: Path) -> float:
         total, used, free = shutil.disk_usage(path.parent)
         return free / (1024**3)
     except Exception:
-        return float("inf")  # If we can't check, assume infinite
+        return float("inf")
 
+def cleanup_orphaned_episodes(output_dir):
+    """Scans the output directory and deletes any incomplete episodes from previous runs."""
+    if not os.path.exists(output_dir):
+        return
+        
+    logger.info("Running cleanup: Scanning for orphaned episodes...")
+    orphans_deleted = 0
+    
+    for item in os.listdir(output_dir):
+        ep_path = os.path.join(output_dir, item)
+        # Only check directories that look like episode folders
+        if os.path.isdir(ep_path) and item.startswith("episode_"):
+            # If the folder exists, but the goal vector doesn't, it's an orphan!
+            if not os.path.exists(os.path.join(ep_path, "goal.npy")):
+                shutil.rmtree(ep_path, ignore_errors=True)
+                orphans_deleted += 1
+                
+    if orphans_deleted > 0:
+        logger.info(f"Cleanup complete: Deleted {orphans_deleted} orphaned episodes.")
+    else:
+        logger.info("Cleanup complete: No orphaned episodes found.")
 
-def quat_to_rotmat(quat: np.ndarray) -> np.ndarray:
-    """Convert quaternion [qx, qy, qz, qw] to 3x3 rotation matrix."""
-    quat = quat / (np.linalg.norm(quat) + 1e-8)
-    return R.from_quat(quat).as_matrix().astype(np.float32)
+DEFAULT_GRIPPER = torch.tensor([0.0])
 
+def get_pose(obs) -> torch.Tensor:
+    if "cartesian_position" in obs:
+        p = obs['cartesian_position']
+        pos = torch.as_tensor(p[:3])
+        rotation = pp.euler2SO3(p[3:])
+    else:
+        pos = torch.zeros(3)
+        rotation = pp.identity_SO3()
 
-def get_pose(obs) -> np.ndarray:
-    """Extract 13D pose: [R_flat(9), position(3), gripper(1)]."""
-    pos = np.zeros(3, dtype=np.float32)
-    quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-    rotmat = None
+    g = DEFAULT_GRIPPER
+    if "gripper_position" in obs:
+        g = torch.as_tensor(obs["gripper_position"]).reshape(-1)[:1] 
 
-    # Position and orientation
-    if "base_pose_tool_reached" in obs:
-        p7 = obs["base_pose_tool_reached"].numpy()
-        pos = p7[:3]
-        quat = p7[3:7]
-    elif "cartesian_position" in obs:
-        p6 = obs["cartesian_position"].numpy()
-        if p6.shape[0] == 6:
-            pos = p6[:3]
-            euler = p6[3:]
-            rotmat = R.from_euler("xyz", euler).as_matrix().astype(np.float32)
-    elif "ee_pose" in obs:
-        p7 = obs["ee_pose"].numpy()
-        pos = p7[:3]
-        if p7.shape[0] >= 7:
-            quat = p7[3:7]
+    rot_flat = rotation.matrix().reshape(-1)
+    return torch.cat([rot_flat, pos, g])
 
-    if rotmat is None:
-        rotmat = quat_to_rotmat(quat)
+def get_action(obs) -> np.ndarray:
+    """
+    Extracts a flat 7D action array (6D cartesian velocity + 1D gripper) 
+    from the raw HDF5 action dictionary.
+    """    
+    if isinstance(obs, dict):
+        # Extract cartesian and gripper values (default to zeros if missing)
+        cart = obs.get("cartesian_velocity",np.zeros(6))
+        grip = obs.get("gripper_velocity", np.zeros(1))
+        
+        # Flatten them
+        cart = np.array(cart).flatten()
+        grip = np.array(grip).flatten()
+        
+        # Combine into a single array
+        full_action = np.concatenate([cart, grip])
+        
+        # Pad with zeros if it's too short, or truncate if it's too long to guarantee 7D
+        if len(full_action) < 7:
+            full_action = np.pad(full_action, (0, 7 - len(full_action)))
+        return full_action[:7]
+    return np.zeros(7)
 
-    # Gripper state
-    g = np.float32(0.0)
-    if "gripper_closed" in obs:
-        g = obs["gripper_closed"].numpy().astype(np.float32)
-    elif "gripper_position" in obs:
-        g = obs["gripper_position"].numpy().astype(np.float32)
-    elif "gripper_state" in obs:
-        g = obs["gripper_state"].numpy().astype(np.float32)
-
-    if not np.isscalar(g):
-        g = g.item()
-        g = np.float32(g)
-
-    # 13D pose: [R_flat(9), pos(3), gripper(1)]
-    pose13 = np.zeros(13, dtype=np.float32)
-    pose13[:9] = rotmat.flatten()
-    pose13[9:12] = pos
-    pose13[12] = g
-    return pose13
-
-
-def process_image(
-    img, target_size=(224, 224)
-) -> tuple[np.ndarray | None, tuple[int, int]]:
-    """Crop and downsample images to target size."""
+def process_image(img, target_size=224) -> tuple[np.ndarray | None, tuple[int, int]]:
     if img is None:
         return None, (0, 0)
 
-    # 1. Convert to numpy if necessary (handles TF/Torch tensors)
     if hasattr(img, "numpy"):
         img = img.numpy()
 
-    # 2. Aspect Ratio Correct: Center Crop to Square
-    h, w = img.shape[:2]
-    if h != w:
-        min_dim = min(h, w)
-        top = (h - min_dim) // 2
-        left = (w - min_dim) // 2
-        img = img[top : top + min_dim, left : left + min_dim]
+    w, h = img.shape[:2]
+    min_dim = min(w, h)
+    pad_w = w - min_dim
+    pad_h = h - min_dim
+    top, bottom = pad_h // 2, pad_h - (pad_h // 2) # Ensure exact padding if odd
+    left, right = pad_w // 2, pad_w - (pad_w // 2)
 
-    # 3. High-Quality Resizing
-    # INTER_AREA is mathematically superior for downsampling (prevents aliasing).
-    if img.shape[0] != target_size[0] or img.shape[1] != target_size[1]:
-        img = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
+    # FAST OpeCV C++ Implementation
+    padded_image = cv2.copyMakeBorder(
+        img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(1, 1, 1)
+    )
+    
+    return cv2.resize(padded_image, (target_size, target_size), interpolation=cv2.INTER_AREA), (h, w)
 
-    # 4. CHW Transpose & Memory Efficiency
-    # We return uint8 [0-255] here.
-    # Normalization (/255.0) should happen on the GPU during training.
-    processed_img = np.transpose(img, (2, 0, 1)).astype(np.uint8)  # (3, H, W)
-    return processed_img, (h, w)
+def get_extrinsics(extrinsic_superset_data, extrinsic_data, target_episode, target_serial):
+    if target_episode in extrinsic_superset_data:
+        episode_data = extrinsic_superset_data[target_episode]
+    elif target_episode in extrinsic_data:
+        episode_data = extrinsic_data[target_episode]
+    else:
+        return None
 
+    if target_serial not in episode_data:
+        return None
+
+    raw_values = episode_data[target_serial]
+    pos = np.array(raw_values[0:3])
+    rot_matrix = R.from_euler("xyz", raw_values[3:6]).as_matrix()
+    t_cam_to_base = np.eye(4)
+    t_cam_to_base[:3, :3] = rot_matrix
+    t_cam_to_base[:3, 3] = pos
+
+    t_base_to_cam = np.linalg.inv(t_cam_to_base)
+    return t_base_to_cam
+
+def project_trajectory_to_image(ee_positions, intrinsics, extrinsics_base2cam, distortion=None):
+    """Projects a 3D Base-Frame coordinate into 2D Image Pixel coordinates."""
+    ee_positions = np.atleast_2d(ee_positions).astype(np.float64)
+    R_matrix = extrinsics_base2cam[:3, :3]
+    t_vec = extrinsics_base2cam[:3, 3]
+    r_vec, _ = cv2.Rodrigues(R_matrix)
+    
+    if distortion is None:
+        distortion = np.zeros((5, 1), dtype=np.float64)
+        
+    image_points, _ = cv2.projectPoints(ee_positions, r_vec, t_vec, intrinsics, distortion)
+    return image_points.reshape(-1, 2)
+
+
+worker_client = None
+worker_bucket = None
+worker_stop_event = None  # Add this global
+
+def init_worker_process(project_id, bucket_name, stop_event):
+    """Initializes GCS client locally and attaches the stop event."""
+    global worker_client, worker_bucket, worker_stop_event
+    
+    worker_stop_event = stop_event  # Store the shared event globally in the child process
+    
+    from google.cloud import storage
+    from requests import adapters
+    
+    worker_client = storage.Client(project=project_id)
+    adapter = adapters.HTTPAdapter(pool_connections=5, pool_maxsize=5)
+    worker_client._http.mount("https://", adapter)
+    worker_client._http.mount("http://", adapter)
+    worker_bucket = worker_client.bucket(bucket_name, user_project=project_id)
+
+def extract_episode_worker(
+    blob_name, episode_id, valid_instruction, target_serial, 
+    T_base2cam, intrinsics_matrix, output_dir
+):
+    """
+    PRODUCER FUNCTION: Downloads data, decodes video, resizes images, and extracts trajectory arrays.
+    """
+    global worker_bucket # Use the locally initialized bucket!
+    global worker_stop_event # Use the shared stop event to check for shutdown signals!
+
+    if worker_stop_event is not None and worker_stop_event.is_set():
+        return None
+    
+    temp_dir = tempfile.mkdtemp(dir="/dev/shm")
+    base_directory = blob_name.rsplit('/', 1)[0] + '/'
+    
+    try:
+        assert worker_bucket is not None, "Worker bucket not initialized!"
+        # Download files using the worker's local bucket
+        h5_blob = worker_bucket.blob(blob_name=f"{base_directory}trajectory.h5")
+        mp4_blob = worker_bucket.blob(f"{base_directory}recordings/MP4/{target_serial}.mp4")
+
+        local_h5_path = os.path.join(temp_dir, f"episode_{episode_id}.h5")
+        local_mp4_path = os.path.join(temp_dir, f"episode_{episode_id}.mp4")
+
+        h5_blob.download_to_filename(local_h5_path)
+        mp4_blob.download_to_filename(local_mp4_path)
+
+        # Extract Episode Trajectory and Video
+        traj_reader = TrajectoryReader(local_h5_path, read_images=False)
+        horizon = traj_reader.length()
+
+        if horizon is None or horizon <= 0:
+            logger.warning(f"Skipping episode {episode_id}: Invalid horizon length ({horizon})")
+            traj_reader.close()
+            return None
+        
+        mp4_reader = MP4Reader(local_mp4_path, target_serial)
+        mp4_reader.set_reading_parameters(image=True, concatenate_images=False)
+        
+        images = []
+        poses = []
+        twists = []
+        orig_shape = None
+
+        for i in range(horizon):
+            # POISON PILL CHECK: If main thread says stop, abort immediately.
+            assert worker_stop_event is not None, "Worker stop event not initialized!"
+            if worker_stop_event.is_set():
+                traj_reader.close()
+                mp4_reader.disable_camera()
+                return None
+
+            step = traj_reader.read_timestep(index=i)
+            obs = step.get('action', step)
+            
+            # Poses
+            pose_tensor = get_pose(obs)
+            poses.append(pose_tensor.numpy() if hasattr(pose_tensor, 'numpy') else pose_tensor)
+            
+            # Twists/Actions
+            action_array = get_action(obs)
+            twists.append(action_array)
+            
+            # Image Frame
+            cam_data = mp4_reader.read_camera()
+            if cam_data is None or "image" not in cam_data:
+                img = images[-1] if images else np.zeros((224, 224, 3), dtype=np.uint8)
+            else:
+                raw_img = list(cam_data["image"].values())[0]
+                img, current_shape = process_image(raw_img, target_size=224)
+                if orig_shape is None:
+                    orig_shape = current_shape
+            images.append(img)
+            
+        traj_reader.close()
+        mp4_reader.disable_camera()
+
+        images = np.array(images, dtype=np.uint8)
+        poses = np.array(poses, dtype=np.float32)
+        twists = np.array(twists, dtype=np.float32)
+
+        velocity_eps = 1e-4
+        gripper_eps = 1e-3
+        
+        # Calculate L2 norms of the 6D Cartesian twist for each timestep
+        cartesian_norms = np.linalg.norm(twists[:, :6], axis=1)
+        gripper_deltas = np.abs(twists[:, 6])
+        
+        # Create a boolean mask of active frames
+        active_mask = (cartesian_norms > velocity_eps) | (gripper_deltas > gripper_eps)
+        
+        # Find the first index where movement exceeds our thresholds
+        if np.any(active_mask):
+            start_idx = np.argmax(active_mask)
+        else:
+            start_idx = 0  # Fallback if the entire episode is mathematically static
+            
+        # Apply the slice to remove the static prefix
+        if start_idx > 0:
+            images = images[start_idx:]
+            poses = poses[start_idx:]
+            twists = twists[start_idx:]
+            horizon = len(images)
+
+        # Calculate trajectory length
+        if len(poses) > 1:
+            positions = poses[:, 9:12]
+            trajectory_length_m = float(np.sum(np.linalg.norm(np.diff(positions, axis=0), axis=1)))
+        else:
+            trajectory_length_m = 0.0
+
+        gripper_states = poses[:, 12]
+        t_grasp, t_drop = None, None
+
+        # Look for significant gripper movement
+        g_min, g_max = gripper_states.min(), gripper_states.max()
+        if g_max - g_min > 0.1: 
+            norm_g = (gripper_states - g_min) / (g_max - g_min)
+            binary_g = (norm_g > 0.5).astype(int)
+            diffs = np.diff(binary_g)
+            transitions = np.where(np.abs(diffs) > 0)[0]
+            if len(transitions) > 0:
+                t_grasp = transitions[0]   
+                t_drop = transitions[-1]   
+
+        init_obj_coord, final_obj_coord = None, None
+
+        if orig_shape is not None and (t_grasp is not None or t_drop is not None):
+            try:
+                if intrinsics_matrix is not None:
+                    def apply_padding_scale(coord):
+                        orig_height, orig_width = orig_shape
+                        min_dim = min(orig_height, orig_width)
+                        
+                        top = (orig_height - min_dim) // 2
+                        left = (orig_width - min_dim) // 2
+                        
+                        padded_x = coord[0] + left
+                        padded_y = coord[1] + top
+                        
+                        scale = 224 / max(orig_height, orig_width)
+                        return np.array([padded_x * scale, padded_y * scale], dtype=np.float32)
+
+                    if t_grasp is not None:
+                        pos_grasp = poses[t_grasp, 9:12]
+                        proj_grasp = project_trajectory_to_image(pos_grasp, intrinsics_matrix, T_base2cam)
+                        init_obj_coord = apply_padding_scale(proj_grasp[0])
+                        for c in init_obj_coord:
+                            if c < 0 or c > 224:
+                                logger.warning(f"Grasp coordinate out of bounds for {episode_id}: {init_obj_coord}")
+                                return None
+
+                    if t_drop is not None:
+                        pos_drop = poses[t_drop, 9:12]
+                        proj_drop = project_trajectory_to_image(pos_drop, intrinsics_matrix, T_base2cam)
+                        final_obj_coord = apply_padding_scale(proj_drop[0])
+                        for c in final_obj_coord:
+                            if c < 0 or c > 224:
+                                logger.warning(f"Drop coordinate out of bounds for {episode_id}: {final_obj_coord}")
+                                return None
+
+            except Exception as e:
+                logger.warning(f"Failed to project coordinates for {episode_id}: {e}")
+
+        ep_dir = os.path.join(output_dir, f"episode_{episode_id}")
+        os.makedirs(ep_dir, exist_ok=True)
+        
+        np.save(os.path.join(ep_dir, "images.npy"), images)
+        np.save(os.path.join(ep_dir, "poses.npy"), poses)
+        np.save(os.path.join(ep_dir, "twists.npy"), twists)
+        
+        with open(os.path.join(ep_dir, "instruction.txt"), "w") as f:
+            f.write(valid_instruction if valid_instruction else "")
+            
+        return {
+            "episode_id": episode_id,
+            "ep_dir": ep_dir,
+            "first_image": images[0] if len(images) > 0 else np.zeros((224, 224, 3), dtype=np.uint8),
+            "instruction": valid_instruction,
+            "target_serial": target_serial,
+            "horizon": horizon,
+            "trajectory_length_m": trajectory_length_m,
+            "init_obj_coord": init_obj_coord,
+            "final_obj_coord": final_obj_coord
+        }
+
+    except NotFound:
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error on {episode_id}: {e}")
+        return None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+def get_high_concurrency_client(project_id, max_pool):
+    client = storage.Client(project="axis-480014")
+    adapter = adapters.HTTPAdapter(pool_connections=max_pool + 5, pool_maxsize=max_pool + 5)
+    client._http.mount("https://", adapter)
+    client._http.mount("http://", adapter)
+    return client
+
+def process_droid_raw_episodes(
+    bucket_name="gresearch",
+    prefix="robotics/droid_raw/1.0.1/",
+    extrinsics_superset="imitation/data/cam2base_extrinsic_superset.json",
+    extrinsics="imitation/data/cam2base_extrinsics.json",
+    intrinsics="imitation/data/intrinsics.json",
+    camera_serials="imitation/data/camera_serials.json",
+    language_annotations="imitation/data/droid_language_annotations.json",
+    max_workers=8,
+    output_dir="./data_processed/",
+    oracle: GoalOracle | None = None,
+    min_free_space_gb=50.0,
+    test_mode=False
+    ):
+    
+    client = get_high_concurrency_client("axis-480014", max_workers + 10)
+    bucket = client.bucket(bucket_name, user_project="axis-480014")
+    
+    logger.info("Loading metadata files...")
+    with open(extrinsics_superset, "rb") as f: extrinsics_superset_data = json.loads(f.read())
+    with open(extrinsics, "rb") as f: extrinsics_data = json.loads(f.read())
+    with open(intrinsics, "rb") as f: intrinsics_data = json.loads(f.read())
+    with open(camera_serials, "rb") as f: serial_map = json.loads(f.read())
+    with open(language_annotations, "rb") as f: annotations_data = json.loads(f.read())
+
+    RED_FLAG = ["and", "or", "then"]
+
+    logger.info("Scanning for valid episodes...")
+    blobs = client.list_blobs(bucket, prefix=prefix, match_glob="**/*metadata_*.json")
+    valid_blobs = (b for b in blobs if 'success' in b.name)
+
+    logger.info(f"Streaming episodes using ProcessPool (Workers={max_workers})...")
+    all_metadata = []
+    successful_episodes = 0
+    pbar = tqdm(desc="Processed Episodes", unit=" episodes")
+
+    global worker_stop_event
+    manager = multiprocessing.Manager()
+    worker_stop_event = manager.Event()
+
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=init_worker_process,
+        initargs=("axis-480014", bucket_name, worker_stop_event) # Actually pass the event here!
+    ) as executor:
+        
+        futures = {}
+
+        for blob in valid_blobs:
+            filename = blob.name.split('/')[-1]
+            episode_id = filename.replace('metadata_', '').replace('.json', '')
+            
+            # Find instruction
+            instructions = annotations_data.get(episode_id, {})
+            if not instructions.get("language_instruction1"):
+                continue
+                
+            valid_instruction = None
+            for key, instr in instructions.items():
+                clean_instr = instr.lower().replace('.', '').replace(',', '')
+                words = set(clean_instr.split())
+                if any(red_flag in words for red_flag in RED_FLAG):
+                    continue
+                valid_instruction = instr
+                break
+            
+            if not valid_instruction:
+                continue
+
+            # Find camera serial
+            episode_serials = serial_map.get(episode_id, {})
+            target_serial = episode_serials.get("ext1_cam_serial") or episode_serials.get("ext2_cam_serial")
+            if not target_serial:
+                continue
+
+            # Find extrinsics/intrinsics
+            T_base2cam = get_extrinsics(extrinsics_superset_data, extrinsics_data, episode_id, target_serial)
+            if T_base2cam is None:
+                continue
+                
+            intrinsics_matrix = None
+            if target_serial in intrinsics_data:
+                intrinsics_matrix = np.array(intrinsics_data[target_serial]).reshape(3, 3)
+
+
+            future = executor.submit(
+                extract_episode_worker, 
+                blob.name, episode_id, valid_instruction, target_serial, 
+                T_base2cam, intrinsics_matrix, output_dir
+            )
+            futures[future] = episode_id
+
+        for future in concurrent.futures.as_completed(futures):
+            free_space = get_free_space_gb(Path(output_dir))
+            if free_space < min_free_space_gb:
+                logger.warning(f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown...")
+
+                worker_stop_event.set()  
+
+                for f in futures.keys(): 
+                    f.cancel()
+                    
+                break # Exit the as_completed loop
+
+            result = future.result()
+            if result is None:
+                continue
+            
+            episode_id = result["episode_id"]
+            # Run Goal Oracle
+            goal_vector = None
+            if oracle is not None:
+                goal_tensor = oracle.encode_goal(
+                    init_obj_coordinate=result["init_obj_coord"],
+                    final_obj_coordinate=result["final_obj_coord"],
+                    img=result["first_image"], 
+                    instruction=result["instruction"]
+                )
+                if goal_tensor is not None:
+                    goal_vector = goal_tensor.cpu().numpy()
+
+            if goal_vector is None:
+                logger.warning(f"Skipping episode {episode_id}: Goal vector generation failed.")
+                # Rollback: Delete the folder the worker created since the goal failed
+                shutil.rmtree(result["ep_dir"], ignore_errors=True) 
+                pbar.update(1)
+                continue
+                    
+            # Main thread ONLY saves the goal vector! 
+            np.save(os.path.join(result["ep_dir"], "goal.npy"), goal_vector)
+
+            # Compile Metadata
+            all_metadata.append({
+                "episode_id": episode_id,
+                "local_path": result["ep_dir"],
+                "episode_length": result["horizon"],
+                "trajectory_length_m": result["trajectory_length_m"],
+                "instruction": result["instruction"],
+                "camera_serial": result["target_serial"],
+                "has_goal": True
+            })
+            
+            successful_episodes += 1
+            pbar.update(1)
+            pbar.set_postfix({"success": successful_episodes})
+
+            if test_mode:
+                gif_path = os.path.join(result["ep_dir"], "goal_overlay.gif")
+                sample_txt_path = os.path.join(result["ep_dir"], "sample_data.txt")
+                
+                # Load the arrays the worker saved to disk
+                saved_images = np.load(os.path.join(result["ep_dir"], "images.npy"))
+                saved_poses = np.load(os.path.join(result["ep_dir"], "poses.npy"))
+                saved_twists = np.load(os.path.join(result["ep_dir"], "twists.npy"))
+
+                with open(sample_txt_path, "w") as f:
+                    f.write(f"{'='*50}\n")
+                    f.write(f"EPISODE {episode_id} DATA SAMPLE\n")
+                    f.write(f"{'='*50}\n")
+                    f.write(f"First 100 Poses (Array shape: {saved_poses.shape}):\n")
+                    
+                    # Write with suppressed scientific notation for readability
+                    with np.printoptions(precision=4, suppress=True):
+                        f.write(f"{saved_poses[:100]}\n\n")
+                        
+                    f.write(f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n")
+                    with np.printoptions(precision=4, suppress=True):
+                        f.write(f"{saved_twists[:100]}\n")
+                    f.write(f"{'='*50}\n")
+                    
+                logger.info(f"Sample data saved to {sample_txt_path}")
+                generate_test_gif(saved_images, goal_vector, gif_path)
+                
+                if successful_episodes >= 5:
+                    logger.info("Test mode completed 5 episodes. Shutting down workers...")
+
+                    worker_stop_event.set()  
+
+                    for f in futures.keys(): 
+                        f.cancel()
+                        
+                    break # Exit the as_completed loop
+            
+            # Periodic metadata sync to disk
+            if len(all_metadata) % 50 == 0:
+                meta_path = os.path.join(output_dir, "dataset_metadata.json")
+                with open(meta_path, "w") as f:
+                    json.dump(all_metadata, f, indent=4)
+
+    pbar.close()
+
+    total_episodes = len(all_metadata)
+    
+    if total_episodes > 0:
+        total_frames = sum(ep["episode_length"] for ep in all_metadata)
+        avg_length = total_frames / total_episodes
+        total_distance = sum(ep["trajectory_length_m"] for ep in all_metadata)
+        avg_distance_m = total_distance / total_episodes
+        min_length = min(ep["episode_length"] for ep in all_metadata)
+        max_length = max(ep["episode_length"] for ep in all_metadata)
+    else:
+        total_frames = avg_length = min_length = max_length = 0
+
+    dataset_summary = {
+        "dataset_summary": {
+            "total_episodes": total_episodes,
+            "total_frames": total_frames,
+            "avg_episode_length": float(avg_length),
+            "min_episode_length": min_length,
+            "max_episode_length": max_length,
+            "avg_trajectory_length_m": float(avg_distance_m),
+            "reach_limit_m": 0.855,
+            "norm_type": "workspace_linear"
+        },
+        "episodes": all_metadata
+    }
+
+    # Final Meta Save
+    meta_path = os.path.join(output_dir, "dataset_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump(dataset_summary, f, indent=4)
+        
+    logger.info(f"Successfully finished preprocessing! Metadata saved to {meta_path}")
 
 def preprocess_dataset(args):
-    """Stream dataset and save preprocessed episodes to HDF5."""
-
-    tf.get_logger().setLevel("ERROR")
-    tf.config.set_visible_devices([], "GPU")
-
-    # Limit TensorFlow memory usage
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-
-    # Validate output path
+    """Entry point for preprocess_dataset logic adapted to npy saving."""
     output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Output Directory Prepared: {output_path}")
 
-    logging.info(
-        f"Output path: {output_path}\n"
-        f"Dataset: {args.dataset}\n"
-        f"Data dir: {args.data_dir or 'GCS (default)'}\n"
-        f"Image size: {args.image_size}x{args.image_size}\n"
+    oracle = None
+    try:
+        logger.info("Initializing GoalOracle Models in main thread...")
+        oracle = GoalOracle()
+    except Exception as e:
+        logger.warning(f"Could not initialize GoalOracle: {e}")
+
+    # Commence Generator Workflow
+    process_droid_raw_episodes(
+        bucket_name="gresearch",
+        prefix="robotics/droid_raw/1.0.1/",
+        extrinsics_superset="imitation/data/cam2base_extrinsic_superset.json",
+        extrinsics="imitation/data/cam2base_extrinsics.json",
+        intrinsics="imitation/data/intrinsics.json",
+        camera_serials="imitation/data/camera_serials.json",
+        language_annotations="imitation/data/droid_language_annotations.json",
+        max_workers=args.workers,
+        output_dir=str(output_path),
+        oracle=oracle,
+        min_free_space_gb=args.min_free_space_gb,
+        test_mode=args.test
     )
 
-    # Always use 'train' split - train/val splitting is done at load time
-    split = "train"
-
-    # Build dataset with minimal caching/prefetching
-    read_config = tfds.ReadConfig(
-        try_autocache=False,
-        add_tfds_id=False,
-        interleave_cycle_length=1,  # Single stream (network bottleneck)
-        interleave_block_length=1,
-    )
-
-    # GCS paths for Open X-Embodiment datasets (not in standard TFDS registry)
-    gcs_base = args.data_dir if args.data_dir else "gs://gresearch/robotics"
-
-    if args.dataset == "droid":
-        # DROID uses version 1.0.1
-        full_path = f"{gcs_base}/droid/1.0.1"
-        logging.info(f"Loading DROID from: {full_path}")
-        builder = tfds.builder_from_directory(builder_dir=full_path)
-    elif "fractal" in args.dataset:
-        # Fractal uses version 0.1.0
-        full_path = f"{gcs_base}/{args.dataset}/0.1.0"
-        logging.info(f"Loading Fractal from: {full_path}")
-        builder = tfds.builder_from_directory(builder_dir=full_path)
-    else:
-        # Try standard TFDS registry for other datasets
-        builder = tfds.builder(args.dataset, data_dir=args.data_dir, try_gcs=True)
-
-    ds = builder.as_dataset(split=split, shuffle_files=False, read_config=read_config)
-
-    # Get total episodes for progress bar
-    total_episodes = builder.info.splits[split].num_examples
-    if args.max_episodes > 0:
-        total_episodes = min(total_episodes, args.max_episodes)
-
-    logging.info(f"Total episodes to process: {total_episodes}")
-
-    # Image keys to try (in order)
-    fallback_keys = ["exterior_image_1_left", "image", "exterior_image_2_left"]
-    img_keys = [args.image_key] if args.image_key else fallback_keys
-    image_size = (args.image_size, args.image_size)
-
-    # Metadata collection
-    episode_lengths = []
-
-    # Check for resume
-    resume_from = 0
-    skip_count = 0
-    file_mode = "w"
-
-    if output_path.exists() and not args.overwrite:
-        try:
-            with h5py.File(output_path, "r") as existing:
-                # Count existing episodes
-                episode_keys = [k for k in existing.keys() if k.startswith("episode_")]
-                resume_from = len(episode_keys)
-
-                if resume_from > 0:
-                    logging.info(
-                        f"\nResuming from existing file with {resume_from} episodes"
-                    )
-                    # Load existing episode lengths for metadata
-                    for key in sorted(episode_keys):
-                        if "length" in existing[key].attrs:
-                            episode_lengths.append(existing[key].attrs["length"])
-
-                    file_mode = "a"  # Append mode
-                    # We need to skip episodes in the dataset
-                    # Account for skipped short episodes (estimate ~0.5% skip rate from user's run)
-                    skip_count = resume_from + int(resume_from * 0.006)
-                    logging.info(
-                        f"Will skip ~{skip_count} episodes from dataset to resume"
-                    )
-        except Exception as e:
-            logging.error(f"Could not read existing file: {e}")
-            logging.info("Starting fresh...")
-            file_mode = "w"
-            resume_from = 0
-            episode_lengths = []
-
-    # Open HDF5 file
-    with h5py.File(output_path, file_mode) as f:
-        # Store metadata (only on fresh start)
-        if file_mode == "w":
-            f.attrs["dataset"] = args.dataset
-            f.attrs["data_dir"] = args.data_dir or "gcs"
-            f.attrs["image_size"] = args.image_size
-            f.attrs["image_key"] = args.image_key or "auto"
-
-        episode_idx = resume_from
-        skipped = 0
-        ds_episode_idx = 0
-        episodes_with_instruction = 0
-
-        pbar = tqdm(
-            ds, total=total_episodes, desc="Processing episodes", initial=resume_from
-        )
-
-        executor = ThreadPoolExecutor(max_workers=6)
-
-        for episode in pbar:
-            if args.max_episodes > 0 and episode_idx >= args.max_episodes:
-                break
-
-            # Skip already-processed episodes when resuming
-            ds_episode_idx += 1
-            if ds_episode_idx <= skip_count:
-                if ds_episode_idx % 1000 == 0:
-                    pbar.set_description(
-                        f"Skipping to resume point ({ds_episode_idx}/{skip_count})"
-                    )
-                continue
-
-            # Extract episode data
-            raw_imgs = []
-            props = []
-            language_instruction = ""
-
-            raw_step_data = list(episode["steps"])
-
-            for step in raw_step_data:
-                obs = step["observation"]
-
-                # Extract language instruction from first step (with fallback)
-                if not language_instruction and "language_instruction" in step:
-                    instr = step["language_instruction"]
-                    if hasattr(instr, "numpy"):
-                        instr = instr.numpy()
-                    if isinstance(instr, bytes):
-                        instr = instr.decode("utf-8", errors="ignore")
-                    language_instruction = str(instr).strip() if instr else ""
-
-                # Fallback: check observation/natural_language_instruction
-                if not language_instruction and "natural_language_instruction" in obs:
-                    instr = obs["natural_language_instruction"]
-                    if hasattr(instr, "numpy"):
-                        instr = instr.numpy()
-                    if isinstance(instr, bytes):
-                        instr = instr.decode("utf-8", errors="ignore")
-                    language_instruction = str(instr).strip() if instr else ""
-
-                # Find image key
-                img_data = None
-                for key in img_keys:
-                    if key in obs:
-                        img_data = obs[key]
-                        break
-                raw_imgs.append(img_data)
-                props.append(get_pose(obs))
-
-            img_results = list(
-                executor.map(lambda x: process_image(x, image_size), raw_imgs)
-            )
-
-            processed_imgs = [res[0] for res in img_results]
-            original_sizes = [res[1] for res in img_results]
-
-            none_count = sum(1 for x in processed_imgs if x is None)
-            if none_count > 5:
-                skipped += 1
-                pbar.set_postfix_str(f"Skipped: missing {none_count} images")
-                continue
-
-            processed_imgs = [
-                x
-                if x is not None
-                else np.zeros((3, image_size[0], image_size[1]), dtype=np.uint8)
-                for x in processed_imgs
-            ]
-
-            # Extract object properties from language instruction
-            if language_instruction:
-                episodes_with_instruction += 1
-
-            object_props = extract_object_properties(language_instruction)
-            object_props_vec = np.concatenate(
-                [object_props["size"], object_props["color"], object_props["shape"]]
-            ).astype(np.float32)  # (9,)
-
-            # Skip very short episodes
-            if len(processed_imgs) < args.min_episode_length:
-                skipped += 1
-                pbar.set_postfix_str(
-                    f"Skipped: short episode ({len(processed_imgs)}/{args.min_episode_length})"
-                )
-                continue
-
-            # Stack arrays
-            episode_lengths.append(len(processed_imgs))  # Track for metadata
-            imgs = np.array(processed_imgs, dtype=np.uint8)  # (T, 3, H, W)
-            props = np.array(props, dtype=np.float32)  # (T, 13)
-            episode_orig_size = original_sizes[0] if original_sizes else (0, 0)
-
-            # Check disk space before writing (minimum 2GB buffer)
-            free_space = get_free_space_gb(output_path)
-            if free_space < args.min_free_space_gb:
-                logging.warning(f"\n\n{'=' * 60}")
-                logging.warning(
-                    f"WARNING: Disk space low ({free_space:.2f} GB < {args.min_free_space_gb} GB)"
-                )
-                logging.warning("Stopping gracefully to prevent file corruption.")
-                logging.warning(f"{'=' * 60}\n")
-                # Remove the last episode length since we didn't write it
-                episode_lengths.pop()
-                break
-
-            # Try to write episode - catch disk full errors
-            try:
-                # Create episode group
-                ep_group = f.create_group(f"episode_{episode_idx:06d}")
-
-                # Save with compression
-                ep_group.create_dataset(
-                    "images", data=imgs, compression="gzip", compression_opts=4
-                )
-                ep_group.create_dataset(
-                    "proprio", data=props, compression="gzip", compression_opts=4
-                )
-                ep_group.create_dataset(
-                    "object_props", data=object_props_vec
-                )  # (9,) per episode
-                ep_group.attrs["length"] = len(imgs)
-                ep_group.attrs["language_instruction"] = language_instruction
-                ep_group.attrs["has_instruction"] = bool(language_instruction)
-                ep_group.attrs["orig_shape"] = (
-                    episode_orig_size  # Store original size of first frame as representative
-                )
-
-                # Flush to disk periodically to ensure data is saved
-                if episode_idx % 100 == 0:
-                    f.flush()
-
-            except OSError as e:
-                logging.error(f"\n\n{'=' * 60}")
-                logging.error(f"DISK WRITE ERROR: {e}")
-                logging.error("Stopping gracefully to prevent file corruption.")
-                logging.error(f"{'=' * 60}\n")
-                # Remove the last episode length since write failed
-                episode_lengths.pop()
-                # Try to remove the partially written group
-                f.pop(f"episode_{episode_idx:06d}", None)
-                break
-
-            episode_idx += 1
-            pbar.set_postfix(
-                {
-                    "saved": episode_idx,
-                    "skipped": skipped,
-                    "instr": episodes_with_instruction,
-                    "free_gb": f"{free_space:.1f}",
-                }
-            )
-
-            # Aggressive memory cleanup after each episode
-            del imgs, props
-            gc.collect()
-
-            # TF cleanup every 10 episodes to prevent memory buildup
-            if episode_idx % 10 == 0:
-                tf.keras.backend.clear_session()
-                gc.collect()
-
-        # Store comprehensive metadata for training
-        f.attrs["num_episodes"] = episode_idx
-        f.attrs["total_frames"] = int(sum(episode_lengths))
-        f.attrs["avg_episode_length"] = (
-            float(np.mean(episode_lengths)) if episode_lengths else 0.0
-        )
-        f.attrs["min_episode_length"] = (
-            int(min(episode_lengths)) if episode_lengths else 0
-        )
-        f.attrs["max_episode_length"] = (
-            int(max(episode_lengths)) if episode_lengths else 0
-        )
-        f.attrs["reach_limit_m"] = 0.855  # For Franka Panda in DROID
-        f.attrs["norm_type"] = "workspace_linear"
-
-        # Final flush to ensure everything is written
-        f.flush()
-
-    logging.info(f"\nDone! Saved {episode_idx} episodes to {output_path}")
-    logging.info(
-        f"Skipped {skipped} short episodes (< {args.min_episode_length} frames)"
-    )
-    logging.info(
-        f"Episodes with language instruction: {episodes_with_instruction}/{episode_idx}"
-        f" ({episodes_with_instruction / max(1, episode_idx) * 100:.1f}%)"
-    )
-    logging.info(f"Total frames: {sum(episode_lengths):,}")
-    logging.info(f"Avg episode length: {np.mean(episode_lengths):.1f} frames")
-
-    # Print file size
-    size_gb = output_path.stat().st_size / (1024**3)
-    logging.info(f"File size: {size_gb:.2f} GB")
-
+def generate_test_gif(images, goal_vector, output_path):
+    """
+    Overlays Goal Oracle bounding boxes on the episode frames and saves as a GIF.
+    Blue = Initial Position, Red = Target Position.
+    """
+    gif_frames = []
+    
+    # Extract and un-normalize bounding boxes (Goal Oracle normalizes by 224)
+    # Format: [cx, cy, w, h]
+    init_bb = goal_vector[3:7] * 224.0
+    target_bb = goal_vector[7:11] * 224.0
+    
+    def get_rect(bb):
+        cx, cy, w, h = bb
+        return (int(cx - w/2), int(cy - h/2)), (int(cx + w/2), int(cy + h/2))
+        
+    pt1_init, pt2_init = get_rect(init_bb)
+    pt1_target, pt2_target = get_rect(target_bb)
+    
+    for img in images:
+        frame = img.copy()  # Copy so we don't draw on the raw data
+        
+        # Draw Initial BB (Blue in BGR)
+        cv2.rectangle(frame, pt1_init, pt2_init, (255, 0, 0), 2)
+        cv2.putText(frame, "Init", (pt1_init[0], pt1_init[1] - 5), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+        
+        # Draw Target BB (Red in BGR)
+        cv2.rectangle(frame, pt1_target, pt2_target, (0, 0, 255), 2)
+        cv2.putText(frame, "Target", (pt1_target[0], pt1_target[1] - 5), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        
+        # OpenCV reads video in BGR, but imageio expects RGB for GIFs
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        gif_frames.append(frame_rgb)
+        
+    # Save the GIF at 10 Frames Per Second
+    imageio.mimsave(output_path, gif_frames, fps=10)
+    logger.info(f"Test GIF saved to {output_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Preprocess  datasets for local training"
+        description="Preprocess robotics datasets to .npy chunks for local training"
     )
 
-    # Required
     parser.add_argument(
         "--output",
         type=str,
         required=True,
-        help="Output HDF5 file path (e.g., E:/data/droid.h5)",
-    )
-
-    # Dataset source
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="droid",
-        help="Dataset name: droid, fractal20220817_data, etc.",
+        help="Output directory root to save structured processed trajectory files.",
     )
     parser.add_argument(
-        "--data_dir",
-        type=str,
-        default=None,
-        help="TFDS data directory. For Fractal: gs://gresearch/robotics",
-    )
-
-    # Processing options
-    parser.add_argument(
-        "--image_key",
-        type=str,
-        default="exterior_image_1_left",
-        help="Specific image key (e.g., exterior_image_1_left for DROID)",
-    )
-    parser.add_argument(
-        "--image_size",
+        "--workers",
         type=int,
-        default=224,
-        help="Output image size, square (default: 224)",
-    )
-    parser.add_argument(
-        "--min_episode_length",
-        type=int,
-        default=20,
-        help="Skip episodes shorter than this (default: 20)",
-    )
-
-    # Limits
-    parser.add_argument(
-        "--max_episodes",
-        type=int,
-        default=0,
-        help="Maximum episodes to process, 0 = all",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing file instead of resuming",
+        default=8,
+        help="Max workers for multi-thread processing. Keep this balanced to not overload RAM.",
     )
     parser.add_argument(
         "--min_free_space_gb",
         type=float,
-        default=2.0,
-        help="Stop if disk space falls below this (GB, default: 2.0)",
+        default=50.0,
+        help="Minimum free space required (in GB) to continue processing.",
     )
-
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run in test mode to only process a small subset of the dataset.",
+    )
     args = parser.parse_args()
-    preprocess_dataset(args)
+    try:
+        preprocess_dataset(args)
+    except KeyboardInterrupt:
+        # Catch Ctrl+C and gracefully break the loop
+        print()
+        print("\n\n" + "="*60)
+        logger.warning("[!] Keyboard Interrupt (Ctrl+C) detected!")
+        logger.warning("Pipeline halted by user. Exiting immediately...")
+        print("="*60 + "\n")
+    finally:
+        if worker_stop_event is not None:
+            worker_stop_event.set()
+        logger.info("Cleaning up resources and terminating threads...")
+        
+        # NUCLEAR OPTION: Kill any lingering zombie child processes
+        import multiprocessing
+        for child in multiprocessing.active_children():
+            child.terminate()
+            
+        cleanup_orphaned_episodes(args.output)
+        logger.info("Terminating process...")
+        os._exit(0)

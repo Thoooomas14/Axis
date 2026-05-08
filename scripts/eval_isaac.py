@@ -373,7 +373,9 @@ def main():
                 )
 
             if i % 10 == 0:
-                print(f"Confidence Flag: {confidence_flag_model} (Prob: {confidence_prob:.3f})")
+                print(
+                    f"Confidence Flag: {confidence_flag_model} (Prob: {confidence_prob:.3f})"
+                )
 
             if args.ignore_confidence:
                 confidence_flag = False

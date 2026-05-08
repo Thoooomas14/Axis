@@ -178,6 +178,7 @@ def inspect_hdf5(data_path: str, num_episodes: int = 10):
 
         analyze_positions(all_positions, all_grippers, all_position_deltas)
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Inspect data to understand position scales"

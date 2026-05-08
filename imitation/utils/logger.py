@@ -5,7 +5,21 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from torch.utils.tensorboard.writer import SummaryWriter
 import torch
+from tqdm import tqdm
 
+class TqdmLoggingHandler(logging.Handler):
+    """Custom logging handler that routes logs through tqdm.write()"""
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Use tqdm.write instead of standard print/sys.stdout
+            tqdm.write(msg)
+            self.flush()
+        except Exception:
+            self.handleError(record)
 
 class TrainingLogger:
     def __init__(self, log_dir, resume=True):
@@ -61,7 +75,14 @@ class TrainingLogger:
             with open(self.log_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(
-                    ["step", "epoch", "loss", "action_loss", "confidence_loss", "val_loss"]
+                    [
+                        "step",
+                        "epoch",
+                        "loss",
+                        "action_loss",
+                        "confidence_loss",
+                        "val_loss",
+                    ]
                 )
 
         # TensorBoard integration

@@ -169,6 +169,7 @@ def load_episode_local(data_path, episode_idx):
         props[:, 9:12] *= 1000.0  # Scale to mm
         return imgs, props
 
+
 # =========================================================================
 # CORE SIMULATION LOOP
 # =========================================================================
@@ -304,7 +305,7 @@ def run_unified_replay(imgs, props, args):
 
 def main():
     imgs, props = load_episode_local(args.local_data_path, args.episode)
-    
+
     if args.mode == "diagnostic":
         print(f"Proprio Shape: {props.shape}")
         print(f"First Frame Pos: {props[0, 9:12]}")

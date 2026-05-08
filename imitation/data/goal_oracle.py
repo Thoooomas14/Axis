@@ -6,21 +6,24 @@ import numpy as np
 import re
 
 TASK_TYPE = {
-    "open":     [1,0,0],
-    "close":    [0,1,0],
-    "relocate": [0,0,1],
-    "move":     [0,0,1],
-    "put":      [0,0,1],
-    "pick":     [0,0,1],
-    "place":    [0,0,1],
-    "remove":   [0,0,1],
-    "grasp":    [0,0,1],
-    "take":     [0,0,1],
-    "lift":     [0,0,1],
-    "turn":     [0,0,1],
-    "rotate":   [0,0,1],
-    "push":     [0,0,1],
-    "pull":     [0,0,1],
+    "open": [1, 0, 0],
+    "close": [0, 1, 0],
+    "relocate": [0, 0, 1],
+    "move": [0, 0, 1],
+    "put": [0, 0, 1],
+    "pick": [0, 0, 1],
+    "place": [0, 0, 1],
+    "remove": [0, 0, 1],
+    "grasp": [0, 0, 1],
+    "take": [0, 0, 1],
+    "lift": [0, 0, 1],
+    "turn": [0, 0, 1],
+    "rotate": [0, 0, 1],
+    "push": [0, 0, 1],
+    "pull": [0, 0, 1],
+    "stack": [0, 0, 1],
+    "pile": [0, 0, 1],
+    "pour": [0, 0, 1],
 }
 
 RED_FLAG = [
@@ -28,6 +31,8 @@ RED_FLAG = [
     "or",
     "then",
 ]
+
+logger = logging.getLogger(__name__)
 
 class GoalOracle:
     """
@@ -46,13 +51,14 @@ class GoalOracle:
         device = Accelerator().device
         self.device = device
         self.SAM2 = Sam2Model.from_pretrained("facebook/sam2.1-hiera-large").to(device)
-        self.SAM2_processor = Sam2Processor.from_pretrained("facebook/sam2.1-hiera-large")
+        self.SAM2_processor = Sam2Processor.from_pretrained(
+            "facebook/sam2.1-hiera-large"
+        )
         self.SAM3 = Sam3Model.from_pretrained("facebook/sam3").to(device)
         self.SAM3_processor = Sam3Processor.from_pretrained("facebook/sam3")
-        
-        logging.info("GoalOracle initialization complete.")
-        logging.info(f"Initialized GoalOracle on device: {device}")
 
+        logger.info("GoalOracle initialization complete.")
+        logger.info(f"Initialized GoalOracle on device: {device}")
 
     def encode_goal(
         self,
@@ -73,60 +79,111 @@ class GoalOracle:
         Returns:
             (14,) float32 tensor
         """
-        if instruction is not None and any(flag in instruction.lower() for flag in RED_FLAG):
-            return torch.zeros(14, dtype=torch.float32).to(self.device)  # Return zero vector if red flags are present
+        if instruction is not None and any(
+            flag in instruction.lower() for flag in RED_FLAG
+        ):
+            return None
         # Task type encoding (3D)
         task_type_vec = self._encode_task_type(instruction)
 
         if task_type_vec is None:
-            logging.warning(f"No task type keywords found in instruction: '{instruction}'")
+            logger.warning(
+                f"No task type keywords found in instruction: '{instruction}'"
+            )
             return None
         # Object position encoding (8D)
-        init_pos_vec = self._encode_position(task_type_vec, init_obj_coordinate, img, instruction)
+        init_pos_vec = self._encode_position(
+            task_type_vec, init_obj_coordinate, img, instruction
+        )
         if np.array_equal(task_type_vec, np.array([0, 0, 1], dtype=np.float32)):
-            final_pos_vec = self._encode_position(task_type_vec, final_obj_coordinate, img, instruction)
+            final_pos_vec = self._encode_position(
+                task_type_vec, final_obj_coordinate, img, instruction
+            )
         else:
-            final_pos_vec = init_pos_vec  # For relocate tasks, initial and final positions are the same            
+            final_pos_vec = init_pos_vec  # For relocate tasks, initial and final positions are the same
 
         # Object property encoding (3D)
         prop_vec = self._encode_properties(img, init_pos_vec)
 
         # Concatenate all components into a single goal vector
-        if init_pos_vec is None or final_pos_vec is None or prop_vec is None:
-            logging.warning(f"Failed to encode one of the components for instruction: '{instruction}'")
+        if init_pos_vec is None:
+            logger.warning(
+                f"Failed to encode initial position for instruction: '{instruction}'"
+            )
             return None
-        goal_vector = np.concatenate([task_type_vec, init_pos_vec, final_pos_vec, prop_vec])
+        elif task_type_vec is None:
+            logger.warning(
+                f"Failed to encode task type for instruction: '{instruction}'"
+            )
+            return None
+        elif init_pos_vec is None:
+            logger.warning(
+                f"Failed to encode initial position for instruction: '{instruction}'"
+            )
+            return None
+        elif final_pos_vec is None:
+            logger.warning(
+                f"Failed to encode final position for instruction: '{instruction}'"
+            )
+            return None
+        elif prop_vec is None:
+            logger.warning(
+                f"Failed to encode object properties for instruction: '{instruction}'"
+            )
+            return None
+        goal_vector = np.concatenate(
+            [task_type_vec, init_pos_vec / 224, final_pos_vec / 224, prop_vec]
+        )
         return torch.tensor(goal_vector, dtype=torch.float32).to(self.device)
-    
+
     def _encode_task_type(self, instruction: str | None) -> np.ndarray | None:
         if instruction is None:
             return None
-        
+
         instruction = instruction.lower()
         for keyword, vec in TASK_TYPE.items():
-            if re.search(r'\b' + re.escape(keyword) + r'\b', instruction):
+            if re.search(r"\b" + re.escape(keyword) + r"\b", instruction):
                 return np.array(vec, dtype=np.float32)
         return None
-    
-    def _encode_position(self, task_type: np.ndarray, coordinate: np.ndarray | None, image: np.ndarray | None, instruction: str | None) -> np.ndarray | None:
+
+    def _encode_position(
+        self,
+        task_type: np.ndarray,
+        coordinate: np.ndarray | None,
+        image: np.ndarray | None,
+        instruction: str | None,
+    ) -> np.ndarray | None:
+        if image is None:
+            return None
         if np.array_equal(task_type, np.array([0, 0, 1], dtype=np.float32)):
-            coordinate = [[[coordinate]]]
+            if coordinate is None:
+                return None
+            input_points = [[[list(coordinate)]]]
             input_labels = [[[1]]]
-            inputs = self.SAM2_processor(images=image, input_points=coordinate, input_labels=input_labels, return_tensors="pt").to(self.SAM2.device)
+            inputs = self.SAM2_processor(
+                images=image,
+                input_points=input_points,
+                input_labels=input_labels,
+                return_tensors="pt",
+            ).to(self.SAM2.device)
 
             with torch.no_grad():
                 outputs = self.SAM2(**inputs)
-            
-            results = self.SAM2_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
+
+            results = self.SAM2_processor.post_process_masks(
+                outputs.pred_masks.cpu(), inputs["original_sizes"]
+            )[0]
             try:
                 masks = results[0][0].cpu().numpy()
             except IndexError:
-                logging.warning(f"SAM2 failed to find a mask for coordinate: {coordinate}")
+                logger.warning(
+                    f"SAM2 failed to find a mask for coordinate: {coordinate}"
+                )
                 return None
-            
+
         else:
             # for non-relocate tasks use florence to extract position from instruction and image
-            if instruction is None or image is None:
+            if instruction is None:
                 return None
 
             # Clean the instruction to focus only on the object
@@ -134,7 +191,9 @@ class GoalOracle:
             for action in TASK_TYPE.keys():
                 target_desc = target_desc.replace(action, "")
 
-            inputs = self.SAM3_processor(images=image, text=target_desc, return_tensors="pt").to(self.SAM3.device)
+            inputs = self.SAM3_processor(
+                images=image, text=target_desc, return_tensors="pt"
+            ).to(self.SAM3.device)
 
             with torch.no_grad():
                 outputs = self.SAM3(**inputs)
@@ -142,15 +201,16 @@ class GoalOracle:
                 outputs,
                 threshold=0.5,
                 mask_threshold=0.5,
-                target_sizes=inputs.get("original_sizes").tolist()
+                target_sizes=inputs.get("original_sizes").tolist(), # type: ignore
             )[0]
             try:
                 masks = results["masks"][0].cpu().numpy()
             except IndexError:
-                logging.warning(f"SAM3 failed to find a mask for instruction: '{instruction}'")
+                logger.warning(
+                    f"SAM3 failed to find a mask for instruction: '{instruction}'"
+                )
                 return None
 
-        
         # Now np.where will correctly return 2 values: ys and xs
         ys, xs = np.where(masks > 0)
         ys, xs = np.where(masks > 0)
@@ -164,7 +224,9 @@ class GoalOracle:
         height = y_max - y_min
         return np.array([x_center, y_center, width, height], dtype=np.float32)
 
-    def _encode_properties(self, image: np.ndarray | None, bounding_box: np.ndarray | None) -> np.ndarray | None:
+    def _encode_properties(
+        self, image: np.ndarray | None, bounding_box: np.ndarray | None
+    ) -> np.ndarray | None:
         if image is None or bounding_box is None:
             return None
 
@@ -174,17 +236,18 @@ class GoalOracle:
         x, y, W, H = bounding_box
         y1, y2 = int(y), int(y + H)
         x1, x2 = int(x), int(x + W)
-        
+
         crop = image[y1:y2, x1:x2]
-        
+
         # Prevent crash if box is out of bounds
         if crop.size == 0:
             return None
-            
+
         avg_color = crop.mean(axis=(0, 1))
-        
+
         # Normalize to [0, 1] if your previous code expected it
         return (avg_color / 255.0).astype(np.float32)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -193,79 +256,136 @@ if __name__ == "__main__":
     final_coord1 = np.array([98, 150])
     instruction1 = "Move the Green block inside the basket"
     from PIL import Image
-    
+
     # Open the image
-    img1 = Image.open('images/GoalOracleTest1.jpg')
+    img1 = Image.open("images/GoalOracleTest1.jpg")
 
     # Convert to numpy array
     img_array1 = np.array(img1)
-    goal_vector1 = oracle.encode_goal(init_coord1, final_coord1, img=img_array1, instruction=instruction1)
-    logging.info(f"Encoded Goal Vector: {goal_vector1.cpu().numpy()}")
-    logging.info(f"Task Type (One-hot): {goal_vector1[:3].cpu().numpy()}")
-    logging.info(f"Initial Position (x, y, W, H): {goal_vector1[3:7].cpu().numpy()}")
-    logging.info(f"Target Position (x, y, W, H): {goal_vector1[7:11].cpu().numpy()}")
-    logging.info(f"Object Color (R, G, B): {goal_vector1[11:14].cpu().numpy()}")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    # Visualization
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    ax.imshow(img_array1)
-    
-    
-    cx, cy, w, h = goal_vector1[3:7].cpu().numpy()  # Initial position
-    # Convert center-format to top-left for matplotlib
-    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="blue", facecolor='none', label="Initial")
-    ax.add_patch(rect)
-    ax.scatter(cx, cy, color="blue", s=40)
-    cx, cy, w, h = goal_vector1[7:11].cpu().numpy()  # Final position
-    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="red", facecolor='none', label="Final")
-    ax.scatter(cx, cy, color="red", s=40)
-    ax.add_patch(rect)
+    goal_vector1 = oracle.encode_goal(
+        init_coord1, final_coord1, img=img_array1, instruction=instruction1
+    )
+    if goal_vector1 is not None:
+        logging.info(f"Encoded Goal Vector: {goal_vector1.cpu().numpy()}")
+        logging.info(f"Task Type (One-hot): {goal_vector1[:3].cpu().numpy()}")
+        logging.info(f"Initial Position (x, y, W, H): {goal_vector1[3:7].cpu().numpy()}")
+        logging.info(f"Target Position (x, y, W, H): {goal_vector1[7:11].cpu().numpy()}")
+        logging.info(f"Object Color (R, G, B): {goal_vector1[11:14].cpu().numpy()}")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
 
-    #display color
-    r, g, b = goal_vector1[11:14].cpu().numpy()
-    ax.add_patch(patches.Rectangle((0, 0), 50, 50, linewidth=2, edgecolor="black", facecolor=(r, g, b), label="Object Color"))
+        # Visualization
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        ax.imshow(img_array1)
 
-    plt.legend()
-    plt.title(f"Goal Oracle Detection\nInstruction: {instruction1}")
-    plt.show()
+        cx, cy, w, h = goal_vector1[3:7].cpu().numpy()  # Initial position
+        # Convert center-format to top-left for matplotlib
+        rect = patches.Rectangle(
+            (cx - w / 2, cy - h / 2),
+            w,
+            h,
+            linewidth=2,
+            edgecolor="blue",
+            facecolor="none",
+            label="Initial",
+        )
+        ax.add_patch(rect)
+        ax.scatter(cx, cy, color="blue", s=40)
+        cx, cy, w, h = goal_vector1[7:11].cpu().numpy()  # Final position
+        rect = patches.Rectangle(
+            (cx - w / 2, cy - h / 2),
+            w,
+            h,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="none",
+            label="Final",
+        )
+        ax.scatter(cx, cy, color="red", s=40)
+        ax.add_patch(rect)
 
-    #--- Test with Open flag in instruction
+        # display color
+        r, g, b = goal_vector1[11:14].cpu().numpy()
+        ax.add_patch(
+            patches.Rectangle(
+                (0, 0),
+                50,
+                50,
+                linewidth=2,
+                edgecolor="black",
+                facecolor=(r, g, b),
+                label="Object Color",
+            )
+        )
+
+        plt.legend()
+        plt.title(f"Goal Oracle Detection\nInstruction: {instruction1}")
+        plt.show()
+
+    # --- Test with Open flag in instruction
     instruction2 = "Open the bottom white drawer on the left side of the cabinet"
-    
+
     # Open the image
-    img2 = Image.open('images/GoalOracleTest2.jpg')
+    img2 = Image.open("images/GoalOracleTest2.jpg")
     init_coord2 = None
     final_coord2 = None
 
     # Convert to numpy array
     img_array2 = np.array(img2)
-    goal_vector2 = oracle.encode_goal(init_coord2, final_coord2, img=img_array2, instruction=instruction2)
-    logging.info(f"Encoded Goal Vector: {goal_vector2.cpu().numpy()}")
-    logging.info(f"Task Type (One-hot): {goal_vector2[:3].cpu().numpy()}")
-    logging.info(f"Initial Position (x, y, W, H): {goal_vector2[3:7].cpu().numpy()}")
-    logging.info(f"Target Position (x, y, W, H): {goal_vector2[7:11].cpu().numpy()}")
-    logging.info(f"Object Color (R, G, B): {goal_vector2[11:14].cpu().numpy()}")
+    goal_vector2 = oracle.encode_goal(
+        init_coord2, final_coord2, img=img_array2, instruction=instruction2
+    )
+    if goal_vector2 is not None:
+        logging.info(f"Encoded Goal Vector: {goal_vector2.cpu().numpy()}")
+        logging.info(f"Task Type (One-hot): {goal_vector2[:3].cpu().numpy()}")
+        logging.info(f"Initial Position (x, y, W, H): {goal_vector2[3:7].cpu().numpy()}")
+        logging.info(f"Target Position (x, y, W, H): {goal_vector2[7:11].cpu().numpy()}")
+        logging.info(f"Object Color (R, G, B): {goal_vector2[11:14].cpu().numpy()}")
 
-    # Visualization
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    ax.imshow(img_array2)
-    
-    
-    cx, cy, w, h = goal_vector2[3:7].cpu().numpy()  # Initial position
-    # Convert center-format to top-left for matplotlib
-    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="blue", facecolor='none', label="Initial")
-    ax.add_patch(rect)
-    ax.scatter(cx, cy, color="blue", s=40)
-    cx, cy, w, h = goal_vector2[7:11].cpu().numpy()  # Final position
-    rect = patches.Rectangle((cx - w/2, cy - h/2), w, h, linewidth=2, edgecolor="red", facecolor='none', label="Final")
-    ax.scatter(cx, cy, color="red", s=40)
-    ax.add_patch(rect)
+        # Visualization
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        ax.imshow(img_array2)
 
-    #display color
-    r, g, b = goal_vector2[11:14].cpu().numpy()
-    ax.add_patch(patches.Rectangle((0, 0), 50, 50, linewidth=2, edgecolor="black", facecolor=(r, g, b), label="Object Color"))
+        cx, cy, w, h = goal_vector2[3:7].cpu().numpy()  # Initial position
+        # Convert center-format to top-left for matplotlib
+        rect = patches.Rectangle(
+            (cx - w / 2, cy - h / 2),
+            w,
+            h,
+            linewidth=2,
+            edgecolor="blue",
+            facecolor="none",
+            label="Initial",
+        )
+        ax.add_patch(rect)
+        ax.scatter(cx, cy, color="blue", s=40)
+        cx, cy, w, h = goal_vector2[7:11].cpu().numpy()  # Final position
+        rect = patches.Rectangle(
+            (cx - w / 2, cy - h / 2),
+            w,
+            h,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="none",
+            label="Final",
+        )
+        ax.scatter(cx, cy, color="red", s=40)
+        ax.add_patch(rect)
 
-    plt.legend()
-    plt.title(f"Goal Oracle Detection\nInstruction: {instruction2}")
-    plt.show()
+        # display color
+        r, g, b = goal_vector2[11:14].cpu().numpy()
+        ax.add_patch(
+            patches.Rectangle(
+                (0, 0),
+                50,
+                50,
+                linewidth=2,
+                edgecolor="black",
+                facecolor=(r, g, b),
+                label="Object Color",
+            )
+        )
+
+        plt.legend()
+        plt.title(f"Goal Oracle Detection\nInstruction: {instruction2}")
+        plt.show()

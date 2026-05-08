@@ -30,7 +30,6 @@ SHELL ["conda", "run", "-n", "axis_env", "/bin/bash", "-c"]
 
 # Verify installation (Optional but recommended)
 RUN python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-RUN python -c "import tensorflow as tf; print(f'TensorFlow: {tf.__version__}')"
 
 # Copy the rest of the application code
 COPY . .

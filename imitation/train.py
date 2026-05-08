@@ -241,12 +241,12 @@ def train(args):
         split="train",
         split_start=0.0,
         split_end=1.0,
-        mix_episodes=8
+        mix_episodes=8,
     ) -> tuple[torch.utils.data.DataLoader, LocalDataLoader]:
         """Factory function to create/recreate dataloader with specified params."""
 
         # Use local loader if local_data_path is provided
-        
+
         log.info(
             f"Creating LOCAL dataloader: batch_size={batch_size}, "
             f"split=[{split_start:.0%}-{split_end:.0%}], "
@@ -270,7 +270,7 @@ def train(args):
         )
         # Local loader supports multi-worker
         effective_workers = num_workers
-        
+
         loader = torch.utils.data.DataLoader(
             stream,
             batch_size=batch_size,
@@ -625,7 +625,6 @@ def train(args):
                                 # Divide sum by B_full to perfectly replicate .mean() over the whole batch
                                 action_loss = weighted_action_loss.sum() / B_full
 
-
                                 loss_avg_pool.append(action_loss.item())
                                 if len(loss_avg_pool) > LOSS_AVG_WINDOW:
                                     loss_avg_pool.pop(0)
@@ -641,7 +640,9 @@ def train(args):
                                 )
                                 # Scale confidence loss by the ratio of the micro-batch to the full batch
                                 confidence_loss = mb_confidence_loss * (mb_B / B_full)
-                                mb_confidence_loss = confidence_criterion(confidence_pred.float(), confidence_target)
+                                mb_confidence_loss = confidence_criterion(
+                                    confidence_pred.float(), confidence_target
+                                )
                                 # Scale confidence loss by the ratio of the micro-batch to the full batch
                                 confidence_loss = mb_confidence_loss * (mb_B / B_full)
 
@@ -795,8 +796,7 @@ def train(args):
                                             )
 
                                             v_confidence_target = torch.exp(
-                                                -raw_v_a_loss.detach()
-                                                / loss_avg
+                                                -raw_v_a_loss.detach() / loss_avg
                                             ).unsqueeze(-1)
 
                                             v_r_loss = confidence_criterion(

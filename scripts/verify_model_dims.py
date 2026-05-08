@@ -12,7 +12,7 @@ def verify_model():
     print("Verifying Axis Model Dimensions (SE(3) Update)...")
 
     # Config matching new requirements
-    config = "AxisV3" # Ensure this matches the new config in the model definition
+    config = "AxisV3"  # Ensure this matches the new config in the model definition
 
     model = AxisModel(config)
     model.eval()

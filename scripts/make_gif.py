@@ -99,7 +99,7 @@ def make_gif(args):
         torch.cuda.empty_cache()
 
     # --- V3 Configuration ---
-    config = 'AxisV3'
+    config = "AxisV3"
 
     # --- Load Model ---
     model = AxisModel(config).to(device)
@@ -153,7 +153,6 @@ def make_gif(args):
         repeat=False,
         max_episodes=local_max_episodes,
     )
-
 
     iterator = iter(loader)
 
