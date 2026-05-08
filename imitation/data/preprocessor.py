@@ -340,40 +340,24 @@ def extract_episode_worker(
         else:
             trajectory_length_m = 0.0
 
-        gripper_states = poses[:, 12]
-        t_grasp, t_drop = None, None
-
-        # Look for significant gripper movement
-        v_thresh = 0.02
-
-        gripper_velocity = twists[:, 6]
-        g_min, g_max = gripper_states.min(), gripper_states.max()
-
-        # Initialize to None so your downstream code can handle sequences with no grasp/drop
-        t_grasp = None
-        t_drop = None
-
-        if g_max - g_min > 0.1:
-            norm_g = (gripper_states - g_min) / (g_max - g_min)
-
-            is_closing_motion = gripper_velocity < -v_thresh
-            is_opening_motion = gripper_velocity > v_thresh
-
-            actively_closing = is_closing_motion & (norm_g > 0.05)
-            actively_opening = is_opening_motion & (norm_g < 0.95)
-
-            closing_transitions = np.diff(actively_closing.astype(int))
-            opening_transitions = np.diff(actively_opening.astype(int))
-
-            # Note: We add 1 because if np.diff[i] == 1, the actual state change happens at i+1
-            starts_closing = np.where(closing_transitions == 1)[0] + 1
-            starts_opening = np.where(opening_transitions == 1)[0] + 1
-
-            if len(starts_closing) > 0:
-                t_grasp = starts_closing[0]  # The very first time it actively closes
-
-            if len(starts_opening) > 0:
-                t_drop = starts_opening[-1]  # The very last time it actively opens
+        # Use the operator's absolute command signal instead of physical state
+        gripper_commands = twists[:, 6]
+        
+        # Binarize the commands (Threshold at 0.5 to separate intent to close vs open)
+        is_closed = gripper_commands > 0.5
+        
+        # np.diff will find the exact frame where the boolean flips:
+        # 0 -> 1 (Open -> Closed) equals 1
+        # 1 -> 0 (Closed -> Open) equals -1
+        transitions = np.diff(is_closed.astype(int))
+        
+        # The physical state reaches the new intent on the frame AFTER the diff
+        starts_closing = np.where(transitions == 1)[0] + 1
+        starts_opening = np.where(transitions == -1)[0] + 1
+        
+        # Grab the first close and the last open
+        t_grasp = starts_closing[0] if len(starts_closing) > 0 else None
+        t_drop = starts_opening[-1] if len(starts_opening) > 0 else None
 
         init_obj_coord, final_obj_coord = None, None
 
@@ -512,7 +496,6 @@ def process_droid_raw_episodes(
     global worker_stop_event
     manager = multiprocessing.Manager()
     worker_stop_event = manager.Event()
-
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=max_workers,
         initializer=init_worker_process,
@@ -520,175 +503,172 @@ def process_droid_raw_episodes(
             "axis-480014",
             bucket_name,
             worker_stop_event,
-        ),  # Actually pass the event here!
+        ),
     ) as executor:
-        futures = {}
+        
+        active_futures = {}
+        blob_iterator = iter(valid_blobs)
+        is_submitting = True
+        
+        # THE UNIFIED EVENT LOOP: 
+        # Keeps running as long as there are blobs to read OR tasks still processing
+        while is_submitting or active_futures:
+            
+            # 1. THE PRODUCER: Fill the queue up to a healthy limit (e.g., 2x worker count)
+            while is_submitting and len(active_futures) < (max_workers * 2):
+                try:
+                    blob = next(blob_iterator)
+                except StopIteration:
+                    is_submitting = False
+                    break # Reached the end of the GCS blobs
+                    
+                filename = blob.name.split("/")[-1]
+                episode_id = filename.replace("metadata_", "").replace(".json", "")
 
-        for blob in valid_blobs:
-            filename = blob.name.split("/")[-1]
-            episode_id = filename.replace("metadata_", "").replace(".json", "")
-
-            # Find instruction
-            instructions = annotations_data.get(episode_id, {})
-            if not instructions.get("language_instruction1"):
-                continue
-
-            valid_instruction = None
-            for _, instr in instructions.items():
-                clean_instr = instr.lower().replace(".", "").replace(",", "")
-                words = set(clean_instr.split())
-                if any(red_flag in words for red_flag in RED_FLAG):
+                # --- Validation Checks ---
+                instructions = annotations_data.get(episode_id, {})
+                if not instructions.get("language_instruction1"):
                     continue
-                valid_instruction = instr
-                break
 
-            if not valid_instruction:
-                continue
+                valid_instruction = None
+                for _, instr in instructions.items():
+                    clean_instr = instr.lower().replace(".", "").replace(",", "")
+                    words = set(clean_instr.split())
+                    if any(red_flag in words for red_flag in RED_FLAG):
+                        continue
+                    valid_instruction = instr
+                    break
 
-            # Find camera serial
-            episode_serials = serial_map.get(episode_id, {})
-            target_serial = episode_serials.get(
-                "ext1_cam_serial"
-            ) or episode_serials.get("ext2_cam_serial")
-            if not target_serial:
-                continue
+                if not valid_instruction:
+                    continue
 
-            # Find extrinsics/intrinsics
-            T_base2cam = get_extrinsics(
-                extrinsics_superset_data, extrinsics_data, episode_id, target_serial
-            )
-            if T_base2cam is None:
-                continue
+                episode_serials = serial_map.get(episode_id, {})
+                target_serial = episode_serials.get("ext1_cam_serial") or episode_serials.get("ext2_cam_serial")
+                if not target_serial:
+                    continue
 
-            intrinsics_matrix = None
-            if target_serial in intrinsics_data:
-                intrinsics_matrix = np.array(intrinsics_data[target_serial]).reshape(
-                    3, 3
+                T_base2cam = get_extrinsics(extrinsics_superset_data, extrinsics_data, episode_id, target_serial)
+                if T_base2cam is None:
+                    continue
+
+                intrinsics_matrix = None
+                if episode_id in intrinsics_data and target_serial in intrinsics_data[episode_id]:
+                    cam_info = intrinsics_data[episode_id][target_serial]
+                    if "cameraMatrix" in cam_info and len(cam_info["cameraMatrix"]) == 4:
+                        fx, cx, fy, cy = cam_info["cameraMatrix"]
+                        intrinsics_matrix = np.array([
+                            [fx,  0.0, cx],
+                            [0.0, fy,  cy],
+                            [0.0, 0.0, 1.0]
+                        ], dtype=np.float64)
+
+                # Submit to worker
+                future = executor.submit(
+                    extract_episode_worker,
+                    blob.name, episode_id, valid_instruction, target_serial, T_base2cam, intrinsics_matrix, output_dir,
+                )
+                active_futures[future] = episode_id
+
+
+            # 2. THE CONSUMER: Wait for at least one future to finish, then run GoalOracle
+            if active_futures:
+                done, _ = concurrent.futures.wait(
+                    active_futures.keys(),
+                    return_when=concurrent.futures.FIRST_COMPLETED
                 )
 
-            future = executor.submit(
-                extract_episode_worker,
-                blob.name,
-                episode_id,
-                valid_instruction,
-                target_serial,
-                T_base2cam,
-                intrinsics_matrix,
-                output_dir,
-            )
-            futures[future] = episode_id
+                for future in done:
+                    # Pop the finished future from the tracking dictionary
+                    episode_id = active_futures.pop(future)
+                    
+                    free_space = get_free_space_gb(Path(output_dir))
+                    if free_space < min_free_space_gb:
+                        logger.warning(f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown...")
+                        worker_stop_event.set()
+                        for f in active_futures.keys():
+                            f.cancel()
+                        is_submitting = False
+                        active_futures.clear() # Force loop exit
+                        break 
+                        
+                    result = future.result()
+                    if result is None:
+                        continue
+                        
+                    # Run Goal Oracle
+                    goal_vector = None
+                    if oracle is not None:
+                        goal_tensor = oracle.encode_goal(
+                            init_obj_coordinate=result["init_obj_coord"],
+                            final_obj_coordinate=result["final_obj_coord"],
+                            img=result["first_image"],
+                            instruction=result["instruction"],
+                        )
+                        if goal_tensor is not None:
+                            goal_vector = goal_tensor.cpu().numpy()
 
-        for future in concurrent.futures.as_completed(futures):
-            free_space = get_free_space_gb(Path(output_dir))
-            if free_space < min_free_space_gb:
-                logger.warning(
-                    f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown..."
-                )
+                    if goal_vector is None:
+                        logger.warning(f"Skipping episode {episode_id}: Goal vector generation failed.")
+                        shutil.rmtree(result["ep_dir"], ignore_errors=True)
+                        pbar.update(1)
+                        continue
 
-                worker_stop_event.set()
+                    # Main thread saves the goal vector
+                    np.save(os.path.join(result["ep_dir"], "goal.npy"), goal_vector)
 
-                for f in futures.keys():
-                    f.cancel()
+                    # Compile Metadata
+                    all_metadata.append({
+                        "episode_id": episode_id,
+                        "local_path": result["ep_dir"],
+                        "episode_length": result["horizon"],
+                        "trajectory_length_m": result["trajectory_length_m"],
+                        "instruction": result["instruction"],
+                        "camera_serial": result["target_serial"],
+                        "has_goal": True,
+                    })
 
-                break  # Exit the as_completed loop
+                    successful_episodes += 1
+                    pbar.update(1)
+                    pbar.set_postfix({"success": successful_episodes})
 
-            result = future.result()
-            if result is None:
-                continue
+                    if test_mode:
+                        gif_path = os.path.join(result["ep_dir"], "goal_overlay.gif")
+                        sample_txt_path = os.path.join(result["ep_dir"], "sample_data.txt")
 
-            episode_id = result["episode_id"]
-            # Run Goal Oracle
-            goal_vector = None
-            if oracle is not None:
-                goal_tensor = oracle.encode_goal(
-                    init_obj_coordinate=result["init_obj_coord"],
-                    final_obj_coordinate=result["final_obj_coord"],
-                    img=result["first_image"],
-                    instruction=result["instruction"],
-                )
-                if goal_tensor is not None:
-                    goal_vector = goal_tensor.cpu().numpy()
+                        saved_images = np.load(os.path.join(result["ep_dir"], "images.npy"))
+                        saved_poses = np.load(os.path.join(result["ep_dir"], "poses.npy"))
+                        saved_twists = np.load(os.path.join(result["ep_dir"], "twists.npy"))
 
-            if goal_vector is None:
-                logger.warning(
-                    f"Skipping episode {episode_id}: Goal vector generation failed."
-                )
-                # Rollback: Delete the folder the worker created since the goal failed
-                shutil.rmtree(result["ep_dir"], ignore_errors=True)
-                pbar.update(1)
-                continue
+                        with open(sample_txt_path, "w") as f:
+                            f.write(f"{'=' * 50}\nEPISODE {episode_id} DATA SAMPLE\n{'=' * 50}\n")
+                            f.write(f"First 100 Poses (Array shape: {saved_poses.shape}):\n")
+                            with np.printoptions(precision=4, suppress=True):
+                                f.write(f"{saved_poses[:100]}\n\n")
+                            f.write(f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n")
+                            with np.printoptions(precision=4, suppress=True):
+                                f.write(f"{saved_twists[:100]}\n")
+                            f.write(f"{'=' * 50}\n")
 
-            # Main thread ONLY saves the goal vector!
-            np.save(os.path.join(result["ep_dir"], "goal.npy"), goal_vector)
+                        logger.info(f"Sample data saved to {sample_txt_path}")
+                        generate_test_gif(
+                            saved_images, goal_vector, gif_path,
+                            result["init_obj_coord"], result["final_obj_coord"]
+                        )
 
-            # Compile Metadata
-            all_metadata.append(
-                {
-                    "episode_id": episode_id,
-                    "local_path": result["ep_dir"],
-                    "episode_length": result["horizon"],
-                    "trajectory_length_m": result["trajectory_length_m"],
-                    "instruction": result["instruction"],
-                    "camera_serial": result["target_serial"],
-                    "has_goal": True,
-                }
-            )
+                        if successful_episodes >= 5:
+                            logger.info("Test mode completed 5 episodes. Shutting down workers...")
+                            worker_stop_event.set()
+                            for f in active_futures.keys():
+                                f.cancel()
+                            is_submitting = False
+                            active_futures.clear() # Force loop exit
+                            break 
 
-            successful_episodes += 1
-            pbar.update(1)
-            pbar.set_postfix({"success": successful_episodes})
-
-            if test_mode:
-                gif_path = os.path.join(result["ep_dir"], "goal_overlay.gif")
-                sample_txt_path = os.path.join(result["ep_dir"], "sample_data.txt")
-
-                # Load the arrays the worker saved to disk
-                saved_images = np.load(os.path.join(result["ep_dir"], "images.npy"))
-                saved_poses = np.load(os.path.join(result["ep_dir"], "poses.npy"))
-                saved_twists = np.load(os.path.join(result["ep_dir"], "twists.npy"))
-
-                with open(sample_txt_path, "w") as f:
-                    f.write(f"{'=' * 50}\n")
-                    f.write(f"EPISODE {episode_id} DATA SAMPLE\n")
-                    f.write(f"{'=' * 50}\n")
-                    f.write(f"First 100 Poses (Array shape: {saved_poses.shape}):\n")
-
-                    # Write with suppressed scientific notation for readability
-                    with np.printoptions(precision=4, suppress=True):
-                        f.write(f"{saved_poses[:100]}\n\n")
-
-                    f.write(
-                        f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n"
-                    )
-                    with np.printoptions(precision=4, suppress=True):
-                        f.write(f"{saved_twists[:100]}\n")
-                    f.write(f"{'=' * 50}\n")
-
-                logger.info(f"Sample data saved to {sample_txt_path}")
-                generate_test_gif(
-                    saved_images,
-                    goal_vector,
-                    gif_path,
-                    result["init_obj_coord"],
-                    result["final_obj_coord"])
-
-                if successful_episodes >= 5:
-                    logger.info(
-                        "Test mode completed 5 episodes. Shutting down workers..."
-                    )
-
-                    worker_stop_event.set()
-
-                    for f in futures.keys():
-                        f.cancel()
-
-                    break  # Exit the as_completed loop
-
-            # Periodic metadata sync to disk
-            if len(all_metadata) % 50 == 0:
-                meta_path = os.path.join(output_dir, "dataset_metadata.json")
-                with open(meta_path, "w") as f:
-                    json.dump(all_metadata, f, indent=4)
+                    # Periodic metadata sync to disk
+                    if len(all_metadata) % 50 == 0:
+                        meta_path = os.path.join(output_dir, "dataset_metadata.json")
+                        with open(meta_path, "w") as f:
+                            json.dump(all_metadata, f, indent=4)
 
     pbar.close()
 
