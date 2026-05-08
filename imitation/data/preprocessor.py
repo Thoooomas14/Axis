@@ -171,7 +171,7 @@ def get_extrinsics(
     t_cam_to_base[:3, :3] = rot_matrix
     t_cam_to_base[:3, 3] = pos
 
-    return np.linalg.inv(t_cam_to_base) # invert matrix to return base to cam
+    return np.linalg.inv(t_cam_to_base)  # invert matrix to return base to cam
 
 
 def project_trajectory_to_image(
@@ -342,19 +342,19 @@ def extract_episode_worker(
 
         # Use the operator's absolute command signal instead of physical state
         gripper_commands = twists[:, 6]
-        
+
         # Binarize the commands (Threshold at 0.5 to separate intent to close vs open)
         is_closed = gripper_commands > 0.5
-        
+
         # np.diff will find the exact frame where the boolean flips:
         # 0 -> 1 (Open -> Closed) equals 1
         # 1 -> 0 (Closed -> Open) equals -1
         transitions = np.diff(is_closed.astype(int))
-        
+
         # The physical state reaches the new intent on the frame AFTER the diff
         starts_closing = np.where(transitions == 1)[0] + 1
         starts_opening = np.where(transitions == -1)[0] + 1
-        
+
         # Grab the first close and the last open
         t_grasp = starts_closing[0] if len(starts_closing) > 0 else None
         t_drop = starts_opening[-1] if len(starts_opening) > 0 else None
@@ -505,23 +505,21 @@ def process_droid_raw_episodes(
             worker_stop_event,
         ),
     ) as executor:
-        
         active_futures = {}
         blob_iterator = iter(valid_blobs)
         is_submitting = True
-        
-        # THE UNIFIED EVENT LOOP: 
+
+        # THE UNIFIED EVENT LOOP:
         # Keeps running as long as there are blobs to read OR tasks still processing
         while is_submitting or active_futures:
-            
             # 1. THE PRODUCER: Fill the queue up to a healthy limit (e.g., 2x worker count)
             while is_submitting and len(active_futures) < (max_workers * 2):
                 try:
                     blob = next(blob_iterator)
                 except StopIteration:
                     is_submitting = False
-                    break # Reached the end of the GCS blobs
-                    
+                    break  # Reached the end of the GCS blobs
+
                 filename = blob.name.split("/")[-1]
                 episode_id = filename.replace("metadata_", "").replace(".json", "")
 
@@ -543,58 +541,74 @@ def process_droid_raw_episodes(
                     continue
 
                 episode_serials = serial_map.get(episode_id, {})
-                target_serial = episode_serials.get("ext1_cam_serial") or episode_serials.get("ext2_cam_serial")
+                target_serial = episode_serials.get(
+                    "ext1_cam_serial"
+                ) or episode_serials.get("ext2_cam_serial")
                 if not target_serial:
                     continue
 
-                T_base2cam = get_extrinsics(extrinsics_superset_data, extrinsics_data, episode_id, target_serial)
+                T_base2cam = get_extrinsics(
+                    extrinsics_superset_data, extrinsics_data, episode_id, target_serial
+                )
                 if T_base2cam is None:
                     continue
 
                 intrinsics_matrix = None
-                if episode_id in intrinsics_data and target_serial in intrinsics_data[episode_id]:
+                if (
+                    episode_id in intrinsics_data
+                    and target_serial in intrinsics_data[episode_id]
+                ):
                     cam_info = intrinsics_data[episode_id][target_serial]
-                    if "cameraMatrix" in cam_info and len(cam_info["cameraMatrix"]) == 4:
+                    if (
+                        "cameraMatrix" in cam_info
+                        and len(cam_info["cameraMatrix"]) == 4
+                    ):
                         fx, cx, fy, cy = cam_info["cameraMatrix"]
-                        intrinsics_matrix = np.array([
-                            [fx,  0.0, cx],
-                            [0.0, fy,  cy],
-                            [0.0, 0.0, 1.0]
-                        ], dtype=np.float64)
+                        intrinsics_matrix = np.array(
+                            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                            dtype=np.float64,
+                        )
 
                 # Submit to worker
                 future = executor.submit(
                     extract_episode_worker,
-                    blob.name, episode_id, valid_instruction, target_serial, T_base2cam, intrinsics_matrix, output_dir,
+                    blob.name,
+                    episode_id,
+                    valid_instruction,
+                    target_serial,
+                    T_base2cam,
+                    intrinsics_matrix,
+                    output_dir,
                 )
                 active_futures[future] = episode_id
-
 
             # 2. THE CONSUMER: Wait for at least one future to finish, then run GoalOracle
             if active_futures:
                 done, _ = concurrent.futures.wait(
                     active_futures.keys(),
-                    return_when=concurrent.futures.FIRST_COMPLETED
+                    return_when=concurrent.futures.FIRST_COMPLETED,
                 )
 
                 for future in done:
                     # Pop the finished future from the tracking dictionary
                     episode_id = active_futures.pop(future)
-                    
+
                     free_space = get_free_space_gb(Path(output_dir))
                     if free_space < min_free_space_gb:
-                        logger.warning(f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown...")
+                        logger.warning(
+                            f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown..."
+                        )
                         worker_stop_event.set()
                         for f in active_futures.keys():
                             f.cancel()
                         is_submitting = False
-                        active_futures.clear() # Force loop exit
-                        break 
-                        
+                        active_futures.clear()  # Force loop exit
+                        break
+
                     result = future.result()
                     if result is None:
                         continue
-                        
+
                     # Run Goal Oracle
                     goal_vector = None
                     if oracle is not None:
@@ -608,7 +622,9 @@ def process_droid_raw_episodes(
                             goal_vector = goal_tensor.cpu().numpy()
 
                     if goal_vector is None:
-                        logger.warning(f"Skipping episode {episode_id}: Goal vector generation failed.")
+                        logger.warning(
+                            f"Skipping episode {episode_id}: Goal vector generation failed."
+                        )
                         shutil.rmtree(result["ep_dir"], ignore_errors=True)
                         pbar.update(1)
                         continue
@@ -617,15 +633,17 @@ def process_droid_raw_episodes(
                     np.save(os.path.join(result["ep_dir"], "goal.npy"), goal_vector)
 
                     # Compile Metadata
-                    all_metadata.append({
-                        "episode_id": episode_id,
-                        "local_path": result["ep_dir"],
-                        "episode_length": result["horizon"],
-                        "trajectory_length_m": result["trajectory_length_m"],
-                        "instruction": result["instruction"],
-                        "camera_serial": result["target_serial"],
-                        "has_goal": True,
-                    })
+                    all_metadata.append(
+                        {
+                            "episode_id": episode_id,
+                            "local_path": result["ep_dir"],
+                            "episode_length": result["horizon"],
+                            "trajectory_length_m": result["trajectory_length_m"],
+                            "instruction": result["instruction"],
+                            "camera_serial": result["target_serial"],
+                            "has_goal": True,
+                        }
+                    )
 
                     successful_episodes += 1
                     pbar.update(1)
@@ -633,36 +651,55 @@ def process_droid_raw_episodes(
 
                     if test_mode:
                         gif_path = os.path.join(result["ep_dir"], "goal_overlay.gif")
-                        sample_txt_path = os.path.join(result["ep_dir"], "sample_data.txt")
+                        sample_txt_path = os.path.join(
+                            result["ep_dir"], "sample_data.txt"
+                        )
 
-                        saved_images = np.load(os.path.join(result["ep_dir"], "images.npy"))
-                        saved_poses = np.load(os.path.join(result["ep_dir"], "poses.npy"))
-                        saved_twists = np.load(os.path.join(result["ep_dir"], "twists.npy"))
+                        saved_images = np.load(
+                            os.path.join(result["ep_dir"], "images.npy")
+                        )
+                        saved_poses = np.load(
+                            os.path.join(result["ep_dir"], "poses.npy")
+                        )
+                        saved_twists = np.load(
+                            os.path.join(result["ep_dir"], "twists.npy")
+                        )
 
                         with open(sample_txt_path, "w") as f:
-                            f.write(f"{'=' * 50}\nEPISODE {episode_id} DATA SAMPLE\n{'=' * 50}\n")
-                            f.write(f"First 100 Poses (Array shape: {saved_poses.shape}):\n")
+                            f.write(
+                                f"{'=' * 50}\nEPISODE {episode_id} DATA SAMPLE\n{'=' * 50}\n"
+                            )
+                            f.write(
+                                f"First 100 Poses (Array shape: {saved_poses.shape}):\n"
+                            )
                             with np.printoptions(precision=4, suppress=True):
                                 f.write(f"{saved_poses[:100]}\n\n")
-                            f.write(f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n")
+                            f.write(
+                                f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n"
+                            )
                             with np.printoptions(precision=4, suppress=True):
                                 f.write(f"{saved_twists[:100]}\n")
                             f.write(f"{'=' * 50}\n")
 
                         logger.info(f"Sample data saved to {sample_txt_path}")
                         generate_test_gif(
-                            saved_images, goal_vector, gif_path,
-                            result["init_obj_coord"], result["final_obj_coord"]
+                            saved_images,
+                            goal_vector,
+                            gif_path,
+                            result["init_obj_coord"],
+                            result["final_obj_coord"],
                         )
 
                         if successful_episodes >= 5:
-                            logger.info("Test mode completed 5 episodes. Shutting down workers...")
+                            logger.info(
+                                "Test mode completed 5 episodes. Shutting down workers..."
+                            )
                             worker_stop_event.set()
                             for f in active_futures.keys():
                                 f.cancel()
                             is_submitting = False
-                            active_futures.clear() # Force loop exit
-                            break 
+                            active_futures.clear()  # Force loop exit
+                            break
 
                     # Periodic metadata sync to disk
                     if len(all_metadata) % 50 == 0:
@@ -744,10 +781,16 @@ def generate_test_gif(images, goal_vector, output_path, init_coord, final_coord)
     """
     gif_frames = []
 
+    # FIX: Ensure coordinates are integer tuples for OpenCV
     if init_coord is None:
         init_coord = (0, 0)
+    else:
+        init_coord = (int(init_coord[0]), int(init_coord[1]))
+
     if final_coord is None:
         final_coord = (0, 0)
+    else:
+        final_coord = (int(final_coord[0]), int(final_coord[1]))
 
     # Extract and un-normalize bounding boxes (Goal Oracle normalizes by 224)
     # Format: [cx, cy, w, h]
@@ -775,7 +818,8 @@ def generate_test_gif(images, goal_vector, output_path, init_coord, final_coord)
             (255, 0, 0),
             1,
         )
-        cv2.circle(frame, init_coord, 3, (255, 0, 0), -1) #draw ee pose at drop
+        # This will now work successfully
+        cv2.circle(frame, init_coord, 3, (255, 0, 0), -1)
 
         # Draw Target BB (Red in BGR)
         cv2.rectangle(frame, pt1_target, pt2_target, (0, 0, 255), 2)
@@ -789,7 +833,8 @@ def generate_test_gif(images, goal_vector, output_path, init_coord, final_coord)
             1,
         )
 
-        cv2.circle(frame, final_coord, 3, (0, 0, 255), -1) #draw ee pose at drop
+        # This will now work successfully
+        cv2.circle(frame, final_coord, 3, (0, 0, 255), -1)
 
         # OpenCV reads video in BGR, but imageio expects RGB for GIFs
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -834,10 +879,15 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         # Catch Ctrl+C and gracefully break the loop
         print()  # noqa: T201
-        print("\n\n" + "=" * 60) # noqa: T201
+        print("\n\n" + "=" * 60)  # noqa: T201
         logger.warning("[!] Keyboard Interrupt (Ctrl+C) detected!")
         logger.warning("Pipeline halted by user. Exiting immediately...")
-        print("=" * 60 + "\n") # noqa: T201
+        print("=" * 60 + "\n")  # noqa: T201
+    except Exception as e:
+        print()  # noqa: T201
+        print("\n\n" + "=" * 60)  # noqa: T201
+        logger.error(f"ERROR found: {e}")
+        print("=" * 60 + "\n")  # noqa: T201
     finally:
         if worker_stop_event is not None:
             worker_stop_event.set()
