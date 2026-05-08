@@ -56,10 +56,9 @@ If you prefer using `pip` directly (e.g., in a virtualenv):
 
 ## Troubleshooting
 
-### TensorFlow on Windows
-The `tensorflow-io` package can sometimes have compatibility issues on Windows. If you encounter errors related to `tensorflow-io`:
-- Ensure you have the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) installed.
-- If issues persist, you may need to install a specific version compatible with your system or use WSL2 (Windows Subsystem for Linux).
+### Using Windows
+The Repo was designed for training and runing on linux (Ubuntu). Windows is not activly supported so continue at your own risk.
+If possible install Ubuntu 24.04 on WSL2 (Windows Subsystem for Linux).
 
 ### PyTorch CUDA
 The `environment.yml` specifies PyTorch with CUDA 12.1 support (`cu121`). If your driver supports a different version, you may need to modify the installation command or install PyTorch manually from [pytorch.org](https://pytorch.org/get-started/locally/).

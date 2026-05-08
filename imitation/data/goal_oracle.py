@@ -34,6 +34,7 @@ RED_FLAG = [
 
 logger = logging.getLogger(__name__)
 
+
 class GoalOracle:
     """
     Generates standardized 38D goal embeddings for robot manipulation tasks.
@@ -111,22 +112,22 @@ class GoalOracle:
                 f"Failed to encode initial position for instruction: '{instruction}'"
             )
             return None
-        elif task_type_vec is None:
+        if task_type_vec is None:
             logger.warning(
                 f"Failed to encode task type for instruction: '{instruction}'"
             )
             return None
-        elif init_pos_vec is None:
+        if init_pos_vec is None:
             logger.warning(
                 f"Failed to encode initial position for instruction: '{instruction}'"
             )
             return None
-        elif final_pos_vec is None:
+        if final_pos_vec is None:
             logger.warning(
                 f"Failed to encode final position for instruction: '{instruction}'"
             )
             return None
-        elif prop_vec is None:
+        if prop_vec is None:
             logger.warning(
                 f"Failed to encode object properties for instruction: '{instruction}'"
             )
@@ -201,7 +202,7 @@ class GoalOracle:
                 outputs,
                 threshold=0.5,
                 mask_threshold=0.5,
-                target_sizes=inputs.get("original_sizes").tolist(), # type: ignore
+                target_sizes=inputs.get("original_sizes").tolist(),  # type: ignore
             )[0]
             try:
                 masks = results["masks"][0].cpu().numpy()
@@ -268,8 +269,12 @@ if __name__ == "__main__":
     if goal_vector1 is not None:
         logging.info(f"Encoded Goal Vector: {goal_vector1.cpu().numpy()}")
         logging.info(f"Task Type (One-hot): {goal_vector1[:3].cpu().numpy()}")
-        logging.info(f"Initial Position (x, y, W, H): {goal_vector1[3:7].cpu().numpy()}")
-        logging.info(f"Target Position (x, y, W, H): {goal_vector1[7:11].cpu().numpy()}")
+        logging.info(
+            f"Initial Position (x, y, W, H): {goal_vector1[3:7].cpu().numpy()}"
+        )
+        logging.info(
+            f"Target Position (x, y, W, H): {goal_vector1[7:11].cpu().numpy()}"
+        )
         logging.info(f"Object Color (R, G, B): {goal_vector1[11:14].cpu().numpy()}")
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
@@ -338,8 +343,12 @@ if __name__ == "__main__":
     if goal_vector2 is not None:
         logging.info(f"Encoded Goal Vector: {goal_vector2.cpu().numpy()}")
         logging.info(f"Task Type (One-hot): {goal_vector2[:3].cpu().numpy()}")
-        logging.info(f"Initial Position (x, y, W, H): {goal_vector2[3:7].cpu().numpy()}")
-        logging.info(f"Target Position (x, y, W, H): {goal_vector2[7:11].cpu().numpy()}")
+        logging.info(
+            f"Initial Position (x, y, W, H): {goal_vector2[3:7].cpu().numpy()}"
+        )
+        logging.info(
+            f"Target Position (x, y, W, H): {goal_vector2[7:11].cpu().numpy()}"
+        )
         logging.info(f"Object Color (R, G, B): {goal_vector2[11:14].cpu().numpy()}")
 
         # Visualization

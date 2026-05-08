@@ -34,6 +34,7 @@ import logging
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from imitation.utils.logger import TqdmLoggingHandler
+
 # Create a logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -42,12 +43,13 @@ if logger.hasHandlers():
     logger.handlers.clear()
 
 tqdm_handler = TqdmLoggingHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 tqdm_handler.setFormatter(formatter)
 logger.addHandler(tqdm_handler)
 
-from imitation.data.goal_oracle import GoalOracle
-from imitation.data.utils.droid_utils import TrajectoryReader, MP4Reader
+from imitation.data.goal_oracle import GoalOracle  # noqa: E402
+from imitation.data.utils.droid_utils import TrajectoryReader, MP4Reader  # noqa: E402
+
 
 def get_free_space_gb(path: Path) -> float:
     """Get free disk space in GB for the drive containing path."""
@@ -57,14 +59,15 @@ def get_free_space_gb(path: Path) -> float:
     except Exception:
         return float("inf")
 
+
 def cleanup_orphaned_episodes(output_dir):
     """Scans the output directory and deletes any incomplete episodes from previous runs."""
     if not os.path.exists(output_dir):
         return
-        
+
     logger.info("Running cleanup: Scanning for orphaned episodes...")
     orphans_deleted = 0
-    
+
     for item in os.listdir(output_dir):
         ep_path = os.path.join(output_dir, item)
         # Only check directories that look like episode folders
@@ -73,17 +76,19 @@ def cleanup_orphaned_episodes(output_dir):
             if not os.path.exists(os.path.join(ep_path, "goal.npy")):
                 shutil.rmtree(ep_path, ignore_errors=True)
                 orphans_deleted += 1
-                
+
     if orphans_deleted > 0:
         logger.info(f"Cleanup complete: Deleted {orphans_deleted} orphaned episodes.")
     else:
         logger.info("Cleanup complete: No orphaned episodes found.")
 
+
 DEFAULT_GRIPPER = torch.tensor([0.0])
+
 
 def get_pose(obs) -> torch.Tensor:
     if "cartesian_position" in obs:
-        p = obs['cartesian_position']
+        p = obs["cartesian_position"]
         pos = torch.as_tensor(p[:3])
         rotation = pp.euler2SO3(p[3:])
     else:
@@ -92,33 +97,35 @@ def get_pose(obs) -> torch.Tensor:
 
     g = DEFAULT_GRIPPER
     if "gripper_position" in obs:
-        g = torch.as_tensor(obs["gripper_position"]).reshape(-1)[:1] 
+        g = torch.as_tensor(obs["gripper_position"]).reshape(-1)[:1]
 
     rot_flat = rotation.matrix().reshape(-1)
     return torch.cat([rot_flat, pos, g])
 
+
 def get_action(obs) -> np.ndarray:
     """
-    Extracts a flat 7D action array (6D cartesian velocity + 1D gripper) 
+    Extracts a flat 7D action array (6D cartesian velocity + 1D gripper)
     from the raw HDF5 action dictionary.
-    """    
+    """
     if isinstance(obs, dict):
         # Extract cartesian and gripper values (default to zeros if missing)
-        cart = obs.get("cartesian_velocity",np.zeros(6))
+        cart = obs.get("cartesian_velocity", np.zeros(6))
         grip = obs.get("gripper_velocity", np.zeros(1))
-        
+
         # Flatten them
         cart = np.array(cart).flatten()
         grip = np.array(grip).flatten()
-        
+
         # Combine into a single array
         full_action = np.concatenate([cart, grip])
-        
+
         # Pad with zeros if it's too short, or truncate if it's too long to guarantee 7D
         if len(full_action) < 7:
             full_action = np.pad(full_action, (0, 7 - len(full_action)))
         return full_action[:7]
     return np.zeros(7)
+
 
 def process_image(img, target_size=224) -> tuple[np.ndarray | None, tuple[int, int]]:
     if img is None:
@@ -131,17 +138,22 @@ def process_image(img, target_size=224) -> tuple[np.ndarray | None, tuple[int, i
     min_dim = min(w, h)
     pad_w = w - min_dim
     pad_h = h - min_dim
-    top, bottom = pad_h // 2, pad_h - (pad_h // 2) # Ensure exact padding if odd
+    top, bottom = pad_h // 2, pad_h - (pad_h // 2)  # Ensure exact padding if odd
     left, right = pad_w // 2, pad_w - (pad_w // 2)
 
     # FAST OpeCV C++ Implementation
     padded_image = cv2.copyMakeBorder(
         img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(1, 1, 1)
     )
-    
-    return cv2.resize(padded_image, (target_size, target_size), interpolation=cv2.INTER_AREA), (h, w)
 
-def get_extrinsics(extrinsic_superset_data, extrinsic_data, target_episode, target_serial):
+    return cv2.resize(
+        padded_image, (target_size, target_size), interpolation=cv2.INTER_AREA
+    ), (h, w)
+
+
+def get_extrinsics(
+    extrinsic_superset_data, extrinsic_data, target_episode, target_serial
+):
     if target_episode in extrinsic_superset_data:
         episode_data = extrinsic_superset_data[target_episode]
     elif target_episode in extrinsic_data:
@@ -159,20 +171,24 @@ def get_extrinsics(extrinsic_superset_data, extrinsic_data, target_episode, targ
     t_cam_to_base[:3, :3] = rot_matrix
     t_cam_to_base[:3, 3] = pos
 
-    t_base_to_cam = np.linalg.inv(t_cam_to_base)
-    return t_base_to_cam
+    return np.linalg.inv(t_cam_to_base) # invert matrix to return base to cam
 
-def project_trajectory_to_image(ee_positions, intrinsics, extrinsics_base2cam, distortion=None):
+
+def project_trajectory_to_image(
+    ee_positions, intrinsics, extrinsics_base2cam, distortion=None
+):
     """Projects a 3D Base-Frame coordinate into 2D Image Pixel coordinates."""
     ee_positions = np.atleast_2d(ee_positions).astype(np.float64)
     R_matrix = extrinsics_base2cam[:3, :3]
     t_vec = extrinsics_base2cam[:3, 3]
     r_vec, _ = cv2.Rodrigues(R_matrix)
-    
+
     if distortion is None:
         distortion = np.zeros((5, 1), dtype=np.float64)
-        
-    image_points, _ = cv2.projectPoints(ee_positions, r_vec, t_vec, intrinsics, distortion)
+
+    image_points, _ = cv2.projectPoints(
+        ee_positions, r_vec, t_vec, intrinsics, distortion
+    )
     return image_points.reshape(-1, 2)
 
 
@@ -180,42 +196,53 @@ worker_client = None
 worker_bucket = None
 worker_stop_event = None  # Add this global
 
+
 def init_worker_process(project_id, bucket_name, stop_event):
     """Initializes GCS client locally and attaches the stop event."""
     global worker_client, worker_bucket, worker_stop_event
-    
-    worker_stop_event = stop_event  # Store the shared event globally in the child process
-    
+
+    worker_stop_event = (
+        stop_event  # Store the shared event globally in the child process
+    )
+
     from google.cloud import storage
     from requests import adapters
-    
+
     worker_client = storage.Client(project=project_id)
     adapter = adapters.HTTPAdapter(pool_connections=5, pool_maxsize=5)
     worker_client._http.mount("https://", adapter)
     worker_client._http.mount("http://", adapter)
     worker_bucket = worker_client.bucket(bucket_name, user_project=project_id)
 
+
 def extract_episode_worker(
-    blob_name, episode_id, valid_instruction, target_serial, 
-    T_base2cam, intrinsics_matrix, output_dir
+    blob_name,
+    episode_id,
+    valid_instruction,
+    target_serial,
+    T_base2cam,
+    intrinsics_matrix,
+    output_dir,
 ):
     """
     PRODUCER FUNCTION: Downloads data, decodes video, resizes images, and extracts trajectory arrays.
     """
-    global worker_bucket # Use the locally initialized bucket!
-    global worker_stop_event # Use the shared stop event to check for shutdown signals!
+    global worker_bucket  # Use the locally initialized bucket!
+    global worker_stop_event  # Use the shared stop event to check for shutdown signals!
 
     if worker_stop_event is not None and worker_stop_event.is_set():
         return None
-    
+
     temp_dir = tempfile.mkdtemp(dir="/dev/shm")
-    base_directory = blob_name.rsplit('/', 1)[0] + '/'
-    
+    base_directory = blob_name.rsplit("/", 1)[0] + "/"
+
     try:
-        assert worker_bucket is not None, "Worker bucket not initialized!"
+        assert worker_bucket is not None, "Worker bucket not initialized!"  # noqa: S101
         # Download files using the worker's local bucket
         h5_blob = worker_bucket.blob(blob_name=f"{base_directory}trajectory.h5")
-        mp4_blob = worker_bucket.blob(f"{base_directory}recordings/MP4/{target_serial}.mp4")
+        mp4_blob = worker_bucket.blob(
+            f"{base_directory}recordings/MP4/{target_serial}.mp4"
+        )
 
         local_h5_path = os.path.join(temp_dir, f"episode_{episode_id}.h5")
         local_mp4_path = os.path.join(temp_dir, f"episode_{episode_id}.mp4")
@@ -228,13 +255,15 @@ def extract_episode_worker(
         horizon = traj_reader.length()
 
         if horizon is None or horizon <= 0:
-            logger.warning(f"Skipping episode {episode_id}: Invalid horizon length ({horizon})")
+            logger.warning(
+                f"Skipping episode {episode_id}: Invalid horizon length ({horizon})"
+            )
             traj_reader.close()
             return None
-        
+
         mp4_reader = MP4Reader(local_mp4_path, target_serial)
         mp4_reader.set_reading_parameters(image=True, concatenate_images=False)
-        
+
         images = []
         poses = []
         twists = []
@@ -242,23 +271,25 @@ def extract_episode_worker(
 
         for i in range(horizon):
             # POISON PILL CHECK: If main thread says stop, abort immediately.
-            assert worker_stop_event is not None, "Worker stop event not initialized!"
+            assert worker_stop_event is not None, "Worker stop event not initialized!"  # noqa: S101
             if worker_stop_event.is_set():
                 traj_reader.close()
                 mp4_reader.disable_camera()
                 return None
 
             step = traj_reader.read_timestep(index=i)
-            obs = step.get('action', step)
-            
+            obs = step.get("action", step)
+
             # Poses
             pose_tensor = get_pose(obs)
-            poses.append(pose_tensor.numpy() if hasattr(pose_tensor, 'numpy') else pose_tensor)
-            
+            poses.append(
+                pose_tensor.numpy() if hasattr(pose_tensor, "numpy") else pose_tensor
+            )
+
             # Twists/Actions
             action_array = get_action(obs)
             twists.append(action_array)
-            
+
             # Image Frame
             cam_data = mp4_reader.read_camera()
             if cam_data is None or "image" not in cam_data:
@@ -269,7 +300,7 @@ def extract_episode_worker(
                 if orig_shape is None:
                     orig_shape = current_shape
             images.append(img)
-            
+
         traj_reader.close()
         mp4_reader.disable_camera()
 
@@ -279,20 +310,20 @@ def extract_episode_worker(
 
         velocity_eps = 1e-4
         gripper_eps = 1e-3
-        
+
         # Calculate L2 norms of the 6D Cartesian twist for each timestep
         cartesian_norms = np.linalg.norm(twists[:, :6], axis=1)
         gripper_deltas = np.abs(twists[:, 6])
-        
+
         # Create a boolean mask of active frames
         active_mask = (cartesian_norms > velocity_eps) | (gripper_deltas > gripper_eps)
-        
+
         # Find the first index where movement exceeds our thresholds
         if np.any(active_mask):
             start_idx = np.argmax(active_mask)
         else:
             start_idx = 0  # Fallback if the entire episode is mathematically static
-            
+
         # Apply the slice to remove the static prefix
         if start_idx > 0:
             images = images[start_idx:]
@@ -303,7 +334,9 @@ def extract_episode_worker(
         # Calculate trajectory length
         if len(poses) > 1:
             positions = poses[:, 9:12]
-            trajectory_length_m = float(np.sum(np.linalg.norm(np.diff(positions, axis=0), axis=1)))
+            trajectory_length_m = float(
+                np.sum(np.linalg.norm(np.diff(positions, axis=0), axis=1))
+            )
         else:
             trajectory_length_m = 0.0
 
@@ -311,50 +344,82 @@ def extract_episode_worker(
         t_grasp, t_drop = None, None
 
         # Look for significant gripper movement
+        v_thresh = 0.02
+
+        gripper_velocity = twists[:, 6]
         g_min, g_max = gripper_states.min(), gripper_states.max()
-        if g_max - g_min > 0.1: 
+
+        # Initialize to None so your downstream code can handle sequences with no grasp/drop
+        t_grasp = None
+        t_drop = None
+
+        if g_max - g_min > 0.1:
             norm_g = (gripper_states - g_min) / (g_max - g_min)
-            binary_g = (norm_g > 0.5).astype(int)
-            diffs = np.diff(binary_g)
-            transitions = np.where(np.abs(diffs) > 0)[0]
-            if len(transitions) > 0:
-                t_grasp = transitions[0]   
-                t_drop = transitions[-1]   
+
+            is_closing_motion = gripper_velocity < -v_thresh
+            is_opening_motion = gripper_velocity > v_thresh
+
+            actively_closing = is_closing_motion & (norm_g > 0.05)
+            actively_opening = is_opening_motion & (norm_g < 0.95)
+
+            closing_transitions = np.diff(actively_closing.astype(int))
+            opening_transitions = np.diff(actively_opening.astype(int))
+
+            # Note: We add 1 because if np.diff[i] == 1, the actual state change happens at i+1
+            starts_closing = np.where(closing_transitions == 1)[0] + 1
+            starts_opening = np.where(opening_transitions == 1)[0] + 1
+
+            if len(starts_closing) > 0:
+                t_grasp = starts_closing[0]  # The very first time it actively closes
+
+            if len(starts_opening) > 0:
+                t_drop = starts_opening[-1]  # The very last time it actively opens
 
         init_obj_coord, final_obj_coord = None, None
 
         if orig_shape is not None and (t_grasp is not None or t_drop is not None):
             try:
                 if intrinsics_matrix is not None:
+
                     def apply_padding_scale(coord):
                         orig_height, orig_width = orig_shape
                         min_dim = min(orig_height, orig_width)
-                        
+
                         top = (orig_height - min_dim) // 2
                         left = (orig_width - min_dim) // 2
-                        
+
                         padded_x = coord[0] + left
                         padded_y = coord[1] + top
-                        
+
                         scale = 224 / max(orig_height, orig_width)
-                        return np.array([padded_x * scale, padded_y * scale], dtype=np.float32)
+                        return np.array(
+                            [padded_x * scale, padded_y * scale], dtype=np.float32
+                        )
 
                     if t_grasp is not None:
                         pos_grasp = poses[t_grasp, 9:12]
-                        proj_grasp = project_trajectory_to_image(pos_grasp, intrinsics_matrix, T_base2cam)
+                        proj_grasp = project_trajectory_to_image(
+                            pos_grasp, intrinsics_matrix, T_base2cam
+                        )
                         init_obj_coord = apply_padding_scale(proj_grasp[0])
                         for c in init_obj_coord:
                             if c < 0 or c > 224:
-                                logger.warning(f"Grasp coordinate out of bounds for {episode_id}: {init_obj_coord}")
+                                logger.warning(
+                                    f"Grasp coordinate out of bounds for {episode_id}: {init_obj_coord}"
+                                )
                                 return None
 
                     if t_drop is not None:
                         pos_drop = poses[t_drop, 9:12]
-                        proj_drop = project_trajectory_to_image(pos_drop, intrinsics_matrix, T_base2cam)
+                        proj_drop = project_trajectory_to_image(
+                            pos_drop, intrinsics_matrix, T_base2cam
+                        )
                         final_obj_coord = apply_padding_scale(proj_drop[0])
                         for c in final_obj_coord:
                             if c < 0 or c > 224:
-                                logger.warning(f"Drop coordinate out of bounds for {episode_id}: {final_obj_coord}")
+                                logger.warning(
+                                    f"Drop coordinate out of bounds for {episode_id}: {final_obj_coord}"
+                                )
                                 return None
 
             except Exception as e:
@@ -362,24 +427,26 @@ def extract_episode_worker(
 
         ep_dir = os.path.join(output_dir, f"episode_{episode_id}")
         os.makedirs(ep_dir, exist_ok=True)
-        
+
         np.save(os.path.join(ep_dir, "images.npy"), images)
         np.save(os.path.join(ep_dir, "poses.npy"), poses)
         np.save(os.path.join(ep_dir, "twists.npy"), twists)
-        
+
         with open(os.path.join(ep_dir, "instruction.txt"), "w") as f:
             f.write(valid_instruction if valid_instruction else "")
-            
+
         return {
             "episode_id": episode_id,
             "ep_dir": ep_dir,
-            "first_image": images[0] if len(images) > 0 else np.zeros((224, 224, 3), dtype=np.uint8),
+            "first_image": images[0]
+            if len(images) > 0
+            else np.zeros((224, 224, 3), dtype=np.uint8),
             "instruction": valid_instruction,
             "target_serial": target_serial,
             "horizon": horizon,
             "trajectory_length_m": trajectory_length_m,
             "init_obj_coord": init_obj_coord,
-            "final_obj_coord": final_obj_coord
+            "final_obj_coord": final_obj_coord,
         }
 
     except NotFound:
@@ -390,12 +457,16 @@ def extract_episode_worker(
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
 def get_high_concurrency_client(project_id, max_pool):
     client = storage.Client(project="axis-480014")
-    adapter = adapters.HTTPAdapter(pool_connections=max_pool + 5, pool_maxsize=max_pool + 5)
+    adapter = adapters.HTTPAdapter(
+        pool_connections=max_pool + 5, pool_maxsize=max_pool + 5
+    )
     client._http.mount("https://", adapter)
     client._http.mount("http://", adapter)
     return client
+
 
 def process_droid_raw_episodes(
     bucket_name="gresearch",
@@ -409,24 +480,29 @@ def process_droid_raw_episodes(
     output_dir="./data_processed/",
     oracle: GoalOracle | None = None,
     min_free_space_gb=50.0,
-    test_mode=False
-    ):
-    
+    test_mode=False,
+):
+
     client = get_high_concurrency_client("axis-480014", max_workers + 10)
     bucket = client.bucket(bucket_name, user_project="axis-480014")
-    
+
     logger.info("Loading metadata files...")
-    with open(extrinsics_superset, "rb") as f: extrinsics_superset_data = json.loads(f.read())
-    with open(extrinsics, "rb") as f: extrinsics_data = json.loads(f.read())
-    with open(intrinsics, "rb") as f: intrinsics_data = json.loads(f.read())
-    with open(camera_serials, "rb") as f: serial_map = json.loads(f.read())
-    with open(language_annotations, "rb") as f: annotations_data = json.loads(f.read())
+    with open(extrinsics_superset, "rb") as f:
+        extrinsics_superset_data = json.loads(f.read())
+    with open(extrinsics, "rb") as f:
+        extrinsics_data = json.loads(f.read())
+    with open(intrinsics, "rb") as f:
+        intrinsics_data = json.loads(f.read())
+    with open(camera_serials, "rb") as f:
+        serial_map = json.loads(f.read())
+    with open(language_annotations, "rb") as f:
+        annotations_data = json.loads(f.read())
 
     RED_FLAG = ["and", "or", "then"]
 
     logger.info("Scanning for valid episodes...")
     blobs = client.list_blobs(bucket, prefix=prefix, match_glob="**/*metadata_*.json")
-    valid_blobs = (b for b in blobs if 'success' in b.name)
+    valid_blobs = (b for b in blobs if "success" in b.name)
 
     logger.info(f"Streaming episodes using ProcessPool (Workers={max_workers})...")
     all_metadata = []
@@ -440,71 +516,86 @@ def process_droid_raw_episodes(
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=max_workers,
         initializer=init_worker_process,
-        initargs=("axis-480014", bucket_name, worker_stop_event) # Actually pass the event here!
+        initargs=(
+            "axis-480014",
+            bucket_name,
+            worker_stop_event,
+        ),  # Actually pass the event here!
     ) as executor:
-        
         futures = {}
 
         for blob in valid_blobs:
-            filename = blob.name.split('/')[-1]
-            episode_id = filename.replace('metadata_', '').replace('.json', '')
-            
+            filename = blob.name.split("/")[-1]
+            episode_id = filename.replace("metadata_", "").replace(".json", "")
+
             # Find instruction
             instructions = annotations_data.get(episode_id, {})
             if not instructions.get("language_instruction1"):
                 continue
-                
+
             valid_instruction = None
-            for key, instr in instructions.items():
-                clean_instr = instr.lower().replace('.', '').replace(',', '')
+            for _, instr in instructions.items():
+                clean_instr = instr.lower().replace(".", "").replace(",", "")
                 words = set(clean_instr.split())
                 if any(red_flag in words for red_flag in RED_FLAG):
                     continue
                 valid_instruction = instr
                 break
-            
+
             if not valid_instruction:
                 continue
 
             # Find camera serial
             episode_serials = serial_map.get(episode_id, {})
-            target_serial = episode_serials.get("ext1_cam_serial") or episode_serials.get("ext2_cam_serial")
+            target_serial = episode_serials.get(
+                "ext1_cam_serial"
+            ) or episode_serials.get("ext2_cam_serial")
             if not target_serial:
                 continue
 
             # Find extrinsics/intrinsics
-            T_base2cam = get_extrinsics(extrinsics_superset_data, extrinsics_data, episode_id, target_serial)
+            T_base2cam = get_extrinsics(
+                extrinsics_superset_data, extrinsics_data, episode_id, target_serial
+            )
             if T_base2cam is None:
                 continue
-                
+
             intrinsics_matrix = None
             if target_serial in intrinsics_data:
-                intrinsics_matrix = np.array(intrinsics_data[target_serial]).reshape(3, 3)
-
+                intrinsics_matrix = np.array(intrinsics_data[target_serial]).reshape(
+                    3, 3
+                )
 
             future = executor.submit(
-                extract_episode_worker, 
-                blob.name, episode_id, valid_instruction, target_serial, 
-                T_base2cam, intrinsics_matrix, output_dir
+                extract_episode_worker,
+                blob.name,
+                episode_id,
+                valid_instruction,
+                target_serial,
+                T_base2cam,
+                intrinsics_matrix,
+                output_dir,
             )
             futures[future] = episode_id
 
         for future in concurrent.futures.as_completed(futures):
             free_space = get_free_space_gb(Path(output_dir))
             if free_space < min_free_space_gb:
-                logger.warning(f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown...")
+                logger.warning(
+                    f"Free disk space critically low ({free_space:.2f} GB)! Initiating shutdown..."
+                )
 
-                worker_stop_event.set()  
+                worker_stop_event.set()
 
-                for f in futures.keys(): 
+                for f in futures.keys():
                     f.cancel()
-                    
-                break # Exit the as_completed loop
+
+                break  # Exit the as_completed loop
 
             result = future.result()
             if result is None:
                 continue
-            
+
             episode_id = result["episode_id"]
             # Run Goal Oracle
             goal_vector = None
@@ -512,33 +603,37 @@ def process_droid_raw_episodes(
                 goal_tensor = oracle.encode_goal(
                     init_obj_coordinate=result["init_obj_coord"],
                     final_obj_coordinate=result["final_obj_coord"],
-                    img=result["first_image"], 
-                    instruction=result["instruction"]
+                    img=result["first_image"],
+                    instruction=result["instruction"],
                 )
                 if goal_tensor is not None:
                     goal_vector = goal_tensor.cpu().numpy()
 
             if goal_vector is None:
-                logger.warning(f"Skipping episode {episode_id}: Goal vector generation failed.")
+                logger.warning(
+                    f"Skipping episode {episode_id}: Goal vector generation failed."
+                )
                 # Rollback: Delete the folder the worker created since the goal failed
-                shutil.rmtree(result["ep_dir"], ignore_errors=True) 
+                shutil.rmtree(result["ep_dir"], ignore_errors=True)
                 pbar.update(1)
                 continue
-                    
-            # Main thread ONLY saves the goal vector! 
+
+            # Main thread ONLY saves the goal vector!
             np.save(os.path.join(result["ep_dir"], "goal.npy"), goal_vector)
 
             # Compile Metadata
-            all_metadata.append({
-                "episode_id": episode_id,
-                "local_path": result["ep_dir"],
-                "episode_length": result["horizon"],
-                "trajectory_length_m": result["trajectory_length_m"],
-                "instruction": result["instruction"],
-                "camera_serial": result["target_serial"],
-                "has_goal": True
-            })
-            
+            all_metadata.append(
+                {
+                    "episode_id": episode_id,
+                    "local_path": result["ep_dir"],
+                    "episode_length": result["horizon"],
+                    "trajectory_length_m": result["trajectory_length_m"],
+                    "instruction": result["instruction"],
+                    "camera_serial": result["target_serial"],
+                    "has_goal": True,
+                }
+            )
+
             successful_episodes += 1
             pbar.update(1)
             pbar.set_postfix({"success": successful_episodes})
@@ -546,40 +641,49 @@ def process_droid_raw_episodes(
             if test_mode:
                 gif_path = os.path.join(result["ep_dir"], "goal_overlay.gif")
                 sample_txt_path = os.path.join(result["ep_dir"], "sample_data.txt")
-                
+
                 # Load the arrays the worker saved to disk
                 saved_images = np.load(os.path.join(result["ep_dir"], "images.npy"))
                 saved_poses = np.load(os.path.join(result["ep_dir"], "poses.npy"))
                 saved_twists = np.load(os.path.join(result["ep_dir"], "twists.npy"))
 
                 with open(sample_txt_path, "w") as f:
-                    f.write(f"{'='*50}\n")
+                    f.write(f"{'=' * 50}\n")
                     f.write(f"EPISODE {episode_id} DATA SAMPLE\n")
-                    f.write(f"{'='*50}\n")
+                    f.write(f"{'=' * 50}\n")
                     f.write(f"First 100 Poses (Array shape: {saved_poses.shape}):\n")
-                    
+
                     # Write with suppressed scientific notation for readability
                     with np.printoptions(precision=4, suppress=True):
                         f.write(f"{saved_poses[:100]}\n\n")
-                        
-                    f.write(f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n")
+
+                    f.write(
+                        f"First 100 Twists/Actions (Array shape: {saved_twists.shape}):\n"
+                    )
                     with np.printoptions(precision=4, suppress=True):
                         f.write(f"{saved_twists[:100]}\n")
-                    f.write(f"{'='*50}\n")
-                    
+                    f.write(f"{'=' * 50}\n")
+
                 logger.info(f"Sample data saved to {sample_txt_path}")
-                generate_test_gif(saved_images, goal_vector, gif_path)
-                
+                generate_test_gif(
+                    saved_images,
+                    goal_vector,
+                    gif_path,
+                    result["init_obj_coord"],
+                    result["final_obj_coord"])
+
                 if successful_episodes >= 5:
-                    logger.info("Test mode completed 5 episodes. Shutting down workers...")
+                    logger.info(
+                        "Test mode completed 5 episodes. Shutting down workers..."
+                    )
 
-                    worker_stop_event.set()  
+                    worker_stop_event.set()
 
-                    for f in futures.keys(): 
+                    for f in futures.keys():
                         f.cancel()
-                        
-                    break # Exit the as_completed loop
-            
+
+                    break  # Exit the as_completed loop
+
             # Periodic metadata sync to disk
             if len(all_metadata) % 50 == 0:
                 meta_path = os.path.join(output_dir, "dataset_metadata.json")
@@ -589,7 +693,7 @@ def process_droid_raw_episodes(
     pbar.close()
 
     total_episodes = len(all_metadata)
-    
+
     if total_episodes > 0:
         total_frames = sum(ep["episode_length"] for ep in all_metadata)
         avg_length = total_frames / total_episodes
@@ -609,23 +713,24 @@ def process_droid_raw_episodes(
             "max_episode_length": max_length,
             "avg_trajectory_length_m": float(avg_distance_m),
             "reach_limit_m": 0.855,
-            "norm_type": "workspace_linear"
+            "norm_type": "workspace_linear",
         },
-        "episodes": all_metadata
+        "episodes": all_metadata,
     }
 
     # Final Meta Save
     meta_path = os.path.join(output_dir, "dataset_metadata.json")
     with open(meta_path, "w") as f:
         json.dump(dataset_summary, f, indent=4)
-        
+
     logger.info(f"Successfully finished preprocessing! Metadata saved to {meta_path}")
+
 
 def preprocess_dataset(args):
     """Entry point for preprocess_dataset logic adapted to npy saving."""
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info(f"Output Directory Prepared: {output_path}")
 
     oracle = None
@@ -648,48 +753,72 @@ def preprocess_dataset(args):
         output_dir=str(output_path),
         oracle=oracle,
         min_free_space_gb=args.min_free_space_gb,
-        test_mode=args.test
+        test_mode=args.test,
     )
 
-def generate_test_gif(images, goal_vector, output_path):
+
+def generate_test_gif(images, goal_vector, output_path, init_coord, final_coord):
     """
     Overlays Goal Oracle bounding boxes on the episode frames and saves as a GIF.
     Blue = Initial Position, Red = Target Position.
     """
     gif_frames = []
-    
+
+    if init_coord is None:
+        init_coord = (0, 0)
+    if final_coord is None:
+        final_coord = (0, 0)
+
     # Extract and un-normalize bounding boxes (Goal Oracle normalizes by 224)
     # Format: [cx, cy, w, h]
     init_bb = goal_vector[3:7] * 224.0
     target_bb = goal_vector[7:11] * 224.0
-    
+
     def get_rect(bb):
         cx, cy, w, h = bb
-        return (int(cx - w/2), int(cy - h/2)), (int(cx + w/2), int(cy + h/2))
-        
+        return (int(cx - w / 2), int(cy - h / 2)), (int(cx + w / 2), int(cy + h / 2))
+
     pt1_init, pt2_init = get_rect(init_bb)
     pt1_target, pt2_target = get_rect(target_bb)
-    
+
     for img in images:
         frame = img.copy()  # Copy so we don't draw on the raw data
-        
+
         # Draw Initial BB (Blue in BGR)
         cv2.rectangle(frame, pt1_init, pt2_init, (255, 0, 0), 2)
-        cv2.putText(frame, "Init", (pt1_init[0], pt1_init[1] - 5), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-        
+        cv2.putText(
+            frame,
+            "Init",
+            (pt1_init[0], pt1_init[1] - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (255, 0, 0),
+            1,
+        )
+        cv2.circle(frame, init_coord, 3, (255, 0, 0), -1) #draw ee pose at drop
+
         # Draw Target BB (Red in BGR)
         cv2.rectangle(frame, pt1_target, pt2_target, (0, 0, 255), 2)
-        cv2.putText(frame, "Target", (pt1_target[0], pt1_target[1] - 5), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-        
+        cv2.putText(
+            frame,
+            "Target",
+            (pt1_target[0], pt1_target[1] - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (0, 0, 255),
+            1,
+        )
+
+        cv2.circle(frame, final_coord, 3, (0, 0, 255), -1) #draw ee pose at drop
+
         # OpenCV reads video in BGR, but imageio expects RGB for GIFs
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         gif_frames.append(frame_rgb)
-        
+
     # Save the GIF at 10 Frames Per Second
     imageio.mimsave(output_path, gif_frames, fps=10)
     logger.info(f"Test GIF saved to {output_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -724,21 +853,22 @@ if __name__ == "__main__":
         preprocess_dataset(args)
     except KeyboardInterrupt:
         # Catch Ctrl+C and gracefully break the loop
-        print()
-        print("\n\n" + "="*60)
+        print()  # noqa: T201
+        print("\n\n" + "=" * 60) # noqa: T201
         logger.warning("[!] Keyboard Interrupt (Ctrl+C) detected!")
         logger.warning("Pipeline halted by user. Exiting immediately...")
-        print("="*60 + "\n")
+        print("=" * 60 + "\n") # noqa: T201
     finally:
         if worker_stop_event is not None:
             worker_stop_event.set()
         logger.info("Cleaning up resources and terminating threads...")
-        
+
         # NUCLEAR OPTION: Kill any lingering zombie child processes
         import multiprocessing
+
         for child in multiprocessing.active_children():
             child.terminate()
-            
+
         cleanup_orphaned_episodes(args.output)
         logger.info("Terminating process...")
         os._exit(0)

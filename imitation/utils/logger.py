@@ -7,8 +7,10 @@ from torch.utils.tensorboard.writer import SummaryWriter
 import torch
 from tqdm import tqdm
 
+
 class TqdmLoggingHandler(logging.Handler):
     """Custom logging handler that routes logs through tqdm.write()"""
+
     def __init__(self, level=logging.NOTSET):
         super().__init__(level)
 
@@ -20,6 +22,7 @@ class TqdmLoggingHandler(logging.Handler):
             self.flush()
         except Exception:
             self.handleError(record)
+
 
 class TrainingLogger:
     def __init__(self, log_dir, resume=True):

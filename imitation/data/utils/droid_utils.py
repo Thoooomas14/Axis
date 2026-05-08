@@ -12,9 +12,9 @@ from collections import defaultdict
 
 
 camera_type_dict = {
-    'hand_camera_id': 0,
-    'varied_camera_1_id': 1,
-    'varied_camera_2_id': 1,
+    "hand_camera_id": 0,
+    "varied_camera_1_id": 1,
+    "varied_camera_2_id": 1,
 }
 
 camera_type_to_string_dict = {
@@ -35,7 +35,7 @@ def get_camera_type(cam_id):
 # Missing function implementation added to resolve "create_video_file" undefined error
 def create_video_file(byte_contents):
     fd, path = tempfile.mkstemp(suffix=".mp4")
-    with os.fdopen(fd, 'wb') as f:
+    with os.fdopen(fd, "wb") as f:
         if isinstance(byte_contents, h5py.Dataset):
             f.write(byte_contents[()])
         else:
@@ -55,11 +55,11 @@ class MP4Reader:
             raise RuntimeError("Corrupted MP4 File")
 
     def set_reading_parameters(
-            self,
-            image=True,
-            concatenate_images=False,
-            resolution=(0, 0),
-            resize_func=None,
+        self,
+        image=True,
+        concatenate_images=False,
+        resolution=(0, 0),
+        resize_func=None,
     ):
         # Save Parameters #
         self.image = image
@@ -120,8 +120,12 @@ class MP4Reader:
         else:
             single_width = frame.shape[1] // 2
             data_dict["image"] = {
-                self.serial_number + "_left": self._process_frame(frame[:, :single_width, :]),
-                self.serial_number + "_right": self._process_frame(frame[:, single_width:, :]),
+                self.serial_number + "_left": self._process_frame(
+                    frame[:, :single_width, :]
+                ),
+                self.serial_number + "_right": self._process_frame(
+                    frame[:, single_width:, :]
+                ),
             }
 
         return data_dict
@@ -163,7 +167,8 @@ class RecordedMultiCameraWrapper:
         all_cam_ids = list(self.camera_dict.keys())
 
         for cam_id in all_cam_ids:
-            if 'stereo' in cam_id: continue
+            if "stereo" in cam_id:
+                continue
             try:
                 cam_type = camera_type_dict[cam_id]
             except:
@@ -176,7 +181,9 @@ class RecordedMultiCameraWrapper:
             if index is not None:
                 self.camera_dict[cam_id].set_frame_index(index)
 
-            data_dict = self.camera_dict[cam_id].read_camera(correct_timestamp=timestamp)
+            data_dict = self.camera_dict[cam_id].read_camera(
+                correct_timestamp=timestamp
+            )
 
             # Process Returned Data #
             if data_dict is None:
@@ -218,7 +225,9 @@ def load_hdf5_to_dict(hdf5_file, index, keys_to_ignore=[]):
 
         curr_data = hdf5_file[key]
         if isinstance(curr_data, h5py.Group):
-            data_dict[key] = load_hdf5_to_dict(curr_data, index, keys_to_ignore=keys_to_ignore)
+            data_dict[key] = load_hdf5_to_dict(
+                curr_data, index, keys_to_ignore=keys_to_ignore
+            )
         elif isinstance(curr_data, h5py.Dataset):
             data_dict[key] = curr_data[index]
         else:
@@ -251,7 +260,9 @@ class TrajectoryReader:
 
         # Load Low Dimensional Data #
         keys_to_ignore = [*keys_to_ignore.copy(), "videos"]
-        timestep = load_hdf5_to_dict(self._hdf5_file, self._index, keys_to_ignore=keys_to_ignore)
+        timestep = load_hdf5_to_dict(
+            self._hdf5_file, self._index, keys_to_ignore=keys_to_ignore
+        )
 
         # Load High Dimensional Data #
         if self._read_images:
@@ -267,10 +278,10 @@ class TrajectoryReader:
     def _uncompress_images(self):
         # WARNING: THIS FUNCTION HAS NOT BEEN TESTED. UNDEFINED BEHAVIOR FOR FAILED READING. #
         video_folder = self._hdf5_file["observations/videos"]
-        
+
         # Assert type so Pylance knows it's an h5py.Group and fully iterable (fixes Line 260 & 263 errors)
         assert isinstance(video_folder, h5py.Group)
-        
+
         camera_obs = {}
 
         for video_id in video_folder:
@@ -293,7 +304,11 @@ class TrajectoryReader:
 
 def crawler(dirname, filter_func=None):
     subfolders = [f.path for f in os.scandir(dirname) if f.is_dir()]
-    traj_files = [f.path for f in os.scandir(dirname) if (f.is_file() and "trajectory.h5" in f.path)]
+    traj_files = [
+        f.path
+        for f in os.scandir(dirname)
+        if (f.is_file() and "trajectory.h5" in f.path)
+    ]
 
     if len(traj_files):
         # Only Save Desired Data #
@@ -316,13 +331,13 @@ def crawler(dirname, filter_func=None):
 
 
 def load_trajectory(
-        filepath=None,
-        read_cameras=True,
-        recording_folderpath=None,
-        camera_kwargs={},
-        remove_skipped_steps=False,
-        num_samples_per_traj=None,
-        num_samples_per_traj_coeff=1.5,
+    filepath=None,
+    read_cameras=True,
+    recording_folderpath=None,
+    camera_kwargs={},
+    remove_skipped_steps=False,
+    num_samples_per_traj=None,
+    num_samples_per_traj_coeff=1.5,
 ):
     read_hdf5_images = read_cameras and (recording_folderpath is None)
     read_recording_folderpath = read_cameras and (recording_folderpath is not None)
@@ -332,10 +347,10 @@ def load_trajectory(
         camera_reader = RecordedMultiCameraWrapper(recording_folderpath, camera_kwargs)
 
     horizon = traj_reader.length()
-    
+
     # Ensure horizon is interpreted strictly as an int to clear Type Inference errors
     assert horizon is not None, "Horizon length could not be determined"
-    
+
     timestep_list = []
 
     # Choose Timesteps To Save #
@@ -344,7 +359,9 @@ def load_trajectory(
         if remove_skipped_steps:
             num_to_save = int(num_to_save * num_samples_per_traj_coeff)
         max_size = min(num_to_save, horizon)
-        indices_to_save = np.sort(np.random.choice(horizon, size=max_size, replace=False))
+        indices_to_save = np.sort(
+            np.random.choice(horizon, size=max_size, replace=False)
+        )
     else:
         indices_to_save = np.arange(horizon)
 
@@ -357,10 +374,13 @@ def load_trajectory(
         if read_recording_folderpath:
             timestamp_dict = timestep["observation"]["timestamp"]["cameras"]
             camera_type_dict = {
-                k: camera_type_to_string_dict[v] for k, v in timestep["observation"]["camera_type"].items()
+                k: camera_type_to_string_dict[v]
+                for k, v in timestep["observation"]["camera_type"].items()
             }
             camera_obs = camera_reader.read_cameras(
-                index=i, camera_type_dict=camera_type_dict, timestamp_dict=timestamp_dict
+                index=i,
+                camera_type_dict=camera_type_dict,
+                timestamp_dict=timestamp_dict,
             )
             camera_failed = camera_obs is None
 
@@ -371,7 +391,9 @@ def load_trajectory(
                 timestep["observation"].update(camera_obs)
 
         # Filter Steps #
-        step_skipped = not timestep["observation"]["controller_info"].get("movement_enabled", True)
+        step_skipped = not timestep["observation"]["controller_info"].get(
+            "movement_enabled", True
+        )
         delete_skipped_step = step_skipped and remove_skipped_steps
 
         # Save Filtered Timesteps #
@@ -382,8 +404,12 @@ def load_trajectory(
 
     # Remove Extra Transitions #
     timestep_list = np.array(timestep_list)
-    if (num_samples_per_traj is not None) and (len(timestep_list) > num_samples_per_traj):
-        ind_to_keep = np.random.choice(len(timestep_list), size=num_samples_per_traj, replace=False)
+    if (num_samples_per_traj is not None) and (
+        len(timestep_list) > num_samples_per_traj
+    ):
+        ind_to_keep = np.random.choice(
+            len(timestep_list), size=num_samples_per_traj, replace=False
+        )
         timestep_list = timestep_list[ind_to_keep]
 
     # Close Readers #
