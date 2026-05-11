@@ -341,27 +341,30 @@ def extract_episode_worker(
             trajectory_length_m = 0.0
 
         # Use the operator's absolute command signal instead of physical state
-        gripper_commands = twists[:, 6]
-
-        # Binarize the commands (Threshold at 0.5 to separate intent to close vs open)
-        is_closed = gripper_commands > 0.5
-
-        # np.diff will find the exact frame where the boolean flips:
-        # 0 -> 1 (Open -> Closed) equals 1
-        # 1 -> 0 (Closed -> Open) equals -1
-        transitions = np.diff(is_closed.astype(int))
+        gripper_velocities = twists[:, 6]
 
         # The physical state reaches the new intent on the frame AFTER the diff
-        starts_closing = np.where(transitions == 1)[0] + 1
-        starts_opening = np.where(transitions == -1)[0] + 1
+        closing_frames = np.where(gripper_velocities > 0.2)[0]
+        opening_frames = np.where(gripper_velocities < -0.2)[0]
 
-        # Grab the first close and the last open
-        t_grasp = starts_closing[0] if len(starts_closing) > 0 else None
-        t_drop = starts_opening[-1] if len(starts_opening) > 0 else None
+        # Grasp is the first frame where closing movement is detected
+        t_grasp = closing_frames[0] if len(closing_frames) > 0 else None
+
+        # Filter drops to strictly ensure they occur AFTER the grasp
+        valid_drops = [t for t in opening_frames if t_grasp is not None and t > t_grasp]
+
+        if len(valid_drops) > 0:
+            # Grab the last opening action that happened after the grasp
+            t_drop = valid_drops[-1]
+        elif t_grasp is not None:
+            # If the episode ended while the gripper was still closed, use the final frame
+            t_drop = len(poses) - 1
+        else:
+            t_drop = None
 
         init_obj_coord, final_obj_coord = None, None
 
-        def apply_jaw_offset(pose_row, offset_m=0.105):
+        def apply_jaw_offset(pose_row, offset_m=0.155):
             """
             Offsets the EE flange position to the gripper jaws using
             the 3D rotation matrix to ensure accurate 2D projection.
@@ -397,7 +400,7 @@ def extract_episode_worker(
                         )
 
                     if t_grasp is not None:
-                        pos_grasp = apply_jaw_offset(poses[t_grasp], offset_m=0.105)
+                        pos_grasp = apply_jaw_offset(poses[t_grasp], offset_m=0.155)
                         proj_grasp = project_trajectory_to_image(
                             pos_grasp, intrinsics_matrix, T_base2cam
                         )
@@ -410,7 +413,7 @@ def extract_episode_worker(
                                 return None
 
                     if t_drop is not None:
-                        pos_drop = apply_jaw_offset(poses[t_drop], offset_m=0.105)
+                        pos_drop = apply_jaw_offset(poses[t_drop], offset_m=0.155)
                         proj_drop = project_trajectory_to_image(
                             pos_drop, intrinsics_matrix, T_base2cam
                         )
